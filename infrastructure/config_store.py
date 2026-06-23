@@ -97,6 +97,29 @@ class ConfigStore:
         self._config_path = config_path()
         self._load()
 
+    @staticmethod
+    def _apply_env_overrides(data: dict):
+        """Override config values from environment variables (highest priority).
+
+        This allows users to configure API keys via env vars instead of
+        editing config.json — critical for open-source safety.
+        Priority chain:  env var > config.json > built-in defaults.
+        """
+        env_map = {
+            "SAYIT_ALIYUN_API_KEY":            ["aliyun", "api_key"],
+            "SAYIT_VOLCENGINE_ASR_ACCESS_TOKEN": ["volcengine", "asr", "access_token"],
+            "SAYIT_VOLCENGINE_ASR_APP_ID":     ["volcengine", "asr", "app_id"],
+            "SAYIT_VOLCENGINE_AI_API_KEY":     ["volcengine", "ai", "api_key"],
+            "SAYIT_DEEPSEEK_API_KEY":          ["deepseek", "api_key"],
+        }
+        for env_var, keys in env_map.items():
+            val = os.environ.get(env_var)
+            if val:
+                node = data
+                for key in keys[:-1]:
+                    node = node.setdefault(key, {})
+                node[keys[-1]] = val
+
     def _load(self):
         """Load config from JSON file, merging with defaults for missing keys."""
         with self._rw_lock:
@@ -109,6 +132,7 @@ class ConfigStore:
                     self._mtime = os.path.getmtime(self._config_path)
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning("Failed to load config: %s, using defaults", e)
+            self._apply_env_overrides(data)
             self._data = data
 
     def reload_if_changed(self) -> bool:

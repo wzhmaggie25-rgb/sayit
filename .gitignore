@@ -16,6 +16,24 @@ native/context_helper/build/
 .tmp_float_frames/
 sayit-electron-error.log
 
+# Windows reserved device names (can appear from redirection artifacts)
+nul
+NUL
+Nul
+
+# Secrets / credentials (defensive)
+.env
+.env.*
+!.env.example
+*.secret
+*.pem
+*.key
+id_rsa*
+secrets.json
+
+# Diag / debug output
+docs/diag_test_output*
+
 # Build artifacts
 build/
 frontend/release/

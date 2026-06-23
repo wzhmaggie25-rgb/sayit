@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-set "ROOT=D:\Soft\code\sayiy1.1\sayit_cg"
+set "ROOT=%~dp0"
 set "FRONTEND=%ROOT%\frontend"
 set ELECTRON_RUN_AS_NODE=
 

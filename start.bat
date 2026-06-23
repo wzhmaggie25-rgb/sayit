@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 title Sayit
-set "ROOT=d:\Soft\code\sayiy1.1\sayit_cg"
+set "ROOT=%~dp0"
 set ELECTRON_RUN_AS_NODE=
 
 echo ── Sayit Launcher ──
