@@ -78,6 +78,14 @@ class VolcengineASR:
                 self.endpoint,
                 urlparse(self.endpoint).scheme if self.endpoint else "N/A",
                 urlparse(self.endpoint).hostname if self.endpoint else "N/A")
+            # ── [VOLC-AUTH] diagnostic — check if api_key looks like an access_token ──
+            if self.api_key and len(self.api_key) > 20 and "/" not in self.api_key and not self.api_key.startswith("AK"):
+                logger.warning(
+                    "[VOLC-AUTH] X-Api-Key=%r... does not look like a standard Volcengine API key "
+                    "(expected format: 'AK...' or 'key@...'). "
+                    "If you configured volcengine.asr.access_token, note that the v3 WebSocket API "
+                    "requires an IAM API key, not the v1 HTTP access_token.",
+                    self.api_key[:12])
             ws = websocket.create_connection(self.endpoint, header=headers, timeout=30)
             
             # Send full client request

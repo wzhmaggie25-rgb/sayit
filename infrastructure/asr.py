@@ -71,14 +71,20 @@ def _pcm_to_wav(pcm: bytes, prefix: str = "recording", rate: int = 16000,
             prefix, rate, len(pcm),
             len(pcm) / (rate * ch * width) if rate and ch and width else 0,
             width, ch)
-        # ── temp: copy WAV to desktop for 一耳朵 verification ──
+        # ── optional: copy WAV to desktop for manual verification ──
         try:
-            import shutil
-            desktop = os.path.expanduser("~/Desktop/sayit_last.wav")
-            shutil.copy(path, desktop)
-            logger.info("[WAV-CHECK] copied to %s", desktop)
+            from infrastructure.config_store import ConfigStore
+            dump_enabled = ConfigStore().get("audio", "dump_last_wav", True)
         except Exception:
-            pass
+            dump_enabled = True
+        if dump_enabled:
+            try:
+                import shutil
+                desktop = os.path.expanduser("~/Desktop/sayit_last.wav")
+                shutil.copy(path, desktop)
+                logger.info("[WAV-CHECK] copied to %s", desktop)
+            except Exception:
+                pass
     return path
 
 
@@ -499,8 +505,11 @@ class AsrCascade:
         self._onnx_language = config.get("local", {}).get("language", "zh")
         self._onnx_itn = config.get("local", {}).get("itn", True)
 
-        # DashScope — only if API key is configured
+        # DashScope config — used for batch ASR and streaming session context
         a = config.get("aliyun", {})
+        self._streaming_context = a.get("context", "")
+
+        # DashScope ASR — only if API key is configured
         if a.get("api_key", "").strip():
             self._aliyun = DashScopeASR(
                 a.get("api_key", ""),
@@ -565,6 +574,7 @@ class AsrCascade:
                 model=a.get("asr_model", "fun-asr-realtime"),
                 ws_endpoint=a.get("ws_endpoint", "wss://dashscope.aliyuncs.com/api-ws/v1/inference"),
                 vocabulary_id=a.get("vocabulary_id", ""),
+                context=a.get("context", "") or getattr(self, "_streaming_context", ""),
                 language=self._config.get("local", {}).get("language", "zh"),
                 max_sentence_silence=int(streaming_cfg.get("max_sentence_silence", 1300)),
                 event_callback=event_callback,
@@ -594,6 +604,7 @@ class AsrCascade:
         raise RuntimeError(f"All ASR levels failed: {detail}")
 
     def set_hotwords_context(self, context: str):
+        self._streaming_context = context
         if self._aliyun:
             self._aliyun.set_context(context)
         if self._volcengine and hasattr(self._volcengine, "set_context"):

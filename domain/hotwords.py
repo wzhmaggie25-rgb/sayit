@@ -102,7 +102,10 @@ def _replace_cjk_fuzzy(text: str, hotword: str) -> str:
         sub = text[i:i + size]
         if not _has_cjk(sub):
             continue
-        if _char_overlap(sub, hotword) >= 0.8:
+        # Require length diff ≤1 and character overlap ≥0.9 to reduce false matches
+        if abs(len(sub) - len(hotword)) > 1:
+            continue
+        if _char_overlap(sub, hotword) >= 0.9:
             return text[:i] + hotword + text[i + size:]
     return text
 

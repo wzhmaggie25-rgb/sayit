@@ -29,6 +29,7 @@ class AudioCapture:
         self._clip_samples = 0
         self._total_samples = 0
         self._gain_reduced = False  # True if stop() auto-reduced gain
+        self._noise_gate: float = 0.0   # 0 = disabled
 
     def set_gain(self, gain: float):
         self._gain = max(1.0, min(float(gain), MAX_GAIN))
@@ -91,6 +92,16 @@ class AudioCapture:
         else:
             gained = in_data
 
+        # ── Noise gate: replace low-energy frames with silence ──
+        ng = self._noise_gate
+        if ng > 0.0 and len(gained) >= 64:
+            arr2 = array.array("h")
+            arr2.frombytes(gained)
+            sq = sum(arr2[i] * arr2[i] for i in range(len(arr2)))
+            rms = (sq / len(arr2)) ** 0.5 / 32768.0
+            if rms < ng:
+                gained = b"\x00" * len(gained)
+
         self._queue.put(gained)
         chunk_cb = self._chunk_cb
         if chunk_cb is not None:
@@ -113,6 +124,17 @@ class AudioCapture:
         return (None, pyaudio.paContinue)
 
     def start(self):
+        # ── Reset gain to user-configured value on each new recording ──
+        try:
+            from infrastructure.config_store import ConfigStore
+            store = ConfigStore()
+            configured_gain = store.get("audio", "gain_multiplier", 2.0)
+            self._gain = max(1.0, min(float(configured_gain), MAX_GAIN))
+            self._noise_gate = max(0.0, float(store.get("audio", "noise_gate_threshold", 0.015)))
+        except Exception:
+            self._noise_gate = 0.0
+        if self._noise_gate > 0.0:
+            logger.info("AudioCapture: noise_gate=%.4f", self._noise_gate)
         self.reset_clip_stats()
         while not self._queue.empty():
             self._queue.get()
@@ -146,22 +168,13 @@ class AudioCapture:
         while not self._queue.empty():
             chunks.append(self._queue.get())
         pcm = b"".join(chunks)
-        # Auto-reduce gain if clipping exceeded 10%, and persist to config
+        # Auto-reduce gain if clipping exceeded 10% (runtime only, NOT persisted)
         if self.clip_fraction() > 0.10:
             new_gain = max(1.0, self._gain / 2.0)
             logger.warning("AudioCapture: clipping %.1f%%, reducing gain %.1f→%.1f",
                            self.clip_fraction() * 100, self._gain, new_gain)
             self._gain = new_gain
             self._gain_reduced = True
-            # Persist to config so restart doesn't reset to old value
-            try:
-                from infrastructure.config_store import ConfigStore
-                cfg = ConfigStore()
-                cfg.set("audio", "gain_multiplier", new_gain)
-                cfg.save()
-                logger.info("AudioCapture: persisted gain=%.1f to config", new_gain)
-            except Exception:
-                pass
         logger.info("AudioCapture: stopped %d bytes, clip=%.2f%%",
                      len(pcm), self.clip_fraction() * 100)
         return pcm

@@ -132,7 +132,9 @@ def build_providers(config: dict) -> list[AIProvider]:
                     priority=i,
                     extra_params=extra,
                 ))
-        return result
+        if result:
+            return result
+        # Explicit list produced no usable providers — fall through to legacy sections
 
     # Fallback: build from legacy config sections
     a = config.get("aliyun", {})

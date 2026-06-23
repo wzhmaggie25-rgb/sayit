@@ -149,6 +149,19 @@ class RecordingPipeline:
                 self._eb.emit(Events.ASR_PROGRESS, "finalizing", "等待实时识别最终结果", "aliyun_streaming")
                 raw_text = streaming_session.finish(timeout=max(45.0, seconds * 0.35))
                 engine = "aliyun_streaming"
+                # ── Quality gate: if streaming output is too short for the
+                #     recording duration, fall back to batch cascade which has
+                #     hotword context and phrase_id support.
+                text_len = len(raw_text.replace(" ", "").strip())
+                duration = max(seconds, 1)
+                if duration >= 3 and text_len < max(3, int(duration * 1.0)):
+                    logger.warning(
+                        "Pipeline: streaming output too short (%d chars for %ds), "
+                        "falling back to batch cascade", text_len, duration)
+                    self._eb.emit(Events.ASR_DEGRADED, "aliyun_streaming", "cascade",
+                                  f"streaming output too short ({text_len} chars for {duration}s)")
+                    raw_text = ""
+                    engine = ""
             except Exception as e:
                 logger.warning("Streaming ASR failed, falling back to batch cascade: %s", e)
                 self._eb.emit(Events.ASR_DEGRADED, "aliyun_streaming", "cascade", str(e))

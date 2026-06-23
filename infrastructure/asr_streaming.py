@@ -20,6 +20,7 @@ class DashScopeStreamingASRSession:
         sample_rate: int = 16000,
         ws_endpoint: str = "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
         vocabulary_id: str = "",
+        context: str = "",
         language: str = "zh",
         max_sentence_silence: int = 1300,
         event_callback: Optional[Callable[[str, dict], None]] = None,
@@ -29,6 +30,7 @@ class DashScopeStreamingASRSession:
         self.sample_rate = sample_rate
         self.ws_endpoint = ws_endpoint
         self.vocabulary_id = vocabulary_id or ""
+        self.context = context or ""
         self.language = language or "zh"
         self.max_sentence_silence = max_sentence_silence
         self._event_callback = event_callback
@@ -41,6 +43,10 @@ class DashScopeStreamingASRSession:
         self._closed = False
         self._worker: Optional[threading.Thread] = None
         self._recognition = None
+
+    def set_context(self, context: str):
+        """Update Layer 1 ASR hotword context at runtime."""
+        self.context = context or ""
 
     def _emit(self, kind: str, **payload):
         if self._event_callback:
@@ -102,6 +108,7 @@ class DashScopeStreamingASRSession:
             language_hints=[self.language] if self.language else None,
             max_sentence_silence=self.max_sentence_silence,
             heartbeat=True,
+            context=self.context or None,
             callback=_Callback(),
         )
         kwargs = {}
@@ -111,7 +118,7 @@ class DashScopeStreamingASRSession:
         self._started = True
         self._worker = threading.Thread(target=self._send_loop, name="dashscope-streaming-asr", daemon=True)
         self._worker.start()
-        logger.info("[ASR-STREAM] started model=%s vocabulary_id=%r", self.model, self.vocabulary_id)
+        logger.info("[ASR-STREAM] started model=%s vocabulary_id=%r context=%r", self.model, self.vocabulary_id, self.context[:80] if self.context else "")
 
     def enqueue_audio(self, pcm_chunk: bytes):
         if not self._started or self._closed or not pcm_chunk:

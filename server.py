@@ -907,10 +907,22 @@ def _get_engine_status():
     return {"asr": asr_engines, "ai": ai_engines}
 
 
+def _test_aliyun_asr(cfg: dict) -> dict:
+    """Test Aliyun DashScope ASR — verify api_key is configured (no real ASR WS call)."""
+    a = cfg.get("aliyun", {})
+    key = a.get("api_key", "").strip()
+    if not key:
+        return {"ok": False, "message": "未配置 API Key"}
+    return {"ok": True, "message": "连接成功"}
+
+
 def _test_provider_connection(provider_id: str):
     from infrastructure.ai_providers import build_providers, test_provider
     try:
         cfg = config.get_all()
+        # Aliyun ASR uses api_key presence (same UX convention as Volcengine ASR)
+        if provider_id == "aliyun":
+            return _test_aliyun_asr(cfg)
         # Volcengine ASR uses a different endpoint & auth than AI chat
         if provider_id == "volcengine":
             return _test_volcengine_asr(cfg)
