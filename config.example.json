@@ -1,0 +1,86 @@
+{
+  "update": {
+    "github": {
+      "owner": "wzhmaggie25-rgb",
+      "repo": "sayit-release",
+      "version_asset": "version.json",
+      "exe_asset": "sayit.zip"
+    },
+    "channel": "stable",
+    "auto_check": true
+  },
+  "float_window_enabled": false,
+  "injection_mode": "auto",
+  "hotkey": "RAlt",
+  "history_retention": {
+    "max_count": 1000,
+    "max_days": 90
+  },
+  "audio": {
+    "channels": 1,
+    "format": "pcm_s16le",
+    "gain_enabled": true,
+    "gain_multiplier": 2.0
+  },
+  "asr_engine": "aliyun",
+  "asr_fallback": {
+    "enable": true,
+    "order": [
+      "aliyun",
+      "volcengine",
+      "onnx"
+    ],
+    "onnx_model_dir": ""
+  },
+  "local": {
+    "language": "zh",
+    "itn": true
+  },
+  "aliyun": {
+    "api_key": "",
+    "endpoint": "https://dashscope.aliyuncs.com/api/v1",
+    "ws_endpoint": "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
+    "asr_model": "fun-asr-realtime",
+    "correction_model": "qwen-flash",
+    "context": "",
+    "vocabulary_id": "",
+    "vocabulary_prefix": "sayithot",
+    "vocabulary_target_model": "fun-asr-realtime"
+  },
+  "volcengine": {
+    "asr": {
+      "app_id": "",
+      "access_token": "",
+      "cluster": "",
+      "resource_id": "volc.seedasr.sauc.duration",
+      "endpoint": "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
+    },
+    "ai": {
+      "endpoint": "https://ark.cn-beijing.volces.com/api/v3",
+      "api_key": "",
+      "correction_model": "doubao-seed-2-0-mini-260428"
+    }
+  },
+  "deepseek": {
+    "api_key": "",
+    "correction_model": "deepseek-v4-flash"
+  },
+  "enable_correction": true,
+  "enable_structuring": true,
+  "organize_level": "light",
+  "remove_trailing_period": false,
+  "correction_prompt": "",
+  "structuring_prompt": "",
+  "system_prompt": "",
+  "text_postprocess": {
+    "punctuation": true,
+    "formatting": false,
+    "style": "light"
+  },
+  "silent_learning": true,
+  "ai_providers": [],
+  "onboarding": {
+    "version": 1,
+    "completed": false
+  }
+}
