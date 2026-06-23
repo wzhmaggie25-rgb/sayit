@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sayit · 历史记录</title>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; height: 100%; }
+    body {
+      margin: 0; height: 100%;
+      background: var(--bg);
+      font-family: var(--font-body); font-size: 14px; line-height: 1.55;
+      color: var(--fg); -webkit-font-smoothing: antialiased;
+    }
+
+    .window {
+      width: 100%; height: 100%;
+      background: var(--bg);
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+      height: 48px; padding: 0 20px;
+      background: var(--bg); flex-shrink: 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .header-title { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--fg); }
+
+    .btn-icon {
+      width: 32px; height: 32px; display: grid; place-items: center;
+      border: none; background: transparent; color: var(--muted);
+      border-radius: 8px; cursor: pointer;
+      transition: all var(--motion-fast) var(--ease-standard);
+    }
+    .btn-icon:hover { background: var(--fg-soft); color: var(--fg); }
+    .btn-icon svg { width: 17px; height: 17px; }
+
+    /* ─── search ──────────────────────────────────────────────────── */
+    .search-bar {
+      padding: 12px 20px; flex-shrink: 0;
+    }
+    .search-wrap {
+      display: flex; align-items: center;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 0 12px;
+      transition: border-color var(--motion-fast) var(--ease-standard);
+    }
+    .search-wrap:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px oklch(56% 0.17 255 / 0.15); }
+    .search-wrap svg { width: 15px; height: 15px; color: var(--muted); flex-shrink: 0; }
+    .search-wrap input {
+      flex: 1; border: none; background: transparent; padding: 8px 10px;
+      font-size: 13px; color: var(--fg); font-family: var(--font-body); outline: none;
+    }
+    .search-wrap input::placeholder { color: var(--muted); }
+    .search-count { font-size: 12px; color: var(--muted); font-family: var(--font-mono); padding-left: 8px; }
+
+    /* ─── list ────────────────────────────────────────────────────── */
+    .list { flex: 1; overflow-y: auto; padding: 0 20px 12px; }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: 16px 18px; margin-bottom: 8px;
+      cursor: pointer; transition: all var(--motion-fast) var(--ease-standard);
+    }
+    .card:hover { border-color: var(--accent); box-shadow: 0 2px 10px oklch(0% 0 0 / 0.03); }
+    .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .card-date { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+    .card-meta { display: flex; align-items: center; gap: 8px; }
+    .card-dur { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+    .card-lang { font-size: 10.5px; color: var(--muted); padding: 2px 8px; background: var(--fg-soft); border-radius: var(--radius-pill); }
+    .card-text { font-size: 13px; color: var(--fg); line-height: 1.65; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .card-actions { display: flex; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+    .btn-sm {
+      display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px;
+      border-radius: 6px; border: 1px solid var(--border); background: transparent;
+      color: var(--muted); font-size: 11px; font-weight: 500; cursor: pointer;
+      font-family: var(--font-body); transition: all var(--motion-fast) var(--ease-standard);
+    }
+    .btn-sm:hover { color: var(--fg); border-color: var(--fg); }
+    .btn-sm.danger:hover { color: var(--danger); border-color: var(--danger); }
+    .btn-sm svg { width: 12px; height: 12px; }
+
+    .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; text-align: center; }
+    .empty svg { width: 44px; height: 44px; color: var(--muted); margin-bottom: 14px; opacity: 0.3; }
+    .empty h3 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+    .empty p { font-size: 12px; color: var(--muted); margin: 0; }
+
+    /* ─── detail ──────────────────────────────────────────────────── */
+    .overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 50; background: oklch(0% 0 0 / 0.2); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+    .panel { background: var(--surface); border-radius: var(--radius-lg); border: 1px solid var(--border); width: 500px; max-height: 440px; display: flex; flex-direction: column; box-shadow: 0 12px 40px oklch(0% 0 0 / 0.12); overflow: hidden; }
+    .panel-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px; }
+    .panel-close { width: 28px; height: 28px; display: grid; place-items: center; border: none; background: transparent; color: var(--muted); border-radius: 6px; cursor: pointer; font-size: 15px; transition: all var(--motion-fast) var(--ease-standard); }
+    .panel-close:hover { background: var(--fg-soft); color: var(--fg); }
+    .panel-body { flex: 1; overflow-y: auto; padding: 20px; font-size: 14px; line-height: 1.75; color: var(--fg); }
+    .panel-edit-area { width: 100%; min-height: 200px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 14px; font-family: var(--font-body); line-height: 1.75; color: var(--fg); background: var(--bg); resize: vertical; outline: none; }
+    .panel-edit-area:focus { border-color: var(--accent); box-shadow: 0 0 0 3px oklch(56% 0.17 255 / 0.15); }
+    .panel-actions { display: flex; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--border); justify-content: flex-end; }
+    .btn-accent { display: inline-flex; align-items: center; gap: 4px; padding: 7px 16px; border-radius: var(--radius-sm); border: none; background: var(--accent); color: var(--accent-on); font-size: 12.5px; font-weight: 500; cursor: pointer; font-family: var(--font-body); transition: all var(--motion-fast) var(--ease-standard); }
+    .btn-accent:hover { background: var(--accent-hover); }
+
+    /* ─── bottom nav ──────────────────────────────────────────────── */
+    /* ─── retention & privacy ──────────────────────────────────────── */
+    .retention-bar {
+      display: flex; align-items: center; padding: 0 20px 10px; gap: 12px; flex-shrink: 0;
+      border-bottom: 1px solid var(--border); margin: 0 0 4px;
+    }
+    .retention-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .retention-select {
+      padding: 3px 6px; font-size: 11px; border: 1px solid var(--border); border-radius: 5px;
+      background: var(--surface); color: var(--fg); font-family: var(--font-body); cursor: pointer;
+      outline: none; transition: border-color var(--motion-fast) var(--ease-standard);
+    }
+    .retention-select:focus { border-color: var(--accent); }
+    .privacy-note {
+      display: flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--muted);
+      margin-left: auto; white-space: nowrap;
+    }
+    .privacy-note svg { width: 11px; height: 11px; flex-shrink: 0; }
+
+    .bottom-nav {
+      display: flex; align-items: center; justify-content: center; gap: 32px;
+      height: 48px; border-top: 1px solid var(--border); flex-shrink: 0;
+      background: var(--bg);
+    }
+    .nav-item {
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+      border: none; background: transparent; cursor: pointer;
+      color: var(--muted); text-decoration: none;
+      padding: 4px 16px; border-radius: var(--radius-sm);
+      transition: all var(--motion-fast) var(--ease-standard);
+    }
+    .nav-item:hover { color: var(--fg); }
+    .nav-item.active { color: var(--accent); }
+    .nav-item svg { width: 18px; height: 18px; }
+    .nav-item span { font-size: 10px; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <div class="app-header">
+      <div class="header-left"><span class="header-title">历史记录</span></div>
+      <div class="header-spacer"></div>
+      <div class="header-actions">
+        <button class="header-btn" id="themeToggle" title="切换主题">
+          <svg id="themeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+        </button>
+        <button class="header-btn minimize" onclick="window.sayitMinimize()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        <button class="header-btn close" onclick="window.sayitClose()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+    </div>
+
+    <div class="search-bar">
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="searchInput" placeholder="搜索历史记录…" />
+        <span class="search-count" id="resultCount">6 条</span>
+      </div>
+    </div>
+
+    <div class="retention-bar">
+      <span class="retention-label">保留</span>
+      <select class="retention-select" id="retentionSelect">
+        <option value="24h">24 小时</option>
+        <option value="1w">1 周</option>
+        <option value="1m" selected>1 个月</option>
+        <option value="forever">永久</option>
+        <option value="never">不保留</option>
+      </select>
+      <span class="privacy-note">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg>
+        仅在本地存储，不上传任何服务器
+      </span>
+    </div>
+
+    <div class="list" id="transcriptList"></div>
+    <div class="empty" id="emptyState" style="display:none;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      <h3>还没有录音记录</h3><p>开始录音后，转写内容会自动保存在这里。</p>
+    </div>
+
+    <nav class="bottom-nav">
+      <a class="nav-item" href="recorder.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        <span>Sayit</span>
+      </a>
+      <a class="nav-item active" href="history.html">
+        <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span>历史</span>
+      </a>
+      <a class="nav-item" href="dictionary.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <span>词库</span>
+      </a>
+      <a class="nav-item" href="settings.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>设置</span>
+      </a>
+    </nav>
+  </div>
+
+  <div class="overlay" id="detailOverlay" style="display:none;">
+    <div class="panel">
+      <div class="panel-header"><span id="detailDate"></span><button class="panel-close" id="detailClose">&#10005;</button></div>
+      <div class="panel-body" id="detailBody"></div>
+    </div>
+  </div>
+
+  <div class="overlay" id="editOverlay" style="display:none;">
+    <div class="panel">
+      <div class="panel-header"><span id="editDate"></span><button class="panel-close" id="editClose">&#10005;</button></div>
+      <div class="panel-body" style="padding:16px 20px;">
+        <textarea class="panel-edit-area" id="editArea" placeholder="修正文字…"></textarea>
+      </div>
+      <div class="panel-actions">
+        <button class="btn-sm" id="editCancel">取消</button>
+        <button class="btn-accent" id="editSave">保存修正</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/bridge.js"></script>
+  <script>
+    const $ = (s) => document.querySelector(s);
+    const HISTORY_KEY = 'sayit-history-entries';
+    const DICT_KEY = 'sayit-dict';
+
+    const SEED_DATA = [
+      { id:1, date:'2026-06-07 14:22', dur:'08:42', lang:'zh-CN', langLabel:'中文', text:'今天我们来讨论一下产品的下一个版本规划。首先需要确定优先级最高的三个功能。语音输入的准确率已经达到了百分之九十五以上，但是在嘈杂环境下的表现还可以继续优化。' },
+      { id:2, date:'2026-06-07 09:15', dur:'03:18', lang:'en-US', langLabel:'English', text:"Let's discuss the roadmap for the next release. First, we need to identify the top three priority features. Speech recognition accuracy has reached over ninety-five percent." },
+      { id:3, date:'2026-06-06 16:40', dur:'12:05', lang:'zh-CN', langLabel:'中文', text:'关于用户体验优化的几个方向：第一，减少录音启动的延迟，目前从点击到开始录音大约有300毫秒的延迟，目标是降到100毫秒以内。第二，优化实时转写的显示效果，让文字出现更加流畅。' },
+      { id:4, date:'2026-06-05 11:08', dur:'05:33', lang:'ja-JP', langLabel:'日本語', text:'本日は次期バージョンの計画について話し合います。まず優先度の高い機能を三つ決める必要があります。音声認識の精度は九十五パーセントを超えました。' },
+      { id:5, date:'2026-06-04 15:50', dur:'02:14', lang:'zh-CN', langLabel:'中文', text:'会议纪要：确认下周发布 v2.1 版本，包含自动标点优化和日语支持两个主要更新。测试团队已经完成了回归测试，没有发现阻塞性问题。' },
+      { id:6, date:'2026-06-03 10:30', dur:'07:51', lang:'zh-CN', langLabel:'中文', text:'用户访谈反馈总结：大部分用户对基础语音转写功能表示满意，但有几个高频需求值得关注——批量导出、与 Notion 等工具的集成、以及移动端的同步功能。建议将这些纳入第三季度的规划。' }
+    ];
+
+    function loadTranscripts() {
+      let entries = [];
+      try { entries = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch(e) {}
+      if (entries.length === 0) entries = [...SEED_DATA];
+      return entries;
+    }
+    function saveTranscripts(arr) {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(arr));
+    }
+
+    function loadDict() {
+      try { return JSON.parse(localStorage.getItem(DICT_KEY) || '[]'); } catch(e) { return []; }
+    }
+    function saveDict(arr) { localStorage.setItem(DICT_KEY, JSON.stringify(arr)); }
+
+    let transcripts = loadTranscripts();
+
+    function renderList(filter='') {
+      const kw = filter.toLowerCase().trim();
+      const filtered = transcripts.filter(t => !kw || t.text.toLowerCase().includes(kw) || t.date.includes(kw) || t.langLabel.includes(kw));
+      $('#resultCount').textContent = `${filtered.length} 条`;
+      const list = $('#transcriptList'), empty = $('#emptyState');
+      if (filtered.length === 0) { list.style.display = 'none'; empty.style.display = ''; return; }
+      empty.style.display = 'none'; list.style.display = '';
+      list.innerHTML = filtered.map(t => `
+        <div class="card" onclick="openDetail(${t.id})">
+          <div class="card-header"><span class="card-date">${t.date}</span><div class="card-meta"><span class="card-lang">${t.langLabel}</span><span class="card-dur">${t.dur}</span></div></div>
+          <div class="card-text">${t.text}</div>
+          <div class="card-actions" onclick="event.stopPropagation()">
+            <button class="btn-sm" onclick="copyTranscript(${t.id})" title="复制"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+            <button class="btn-sm" style="color:var(--accent);border-color:var(--accent);" onclick="editTranscript(${t.id})" title="修正"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            <button class="btn-sm danger" onclick="deleteTranscript(${t.id})" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          </div>
+        </div>`).join('');
+    }
+
+    function openDetail(id) { const t = transcripts.find(x => x.id===id); if (!t) return; $('#detailDate').textContent = `${t.date} · ${t.dur} · ${t.langLabel}`; $('#detailBody').innerHTML = t.text.split('\n').filter(p=>p.trim()).map(p=>`<p style="margin:0 0 8px">${p}</p>`).join(''); $('#detailOverlay').style.display = ''; }
+    function copyTranscript(id) { const t = transcripts.find(x => x.id===id); if (t) navigator.clipboard.writeText(t.text).catch(()=>{}); }
+    function deleteTranscript(id) { transcripts = transcripts.filter(x => x.id!==id); saveTranscripts(transcripts); renderList($('#searchInput').value); }
+
+    /* ─── edit / correction ────────────────────────────────────── */
+    let editTargetId = null;
+    function editTranscript(id) {
+      const t = transcripts.find(x => x.id===id); if (!t) return;
+      editTargetId = id;
+      $('#editDate').textContent = `${t.date} · ${t.dur}`;
+      $('#editArea').value = t.text;
+      $('#editOverlay').style.display = '';
+      setTimeout(() => $('#editArea').focus(), 100);
+    }
+    function closeEdit() { $('#editOverlay').style.display = 'none'; editTargetId = null; }
+    $('#editClose').addEventListener('click', closeEdit);
+    $('#editCancel').addEventListener('click', closeEdit);
+    $('#editOverlay').addEventListener('click', e => { if (e.target === $('#editOverlay')) closeEdit(); });
+    $('#editSave').addEventListener('click', () => {
+      if (editTargetId === null) return;
+      const newText = $('#editArea').value.trim();
+      if (!newText) return;
+      const t = transcripts.find(x => x.id === editTargetId);
+      if (!t) return;
+      // Auto-add corrections: compare word-by-word for CJK, add differences to dict
+      const dict = loadDict();
+      const oldWords = [...t.text];
+      const newWords = [...newText];
+      const shorter = Math.min(oldWords.length, newWords.length);
+      for (let i = 0; i < shorter; i++) {
+        if (oldWords[i] !== newWords[i]) {
+          // Group consecutive changed chars
+          let j = i;
+          while (j < shorter && oldWords[j] !== newWords[j]) j++;
+          const oldSeg = oldWords.slice(i, j).join('');
+          const newSeg = newWords.slice(i, j).join('');
+          if (newSeg.length > 0 && oldSeg.length > 0 && !dict.includes(newSeg)) {
+            dict.push(newSeg);
+          }
+          i = j - 1;
+        }
+      }
+      saveDict(dict);
+      t.text = newText;
+      saveTranscripts(transcripts);
+      renderList($('#searchInput').value);
+      closeEdit();
+    });
+
+    $('#detailClose').addEventListener('click', ()=>$('#detailOverlay').style.display='none');
+    $('#detailOverlay').addEventListener('click', e=>{ if (e.target===$('#detailOverlay')) $('#detailOverlay').style.display='none'; });
+    $('#searchInput').addEventListener('input', e=>renderList(e.target.value));
+    document.addEventListener('keydown', e=>{ if (e.key==='Escape') { $('#detailOverlay').style.display='none'; $('#editOverlay').style.display='none'; } });
+
+    const html = document.documentElement, themeIcon = $('#themeIcon');
+    function getActiveMode() { return localStorage.getItem('sayit-theme') || 'light'; }
+    function applyThemeMode(m) {
+      if (m === 'system') html.setAttribute('data-theme', window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      else html.setAttribute('data-theme', m);
+      localStorage.setItem('sayit-theme', m);
+      updateIcon();
+    }
+    function updateIcon() {
+      const m = getActiveMode();
+      if (m === 'light') themeIcon.innerHTML = '<circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>';
+      else if (m === 'dark') themeIcon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+      else themeIcon.innerHTML = '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>';
+    }
+    applyThemeMode(getActiveMode());
+    const themeCycle = ['light', 'dark', 'system'];
+    $('#themeToggle').addEventListener('click', () => applyThemeMode(themeCycle[(themeCycle.indexOf(getActiveMode()) + 1) % 3]));
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (getActiveMode() === 'system') applyThemeMode('system'); });
+    window.sayitMinimize=function(){if(window.pywebview&&window.pywebview.api)window.pywebview.api.minimize_window()};
+    window.sayitClose=function(){if(window.pywebview&&window.pywebview.api)window.pywebview.api.close_window()};
+    renderList();
+
+    /* ─── retention persistence ──────────────────────────────────── */
+    const retentionSelect = $('#retentionSelect');
+    const savedRetention = localStorage.getItem('sayit-history-retention') || '1m';
+    retentionSelect.value = savedRetention;
+    retentionSelect.addEventListener('change', () => {
+      localStorage.setItem('sayit-history-retention', retentionSelect.value);
+    });
+
+  </script>
+</body>
+</html>

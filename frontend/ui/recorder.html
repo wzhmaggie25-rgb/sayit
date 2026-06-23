@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sayit · 录音</title>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; height: 100%; }
+    body {
+      margin: 0; height: 100%;
+      background: var(--bg);
+      font-family: var(--font-body); font-size: 14px; line-height: 1.55;
+      color: var(--fg); -webkit-font-smoothing: antialiased;
+    }
+
+    .window {
+      width: 100%; height: 100%;
+      background: var(--bg);
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+    /* ─── content ──────────────────────────────────────────────────── */
+    .content {
+      flex: 1; display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      overflow: hidden; position: relative;
+    }
+    .content.has-transcript { justify-content: flex-start; }
+
+    /* ─── idle mic ────────────────────────────────────────────────── */
+    .mic-wrap { display: flex; flex-direction: column; align-items: center; }
+    .mic-btn {
+      width: 80px; height: 80px; border-radius: 50%;
+      background: var(--surface); border: 1.5px solid var(--border);
+      display: grid; place-items: center; cursor: pointer;
+      transition: all var(--motion-base) var(--ease-standard);
+      box-shadow: 0 2px 12px oklch(0% 0 0 / 0.03);
+    }
+    .mic-btn:hover { border-color: var(--accent); transform: scale(1.04); box-shadow: 0 4px 20px oklch(56% 0.17 255 / 0.1); }
+    .mic-btn:active { transform: scale(0.95); }
+    .mic-btn svg { width: 32px; height: 32px; color: var(--accent); }
+    .mic-btn.recording {
+      background: var(--danger); border-color: var(--danger);
+      box-shadow: 0 0 0 0 oklch(55% 0.22 25 / 0.35);
+      animation: mic-pulse 1.8s ease-out infinite;
+    }
+    .mic-btn.recording svg { color: white; }
+    @keyframes mic-pulse {
+      0%   { box-shadow: 0 0 0 0 oklch(55% 0.22 25 / 0.35); }
+      70%  { box-shadow: 0 0 0 20px oklch(55% 0.22 25 / 0); }
+      100% { box-shadow: 0 0 0 0 oklch(55% 0.22 25 / 0); }
+    }
+    .idle-hint { margin-top: 18px; font-size: 13px; color: var(--muted); text-align: center; line-height: 1.6; }
+    .idle-hint strong { color: var(--fg); font-weight: 500; }
+    .idle-hint kbd {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 20px; height: 20px; padding: 0 5px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 4px; font-family: var(--font-mono); font-size: 10px;
+      font-weight: 500; color: var(--muted);
+    }
+    .idle-hint .hint-shortcut {
+      display: inline-flex; align-items: center; gap: 3px;
+      cursor: pointer; padding: 2px 4px; border-radius: 6px;
+      transition: background var(--motion-fast) var(--ease-standard);
+      vertical-align: middle;
+    }
+    .idle-hint .hint-shortcut:hover { background: var(--fg-soft); }
+    .idle-hint .hint-shortcut:hover kbd { color: var(--accent); border-color: var(--accent); }
+
+    /* ─── shortcut editor popup ──────────────────────────────────── */
+    .shortcut-popup {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); box-shadow: 0 8px 32px oklch(0% 0 0 / 0.12);
+      padding: 20px 24px; z-index: 30; text-align: center;
+      opacity: 0; pointer-events: none;
+      transition: opacity var(--motion-base) var(--ease-standard);
+      min-width: 280px;
+    }
+    .shortcut-popup.show { opacity: 1; pointer-events: auto; }
+    .shortcut-popup .popup-title { font-size: 13px; font-weight: 600; margin-bottom: 12px; }
+    .popup-keycaps {
+      display: flex; align-items: center; justify-content: center; gap: 5px; margin-bottom: 14px;
+    }
+    .popup-keycaps kbd {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 30px; height: 30px; padding: 0 8px;
+      background: linear-gradient(180deg, var(--surface) 0%, oklch(96% 0.003 252) 100%);
+      border: 1px solid var(--border); border-radius: 5px;
+      font-family: var(--font-mono); font-size: 13px; font-weight: 600;
+      color: var(--fg);
+      box-shadow: 0 1.5px 0 oklch(88% 0.006 252);
+    }
+    [data-theme="dark"] .popup-keycaps kbd {
+      background: linear-gradient(180deg, oklch(26% 0.007 260) 0%, oklch(20% 0.008 260) 100%);
+      box-shadow: 0 1.5px 0 oklch(10% 0.006 260);
+    }
+    .popup-keycaps .plus { color: var(--muted); font-size: 13px; }
+    .popup-bind-hint { font-size: 10px; color: var(--muted); margin-top: 8px; display: none; }
+    .popup-bind-hint.show { display: block; }
+    .shortcut-backdrop { position: fixed; inset: 0; z-index: 29; display: none; }
+    .shortcut-backdrop.show { display: block; }
+
+    /* ─── recording indicator (inside micWrap) ───────────────────── */
+    .rec-indicator { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-top: 16px; }
+    .timer {
+      font-family: var(--font-mono); font-size: 36px; font-weight: 450;
+      color: var(--fg); letter-spacing: 0.03em;
+    }
+    .rec-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; font-weight: 500; color: var(--danger);
+      margin-top: 4px;
+    }
+    .rec-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); animation: blink 1s step-end infinite; }
+    .waveform { display: flex; align-items: flex-end; gap: 3px; height: 28px; margin-top: 8px; }
+    .waveform .bar {
+      width: 4px; border-radius: 2px; background: var(--accent);
+      animation: wave 0.7s ease-in-out infinite; animation-delay: var(--delay);
+    }
+    @keyframes wave { 0%,100%{height:5px} 50%{height:26px} }
+
+    /* ─── transcript ───────────────────────────────────────────────── */
+    .transcript-wrap {
+      flex: 1; width: 100%; overflow-y: auto; overflow-x: hidden;
+      padding: 8px 20px 20px;
+    }
+    .transcript-wrap:not(.show) { display: none; }
+    .transcript-text {
+      font-size: 14.5px; line-height: 2;
+      color: var(--fg); word-break: break-word;
+      user-select: none;
+    }
+
+    /* ─── action bar ───────────────────────────────────────────────── */
+    .actions {
+      display: flex; align-items: center; gap: 8px;
+      padding: 14px 20px; border-top: 1px solid var(--border);
+      flex-shrink: 0; flex-wrap: wrap; justify-content: center;
+    }
+    .actions:not(.show) { display: none; }
+    .word-count { font-family: var(--font-mono); font-size: 12px; color: var(--muted); margin-left: auto; }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 7px 15px; border-radius: var(--radius-sm);
+      border: 1px solid transparent; font-size: 12.5px; font-weight: 500;
+      letter-spacing: -0.005em; cursor: pointer; font-family: var(--font-body);
+      transition: all var(--motion-fast) var(--ease-standard);
+    }
+    .btn:active { transform: translateY(1px); }
+    .btn-primary { background: var(--accent); color: var(--accent-on); border-color: var(--accent); }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-secondary { background: transparent; color: var(--fg); border-color: var(--border); }
+    .btn-secondary:hover { border-color: var(--fg); }
+    .btn-ghost { background: transparent; color: var(--muted); border: none; }
+    .btn-ghost:hover { color: var(--fg); }
+    .btn-danger { background: transparent; color: var(--muted); border: none; }
+    .btn-danger:hover { color: var(--danger); }
+    .btn svg { width: 14px; height: 14px; }
+
+    /* ─── bottom nav ──────────────────────────────────────────────── */
+    .bottom-nav {
+      display: flex; align-items: center; justify-content: center; gap: 32px;
+      height: 48px; border-top: 1px solid var(--border); flex-shrink: 0;
+      background: var(--bg);
+    }
+    .nav-item {
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+      border: none; background: transparent; cursor: pointer;
+      color: var(--muted); text-decoration: none;
+      padding: 4px 16px; border-radius: var(--radius-sm);
+      transition: all var(--motion-fast) var(--ease-standard);
+    }
+    .nav-item:hover { color: var(--fg); }
+    .nav-item.active { color: var(--accent); }
+    .nav-item svg { width: 18px; height: 18px; }
+    .nav-item span { font-size: 10px; font-weight: 500; }
+
+    .toast {
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+      background: var(--fg); color: var(--bg); padding: 9px 18px;
+      border-radius: var(--radius-pill); font-size: 13px; font-weight: 500;
+      opacity: 0; pointer-events: none; z-index: 100;
+      transition: opacity var(--motion-base) var(--ease-standard);
+    }
+    .toast.show { opacity: 1; }
+  button svg{pointer-events:none}</style>
+</head>
+<body>
+  <div class="window">
+    <div class="app-header" id="headerBar">
+      <div class="header-left">
+        <span class="header-title">Sayit</span>
+        <span class="status-dot" id="statusDot"></span>
+      </div>
+      <div class="header-spacer"></div>
+      <div class="header-actions">
+        <button class="header-btn" id="themeToggle" title="切换主题">
+          <svg id="themeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+        </button>
+        <button class="header-btn minimize" onclick="window.sayitMinimize()" title="最小化">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <button class="header-btn close" onclick="window.sayitClose()" title="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="content" id="contentArea">
+      <div class="mic-wrap" id="micWrap">
+        <button class="mic-btn" id="micBtn" onclick="location.href='personal.html'" title="个人">
+          <svg id="micIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </button>
+        <p class="idle-hint">按 <span class="hint-shortcut" id="hintShortcut" title="点击修改快捷键"><kbd>右 Alt</kbd></span> 开始说话，再按一次输出文字</p>
+      </div>
+
+      <div id="personalPanel" style="display:none;width:100%;max-width:500px;margin-top:20px">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:14px;text-align:center"><div style="font-size:22px;font-weight:700;color:var(--accent);font-family:var(--font-mono)" id="statCount">-</div><div style="font-size:10px;color:var(--muted);margin-top:2px">录音次数</div></div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:14px;text-align:center"><div style="font-size:22px;font-weight:700;color:var(--accent);font-family:var(--font-mono)" id="statWords">-</div><div style="font-size:10px;color:var(--muted);margin-top:2px">转写字数</div></div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:14px;text-align:center"><div style="font-size:22px;font-weight:700;color:var(--accent);font-family:var(--font-mono)" id="statRules">-</div><div style="font-size:10px;color:var(--muted);margin-top:2px">学习规则</div></div>
+        </div>
+        <div style="font-size:13px;font-weight:600;color:var(--fg);margin-bottom:8px">最近录音</div>
+        <div id="recentList" style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto"></div>
+      </div>
+      <div class="shortcut-backdrop" id="shortcutBackdrop"></div>
+      <div class="shortcut-popup" id="shortcutPopup">
+        <div class="popup-title">按下新的快捷键</div>
+        <div class="popup-keycaps" id="popupKeycaps"></div>
+        <div class="popup-bind-hint" id="popupBindHint">按 Esc 取消</div>
+      </div>
+    </div>
+
+    <!-- 🌟 bottom nav -->
+    <nav class="bottom-nav">
+      <a class="nav-item active" href="recorder.html">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        <span>Sayit</span>
+      </a>
+      <a class="nav-item" href="history.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span>历史</span>
+      </a>
+      <a class="nav-item" href="dictionary.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <span>词库</span>
+      </a>
+      <a class="nav-item" href="settings.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>设置</span>
+      </a>
+    </nav>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script src="js/bridge.js"></script>
+  <script>
+    const $ = (s) => document.querySelector(s);
+
+// Main page stays static. Recording feedback via float window only.
+// Mic click toggles personal stats panel
+var panelOpen=false;
+document.getElementById('micBtn').addEventListener('click',function(e){
+  e.stopPropagation();
+  panelOpen=!panelOpen;
+  var p=document.getElementById('personalPanel');
+  p.style.display=panelOpen?'block':'none';
+  if(panelOpen)loadStats();
+});
+async function loadStats(){
+  try{
+    var h=[],r=[];
+    if(window.pywebview&&window.pywebview.api){h=await window.pywebview.api.get_history('',100,0)||[];r=await window.pywebview.api.get_rules(true)||[]}
+    document.getElementById('statCount').textContent=h.length;
+    var w=0;h.forEach(function(x){w+=(x.final_text||x.text||'').replace(/\s/g,'').length});
+    document.getElementById('statWords').textContent=w;
+    document.getElementById('statRules').textContent=r.length;
+    var list=document.getElementById('recentList');
+    if(!h.length){list.innerHTML='<div style="text-align:center;color:var(--muted);padding:12px;font-size:12px">还没有录音记录</div>';return}
+    list.innerHTML=h.slice(0,15).map(function(x){var t=(x.final_text||x.text||'').substring(0,50);return'<div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;display:flex;justify-content:space-between;font-size:11px"><span style="color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;margin-right:8px">'+t+'</span><span style="color:var(--muted);font-family:var(--font-mono);white-space:nowrap">'+x.duration.toFixed(0)+'s</span></div>'}).join('');
+  }catch(e){}
+}
+window.sayitOnRecordingStarted = function() {};
+window.sayitOnRecordingStopped = function() {};
+window.sayitOnTick = function() {};
+window.sayitOnPipelineDone = function() {};
+window.sayitOnError = function() {};
+
+// Keyboard shortcut (window focus only, system hotkey handles global)
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if (e.key === "Alt" && e.location === 2) { e.preventDefault(); }
+});
+
+// ── Shortcut popup ──────────────────────────────────────────
+var hotkeyCombo = 'RAlt';
+// Load saved hotkey from Python backend, fallback to localStorage
+(async function initHotkey(){
+  try{
+    if(window.sayit){
+      var v=await window.sayit.getConfigValue('hotkey');
+      if(v && v.value) hotkeyCombo=v.value;
+    }else{
+      hotkeyCombo=localStorage.getItem('sayit-hotkey-record')||'RAlt';
+    }
+  }catch(e){}
+  renderHintShortcut(hotkeyCombo);
+  renderPopupKeycaps(hotkeyCombo);
+})();
+
+function labelForKey(k) {
+  var m={"RAlt":"右 Alt","LAlt":"左 Alt","RCtrl":"右 Ctrl","LCtrl":"左 Ctrl",
+         "RShift":"右 Shift","LShift":"左 Shift","Win":"Win",
+         "Alt":"Alt","Ctrl":"Ctrl","Shift":"Shift","Space":"空格"};
+  return m[k]||k;
+}
+
+function keyToName(e) {
+  var locMap = {
+    'Alt': {1:'LAlt', 2:'RAlt'},
+    'Control': {1:'LCtrl', 2:'RCtrl'},
+    'Shift': {1:'LShift', 2:'RShift'},
+    'Meta': {1:'LWin', 2:'RWin'}
+  };
+  if (locMap[e.key]) return locMap[e.key][e.location] || e.key;
+  if (e.key === ' ') return 'Space';
+  if (e.key.length === 1) return e.key.toUpperCase();
+  return e.key;  // F1-F12, Enter, Escape, Tab, etc.
+}
+
+function renderHintShortcut(combo) {
+  var el=document.getElementById('hintShortcut'); if(!el)return;
+  el.innerHTML = combo.split("+").map(function(p){return "<kbd>"+labelForKey(p)+"</kbd>"}).join("");
+}
+
+function renderPopupKeycaps(combo) {
+  var el=document.getElementById('popupKeycaps'); if(!el)return;
+  el.innerHTML = combo.split("+").map(function(p){return "<kbd>"+labelForKey(p)+"</kbd>"}).join('<span class="plus">+</span>');
+}
+
+// ── Recording handlers ────────────────────────────────────
+var oldCombo = null;
+
+function onRecordKeyDown(e) {
+  e.preventDefault(); e.stopPropagation();
+  if (e.key === "Escape") { cancelRecording(); return; }
+  // Build preview combo in real-time
+  var parts = [];
+  if (e.ctrlKey)  parts.push(e.location === 2 ? 'RCtrl' : 'LCtrl');
+  if (e.shiftKey) parts.push(e.location === 2 ? 'RShift' : 'LShift');
+  if (e.altKey)   parts.push(e.location === 2 ? 'RAlt' : 'LAlt');
+  if (e.metaKey)  parts.push('Win');
+  parts.push(keyToName(e));
+  // Deduplicate (pure modifier key appears in both modifier check and keyToName)
+  var preview = parts.filter(function(v,i,a){return a.indexOf(v)===i}).join('+');
+  renderPopupKeycaps(preview);
+}
+
+function onRecordKeyUp(e) {
+  e.preventDefault(); e.stopPropagation();
+  if (e.key === "Escape") { cancelRecording(); return; }
+  var parts = [];
+  if (e.ctrlKey)  parts.push(e.location === 2 ? 'RCtrl' : 'LCtrl');
+  if (e.shiftKey) parts.push(e.location === 2 ? 'RShift' : 'LShift');
+  if (e.altKey)   parts.push(e.location === 2 ? 'RAlt' : 'LAlt');
+  if (e.metaKey)  parts.push('Win');
+  parts.push(keyToName(e));
+  // Deduplicate: pure modifier key appears twice (modifier + main)
+  hotkeyCombo = parts.filter(function(v,i,a){return a.indexOf(v)===i}).join('+');
+  saveAndClose();
+}
+
+function openShortcutPopup() {
+  oldCombo = hotkeyCombo;
+  // Pause global hook so keys reach the webview
+  if (window.sayit) window.sayit.pauseHotkey();
+  var popup=document.getElementById('shortcutPopup'), bd=document.getElementById('shortcutBackdrop');
+  var hint=document.getElementById('popupBindHint');
+  if(popup)popup.classList.add("show");
+  if(bd)bd.classList.add("show");
+  if(hint)hint.classList.add("show");
+  renderPopupKeycaps(hotkeyCombo);
+  document.addEventListener('keyup', onRecordKeyUp);
+  document.addEventListener('keydown', onRecordKeyDown);
+}
+
+function saveAndClose() {
+  document.removeEventListener('keyup', onRecordKeyUp);
+  document.removeEventListener('keydown', onRecordKeyDown);
+  var popup=document.getElementById('shortcutPopup'), bd=document.getElementById('shortcutBackdrop');
+  var hint=document.getElementById('popupBindHint');
+  if(popup)popup.classList.remove("show");
+  if(bd)bd.classList.remove("show");
+  if(hint)hint.classList.remove("show");
+  // Save config → setHotkey internally restarts hook (_active=True)
+  if (window.sayit) window.sayit.setHotkey(hotkeyCombo);
+  localStorage.setItem('sayit-hotkey-record', hotkeyCombo);
+  renderHintShortcut(hotkeyCombo);
+}
+
+function cancelRecording() {
+  document.removeEventListener('keyup', onRecordKeyUp);
+  document.removeEventListener('keydown', onRecordKeyDown);
+  var popup=document.getElementById('shortcutPopup'), bd=document.getElementById('shortcutBackdrop');
+  var hint=document.getElementById('popupBindHint');
+  if(popup)popup.classList.remove("show");
+  if(bd)bd.classList.remove("show");
+  if(hint)hint.classList.remove("show");
+  hotkeyCombo = oldCombo;  // restore
+  // Resume hook with old key (_active=True → start)
+  if (window.sayit) window.sayit.resumeHotkey();
+  renderHintShortcut(hotkeyCombo);
+}
+
+// ── Event bindings ────────────────────────────────────────
+var hintEl=document.getElementById('hintShortcut');
+if(hintEl)hintEl.addEventListener("click",function(e){e.stopPropagation();openShortcutPopup()});
+var bdEl=document.getElementById('shortcutBackdrop');
+if(bdEl)bdEl.addEventListener("click",cancelRecording);
+
+// ── Theme ──────────────────────────────────────────────────
+var html2=document.documentElement,themeIcon=document.getElementById('themeIcon');
+function getActiveMode(){return localStorage.getItem("sayit-theme")||"light"}
+function applyThemeMode(m){
+  if(m==="system")html2.setAttribute("data-theme",window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light");
+  else html2.setAttribute("data-theme",m);
+  localStorage.setItem("sayit-theme",m);
+  updateIcon();
+  if(window.sayitSetTheme)sayitSetTheme(m);
+}
+function updateIcon(){
+  var m=getActiveMode();
+  if(m==="dark")themeIcon.innerHTML="<path d='M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'/>";
+  else if(m==="system")themeIcon.innerHTML="<rect x='2' y='3' width='20' height='14' rx='2'/><line x1='8' y1='21' x2='16' y2='21'/><line x1='12' y1='17' x2='12' y2='21'/>";
+  else themeIcon.innerHTML="<circle cx='12' cy='12' r='5'/><path d='M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42'/>";
+}
+applyThemeMode(getActiveMode());
+var themeBtn=document.getElementById('themeToggle');
+var themeCycle2=['light','dark','system'];
+if(themeBtn)themeBtn.addEventListener("click",function(){
+  var cur=getActiveMode();
+  applyThemeMode(themeCycle2[(themeCycle2.indexOf(cur)+1)%3]);
+});
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change",function(){
+  if(getActiveMode()==="system")applyThemeMode("system");
+});
+
+window.sayitMinimize=function(){if(window.sayit)window.sayit.minimize()};
+window.sayitClose=function(){if(window.sayit)window.sayit.close()};
+</script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+{
+  "name": "sayit",
+  "version": "1.8.0",
+  "description": "Sayit Windows voice input tool",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-packager . Sayit --platform=win32 --arch=x64 --out=release --overwrite --asar --icon=../sayit.ico --extra-resource=../dist/sayit-backend"
+  },
+  "build": {
+    "appId": "com.sayit.desktop",
+    "productName": "Sayit",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "ui/**/*",
+      "assets/**/*",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist/sayit-backend",
+        "to": "backend"
+      }
+    ],
+    "win": {
+      "icon": "../sayit.ico"
+    }
+  },
+  "devDependencies": {
+    "electron": "^32.3.3",
+    "electron-builder": "^24.13.3",
+    "electron-packager": "^17.1.2"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  }
+}

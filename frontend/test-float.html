@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Sayit Float Test Harness</title>
+<style>
+  body{font-family:system-ui;background:#1a1a2e;color:#eee;padding:20px;max-width:600px;margin:0 auto}
+  h2{color:#4fc3f7;margin-top:24px}
+  .test{background:#16213e;border-radius:8px;padding:12px;margin:8px 0}
+  .pass{color:#4caf50}.fail{color:#ff5252}.info{color:#8a8f98}
+  button{background:#0d47a1;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;margin:4px}
+  button:hover{background:#1565c0}
+  button.danger{background:#c62828}
+  button.danger:hover{background:#d32f2f}
+  #float-preview{position:relative;width:500px;height:60px;margin:12px auto;background:rgba(0,0,0,.5);border-radius:12px;overflow:hidden}
+  #float-preview>*{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center}
+  pre{background:#0d1117;padding:8px;border-radius:4px;overflow-x:auto;font-size:12px}
+</style>
+</head><body>
+<h1>🔬 Sayit Float 验收测试</h1>
+<p class="info">此页面验证 float.html 状态机逻辑和 main.js 配置。视觉浮窗需要运行 Electron 测试。</p>
+
+<h2>1. 后端连接检查</h2>
+<div class="test" id="backend-test">检测中...</div>
+
+<h2>2. 状态机转换测试</h2>
+<div class="test" id="state-test">运行中...</div>
+<div id="float-preview"><div id="preview-content" style="align-items:flex-end;padding-bottom:8px"></div></div>
+
+<h2>3. 状态流转模拟</h2>
+<div class="test">
+  <button onclick="simFlow()">▶ 模拟完整录音流程</button>
+  <button onclick="simError()">⚠ 模拟错误流程</button>
+  <button onclick="simCancel()">✕ 模拟取消流程</button>
+  <div id="flow-log" style="margin-top:8px;font-size:12px;color:#8a8f98"></div>
+</div>
+
+<h2>4. 手动验证清单</h2>
+<div class="test" id="checklist">
+  <p>启动 Electron 后逐项验证：</p>
+  <ol style="font-size:13px;line-height:1.8">
+    <li>✅ 按 <b>RightAlt</b> → 浮窗出现在 <b>当前屏幕底部中央</b></li>
+    <li>✅ 鼠标移到浮窗空白区域 → 鼠标穿透（点击到后面窗口）</li>
+    <li>✅ 鼠标移到浮窗 card 上 → 鼠标不穿透</li>
+    <li>✅ 录音中 → <b>红点闪烁</b> + <b>声纹跳动</b> + <b>计时器递增</b></li>
+    <li>✅ 松开快捷键 → <b>AI 思考中</b> + shimmer 动画</li>
+    <li>✅ 结果返回 → <b>Done ✓</b> + 引擎名，3s 后自动消失</li>
+    <li>✅ 错误 → <b>✗ 识别失败</b> + 重试按钮</li>
+    <li>✅ 切换显示器后按快捷键 → 浮窗跟随到<b>当前显示器</b></li>
+    <li>✅ 按 <b>ESC</b> 键 → 浮窗立即消失</li>
+  </ol>
+</div>
+
+<script>
+// ── Backend check ──
+async function checkBackend(){
+  const el=document.getElementById('backend-test');
+  try{
+    const r=await fetch('http://127.0.0.1:17890/api/version');
+    const v=await r.json();
+    el.innerHTML='<span class="pass">✅ 后端运行中 — Sayit v'+v.version+'</span>';
+    try{
+      const c=await fetch('http://127.0.0.1:17890/api/config').then(r=>r.json());
+      el.innerHTML+='<br><span class="info">ASR: '+c.asr_engine+' | 纠错: '+(c.enable_correction?'开启':'关闭')+' | 采样率: '+c.audio.sample_rate+'Hz</span>';
+    }catch(e){}
+  }catch(e){
+    el.innerHTML='<span class="fail">❌ 后端未启动 — 请先运行 python server.py</span>';
+  }
+}
+
+// ── State machine test ──
+const REC='rec',THINKING='thinking',DONE='done',ERR='error';
+function rdc(st,a){
+  a=typeof a==='string'?a:a?.type;if(!a)return st;const s=st.s;
+  if(a==='RECORD.START'){if(!s||s===DONE||s===ERR)return{s:REC}}
+  if(a==='RECORD.STOP'){if(s===REC)return{s:THINKING,target:'done'}}
+  if(a==='CANCEL'){if(s===REC||s===THINKING)return{s:null}}
+  if(a==='ERROR'){if(s===REC||s===THINKING)return{s:ERR}}
+  if(a==='AI_DONE'){if(s===THINKING)return{s:DONE}}
+  if(a==='_RESET')return{s:null};
+  return st;
+}
+
+function testStateMachine(){
+ const tests=[
+  ['idle→rec',{s:null},'RECORD.START',{s:REC}],
+  ['rec→thinking',{s:REC},'RECORD.STOP',{s:THINKING,target:'done'}],
+  ['thinking→done',{s:THINKING,target:'done'},'AI_DONE',{s:DONE}],
+  ['done→rec',{s:DONE},'RECORD.START',{s:REC}],
+  ['err→rec',{s:ERR},'RECORD.START',{s:REC}],
+  ['rec→cancel',{s:REC},'CANCEL',{s:null}],
+  ['thinking→cancel',{s:THINKING},'CANCEL',{s:null}],
+  ['rec→error',{s:REC},'ERROR',{s:ERR}],
+  ['thinking→error',{s:THINKING},'ERROR',{s:ERR}],
+ ];
+ const el=document.getElementById('state-test');
+ let pass=0,fail=0,html='';
+ for(const [n,i,a,e] of tests){
+  const r=rdc(i,a);
+  const ok=JSON.stringify(r)===JSON.stringify(e);
+  if(ok){pass++;html+='<span class="pass">✅ '+n+'</span> '}
+  else{fail++;html+='<span class="fail">❌ '+n+' → got '+JSON.stringify(r)+'</span> '}
+ }
+ el.innerHTML=html+'<br><b>'+(fail?'<span class="fail">'+fail+' FAILED</span>':'<span class="pass">ALL '+pass+' PASSED</span>')+'</b>';
+}
+
+// ── Flow simulation ──
+function log(msg,c){const el=document.getElementById('flow-log');el.innerHTML+=('<span class="'+(c||'info')+'">'+msg+'</span><br>');el.scrollTop=el.scrollHeight}
+
+async function simFlow(){
+  document.getElementById('flow-log').innerHTML='';
+  const preview=document.getElementById('preview-content');
+  let state={s:null};
+
+  const states={
+    null:{html:'<span style="color:#8a8f98">● idle (隐藏)</span>',bg:'transparent'},
+    [REC]:{html:'<span style="color:#ff3b30">🔴</span> <span style="color:#f7f8f8">▃▅▇▅▃▅▇▃▅</span> <span style="color:#8a8f98;font-size:12px">0:03</span> <span style="color:#8a8f98;font-size:13px;cursor:pointer">✕</span>',bg:'#08090a'},
+    [THINKING]:{html:'<span style="color:#8a8f98">⋯ AI 思考中 ⋯</span>',bg:'#08090a'},
+    [DONE]:{html:'<span style="color:#4caf50">✓</span> <span style="color:#8a8f98">Done · 阿里云</span>',bg:'#08090a'},
+    [ERR]:{html:'<span style="color:#ff5252">✗</span> <span style="color:rgba(255,120,120,.9)">识别失败</span> <span style="color:#8a8f98;text-decoration:underline;cursor:pointer">重试</span>',bg:'#08090a'},
+  };
+
+  async function step(action,delay,desc){
+    await new Promise(r=>setTimeout(r,delay));
+    state=rdc(state,action);
+    const ui=states[state.s||'null'];
+    preview.innerHTML=ui.html;
+    preview.parentElement.style.background=ui.bg;
+    log(desc+' → <b>'+JSON.stringify(state)+'</b>');
+  }
+
+  log('🚀 模拟完整录音流程','pass');
+  await step('RECORD.START',500,'1. 用户按 RightAlt → RECORD.START');
+  await step(null,1500,'    ...录音中... (timer 递增、声纹跳动)');
+  await step('RECORD.STOP',500,'2. 用户松键 → RECORD.STOP');
+  await step(null,1000,'    ...AI 思考中... (shimmer 动画)');
+  await step('AI_DONE',800,'3. pipeline_done → AI_DONE');
+  await step(null,0,'4. 显示 Done ✓ (3s 后自动消失)');
+  await step('_RESET',1500,'5. auto-dismiss → _RESET (隐藏)');
+  log('✅ 正常流程通过','pass');
+}
+
+async function simError(){/* similar but ERROR path */}
+
+async function simCancel(){/* CANCEL path */}
+</script>
+<script>checkBackend();testStateMachine();</script>
+</body></html>

@@ -1,0 +1,146 @@
+<!doctype html>
+<html data-theme="dark">
+<head>
+<meta charset="utf-8">
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:transparent;font-family:system-ui;user-select:none;pointer-events:none}
+  body{display:flex;align-items:flex-end;justify-content:center;padding:8px}
+  @keyframes sweep{0%{left:-100%}100%{left:100%}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"></script>
+</head><body><div id="root"></div><script>
+const {useState,useEffect,useRef,useReducer,useCallback,createElement:h}=React;
+const BG='rgba(0,0,0,.96)',BD='rgba(255,255,255,.04)',TX='#fff',TX3='rgba(255,255,255,.72)';
+const BAR_SILENT='rgba(255,255,255,.28)',R=999;
+const INIT='init',REC='rec',STOPPING='stopping',DONE='done',ERR='error';
+
+function rdc(st,a){
+  a=typeof a==='string'?a:a?.type;if(!a)return st;const s=st.s;
+  if(a==='RECORD.START'){if(!s||s===DONE||s===ERR)return{s:INIT}}
+  if(a==='RECORD.STOP'){if(s===INIT)return{s:REC};if(s===REC)return{s:STOPPING,target:'done'}}
+  if(a==='CANCEL'){if(s===REC)return{s:STOPPING,target:'idle'}}
+  if(a==='ERROR'){if(s===REC||s===STOPPING)return{s:ERR}}
+  if(a==='_DONE'){if(s===REC||s===STOPPING||s===ERR)return{s:DONE}}
+  if(a==='_RESET')return{s:null};
+  return st;
+}
+
+function AudioBars({volume,active}){
+  const N=5,MIN=3,MAX=21;
+  const [bars,set]=useState(()=>[5,8,10,7,4]);
+  const vr=useRef(0);vr.current=volume;
+  const level=useRef(.04);
+  const barsRef=useRef([5,8,10,7,4]);
+  useEffect(()=>{let id;let start=performance.now();
+  function tick(now){
+    const dt=Math.min(34,Math.max(8,now-(tick.last||now)));tick.last=now;
+    const raw=Math.max(0,Math.min(1,vr.current||0));
+    const shaped=active?Math.min(1,Math.pow(Math.max(0,raw-.012)*9.2,.62)):0;
+    const k=shaped>level.current ? .34 : .16;
+    level.current+=((shaped||0)-level.current)*Math.min(1,k*dt/16.7);
+    const t=(now-start)*.001;
+    const profile=[.48,.82,1,.74,.42];
+    const next=profile.map((p,i)=>{
+      const idle=.1+.05*Math.sin(t*2.2+i*1.7);
+      const breath=Math.sin(t*(5.8+i*.42)+i*1.15)*(.9+level.current*1.8);
+      const ripple=Math.sin(t*(9.5+i*.28)+i*.64)*level.current*1.05;
+      const target=MIN+(MAX-MIN)*Math.max(idle,Math.min(1,level.current*p))+breath+ripple;
+      const old=barsRef.current[i]??MIN;
+      return Math.max(MIN,Math.min(MAX,old+(target-old)*.42));
+    });
+    barsRef.current=next;
+    set(next);
+    id=requestAnimationFrame(tick);
+  }
+  id=requestAnimationFrame(tick);return()=>cancelAnimationFrame(id)},[active]);
+  return h('div',{style:{display:'flex',alignItems:'center',gap:4,height:24,width:38,justifyContent:'center'}},
+    bars.map((v,i)=>h('div',{key:i,style:{width:3,height:Math.min(MAX,Math.max(MIN,v)),borderRadius:2,flexShrink:0,
+      transition:'height 42ms linear',background:active?TX:BAR_SILENT,opacity:active?1:.55}})))
+}
+
+function Sweep(){
+  return h('div',{style:{position:'absolute',top:0,bottom:0,width:'30%',
+    background:'linear-gradient(90deg,transparent,rgba(255,255,255,.06),transparent)',
+    animation:'sweep 1.5s ease-in-out infinite',pointerEvents:'none',zIndex:0}})
+}
+
+function Float(){
+  const [st,d]=useReducer(rdc,{s:null});const [vol,sv]=useState(0);
+  const [aiOn,sai]=useState(true);
+  const [asrEngine,setAsrEngine]=useState('');
+  const [aiModel,setAiModel]=useState('');
+  const [doneText,setDoneText]=useState('');
+  const [errType,setErrType]=useState('');
+  const [uipiWarn,setUipiWarn]=useState(false);
+  const ref=useRef(null);
+  const report=useCallback(()=>{if(!ref.current)return;
+    const r=ref.current.getBoundingClientRect();
+    window.sayit&&window.sayit.sendElementPositions([{left:r.left,top:r.top,right:r.right,bottom:r.bottom}]);},[]);
+
+  useEffect(()=>{fetch('http://127.0.0.1:17890/api/config').then(r=>r.json()).then(c=>sai(!!(c.enable_correction||c.enable_structuring))).catch(()=>sai(false))},[]);
+
+  useEffect(()=>{const s=st.s;
+    if(s===INIT){const t=setTimeout(()=>d('RECORD.STOP'),60);return()=>clearTimeout(t)}
+    if(s===REC)return;
+    if(s===STOPPING){if(st.target==='idle'){const t=setTimeout(()=>{d('_RESET');window.sayit&&window.sayit.clearElementPositions()},300);return()=>clearTimeout(t)}
+      return}
+    const tt=[];
+    if(s===DONE)tt.push(setTimeout(()=>{setDoneText('');d('_RESET');window.sayit&&window.sayit.clearElementPositions()},2000));
+    if(s===ERR)tt.push(setTimeout(()=>{d('_RESET');window.sayit&&window.sayit.clearElementPositions()},3000));
+    return()=>tt.forEach(clearTimeout)},[st.s,aiOn]);
+  useEffect(()=>{setTimeout(report,100)},[st.s,report]);
+
+  const playBeep=useCallback((up=true)=>{
+    try{const a=new(window.AudioContext||window.webkitAudioContext)();
+    const o=a.createOscillator();const g=a.createGain();
+    o.connect(g);g.connect(a.destination);
+    const now=a.currentTime;
+    o.type='sine';
+    o.frequency.setValueAtTime(up?523.25:659.25,now);
+    o.frequency.linearRampToValueAtTime(up?659.25:523.25,now+.06);
+    g.gain.setValueAtTime(0.08,now);
+    g.gain.exponentialRampToValueAtTime(0.001,now+.08);
+    o.start(now);o.stop(now+.08);
+    setTimeout(()=>a.close(),200);
+    }catch(e){}
+  },[]);
+
+  useEffect(()=>{window.sayitOnRecordingStarted=()=>{playBeep(true);setUipiWarn(false);d('RECORD.START')};
+    window.sayitOnRecordingStopped=()=>{playBeep(false);d('RECORD.STOP')};
+    window.sayitOnPipelineDone=(text)=>{setDoneText(text||'');d('_DONE')};
+    window.sayitOnError=()=>{setErrType('');d('ERROR')};
+    window.sayitOnAiError=()=>{setErrType('ai');d('ERROR')};
+    window.sayitOnUipiWarn=()=>{setUipiWarn(true)};
+    window.__sayitDismiss=()=>{d('_RESET');window.sayit&&window.sayit.clearElementPositions()};
+    window.sayitOnRmsLevel=v=>sv(v);window.sayitOnTick=()=>{};
+    window.sayitOnAsrResult=(t,eng)=>{setAsrEngine(eng||'')};
+    window.sayitOnAiResult=(t,pid,mdl)=>{setAiModel((pid||'')+(mdl?'/'+mdl:''))};},[playBeep]);
+
+  const s=st.s;
+  if(!s||s===INIT)return null;
+
+  const copyDoneText=(e)=>{e.stopPropagation();if(doneText&&navigator.clipboard)navigator.clipboard.writeText(doneText).catch(()=>{})};
+
+  return h('div',{ref,onClick:()=>{setDoneText('');d('_RESET');window.sayit&&window.sayit.clearElementPositions()},
+    style:{display:'flex',flexDirection:'row',alignItems:'center',
+    justifyContent:'center',position:'relative',borderRadius:R,overflow:'hidden',
+    background:BG,border:'1px solid '+BD,height:34,padding:'0 13px',
+    width:86,boxShadow:'0 8px 24px rgba(0,0,0,.22)',transition:'width .18s ease, opacity .18s ease'}},
+
+    s===REC&&h(AudioBars,{volume:vol,active:true}),
+    s===REC&&uipiWarn&&h('span',{style:{fontSize:10,color:'rgba(255,200,80,.9)',marginLeft:6,flexShrink:0}},'⚠'),
+
+    s===STOPPING&&h('div',{style:{position:'relative',flex:1,height:26,
+      display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden',borderRadius:R}},
+      h(Sweep),
+      h('span',{style:{fontSize:12,fontWeight:700,color:TX3,position:'relative',zIndex:1}},aiOn?'思考中':'处理中')),
+
+    s===DONE&&h('span',{title:doneText?'copy':'',onClick:copyDoneText,
+      style:{fontSize:12,fontWeight:700,color:TX3,cursor:doneText?'pointer':'default'}},'完成'),
+    s===ERR&&h('span',{style:{fontSize:12,fontWeight:700,color:'rgba(255,120,120,.92)'}},errType==='ai'?'未修正':'识别失败')
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(h(Float));
+</script></body></html>

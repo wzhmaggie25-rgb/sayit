@@ -1,0 +1,137 @@
+/* ═══════════════════════════════════════════════════════════════
+   Sayit Design Tokens
+   Extracted from HTML prototypes — OKLCH → hex variables
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Colors (light theme) ────────────────────────────────── */
+  --bg:        oklch(99% 0.002 252);
+  --surface:   oklch(100% 0 0);
+  --fg:        oklch(16% 0.015 260);
+  --muted:     oklch(50% 0.014 260);
+  --border:    oklch(92% 0.005 252);
+  --accent:    #2f6feb;
+  --accent-on: #ffffff;
+  --accent-hover: color-mix(in oklab, var(--accent), black 8%);
+  --accent-soft:  color-mix(in oklab, var(--accent) 10%, transparent);
+  --success:   #17a34a;
+  --danger:    #dc2626;
+  --warn:      #eab308;
+  --fg-soft:   oklch(0% 0 0 / 0.04);
+  --chrome-desktop: oklch(94% 0.003 252);
+
+  /* ── Typography ──────────────────────────────────────────── */
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+
+  /* ── Font sizes ──────────────────────────────────────────── */
+  --text-xs:    9px;
+  --text-sm:    10.5px;
+  --text-base:  13px;
+  --text-md:    14px;
+  --text-lg:    16px;
+  --text-xl:    28px;
+  --text-2xl:   36px;
+
+  /* ── Radii ───────────────────────────────────────────────── */
+  --radius-sm:  8px;
+  --radius-md:  12px;
+  --radius-lg:  16px;
+  --radius-xl:  20px;
+  --radius-2xl: 24px;
+  --radius-pill: 9999px;
+
+  /* ── Spacing ─────────────────────────────────────────────── */
+  --space-2xs: 2px;
+  --space-xs:  4px;
+  --space-sm:  8px;
+  --space-md:  12px;
+  --space-lg:  16px;
+  --space-xl:  20px;
+  --space-2xl: 24px;
+  --space-3xl: 32px;
+
+  /* ── Shadows ─────────────────────────────────────────────── */
+  --shadow-sm: 0 2px 10px oklch(0% 0 0 / 0.03);
+  --shadow-md: 0 4px 24px oklch(0% 0 0 / 0.05), 0 0 0 1px oklch(0% 0 0 / 0.03);
+  --shadow-lg: 0 12px 40px oklch(0% 0 0 / 0.12);
+  --shadow-xl: 0 8px 32px oklch(0% 0 0 / 0.12);
+
+  /* ── Motion ──────────────────────────────────────────────── */
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  --motion-slow: 300ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ── Dimensions ──────────────────────────────────────────── */
+  --window-w: 780px;
+  --window-h: 560px;
+  --settings-h: 600px;
+  --header-h: 48px;
+  --nav-h: 48px;
+}
+
+/* ── Dark theme ────────────────────────────────────────────── */
+[data-theme="dark"] {
+  --bg:        oklch(14% 0.008 260);
+  --surface:   oklch(19% 0.007 260);
+  --fg:        oklch(93% 0.003 260);
+  --muted:     oklch(58% 0.012 260);
+  --border:    oklch(27% 0.008 260);
+  --accent:    #4d8bff;
+  --accent-hover: color-mix(in oklab, var(--accent), black 8%);
+  --accent-soft:  color-mix(in oklab, var(--accent) 14%, transparent);
+  --fg-soft:   oklch(100% 0 0 / 0.05);
+  --chrome-desktop: oklch(8% 0.006 260);
+}
+
+[data-theme="dark"] .window,
+[data-theme="dark"] .window-card {
+  box-shadow: 0 4px 32px oklch(0% 0 0 / 0.4), 0 0 0 1px oklch(100% 0 0 / 0.04);
+}
+
+/* ── Reset ─────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+
+/* ── Global Scrollbar (thin, rounded, translucent) ─────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: oklch(50% 0.014 260 / 0.18);
+  border-radius: 10px;
+  min-height: 30px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(50% 0.014 260 / 0.35);
+}
+
+/* ── Shared Header ─────────────────────────────────────────── */
+.app-header {
+  display: flex; align-items: center;
+  height: 42px; padding: 0 16px; flex-shrink: 0;
+  background: var(--bg);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.app-header .header-left { display: flex; align-items: center; gap: 8px; }
+.app-header .header-title { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--fg); }
+.app-header .header-spacer { flex: 1; }
+.app-header .header-actions { display: flex; align-items: center; gap: 2px; -webkit-app-region: no-drag; }
+
+.header-btn {
+  width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+  border: none; background: transparent; color: var(--muted); border-radius: 6px;
+  cursor: pointer; transition: all var(--motion-fast) var(--ease-standard);
+}
+.header-btn:hover { background: var(--fg-soft); color: var(--fg); }
+.header-btn svg { width: 16px; height: 16px; }
+
+.header-btn.close:hover { background: #dc2626; color: #fff; }
+.header-btn.minimize:hover { background: var(--fg-soft); color: var(--fg); }
+
+.status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--success); flex-shrink: 0;
+}

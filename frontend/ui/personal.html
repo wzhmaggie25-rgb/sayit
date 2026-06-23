@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Sayit · 个人</title>
+<link rel="stylesheet" href="css/tokens.css" />
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html{height:100%}
+body{margin:0;height:100%;background:var(--bg);font-family:var(--font-body);font-size:14px;color:var(--fg);-webkit-font-smoothing:antialiased}
+.window{width:100%;height:100%;background:var(--bg);display:flex;flex-direction:column;overflow:hidden}
+
+.content{flex:1;overflow-y:auto;padding:20px 24px}
+
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:18px;text-align:center}
+.stat-card .num{font-size:28px;font-weight:700;color:var(--accent);font-family:var(--font-mono)}
+.stat-card .label{font-size:11px;color:var(--muted);margin-top:4px;text-transform:uppercase;letter-spacing:.05em}
+
+.section-title{font-size:14px;font-weight:600;color:var(--fg);margin:24px 0 12px}
+.recent-list{display:flex;flex-direction:column;gap:6px}
+.recent-item{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 14px;display:flex;align-items:center;justify-content:space-between;font-size:12px}
+.recent-item .app{color:var(--accent);font-weight:500}
+.recent-item .text{color:var(--fg);flex:1;margin:0 12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.recent-item .time{color:var(--muted);font-family:var(--font-mono);font-size:11px;white-space:nowrap}
+
+.empty{text-align:center;color:var(--muted);padding:40px;font-size:13px}
+
+.app-bars{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.app-row{display:flex;align-items:center;gap:10px}
+.app-row .app-icon{width:20px;height:20px;border-radius:4px;background:var(--accent-soft);display:grid;place-items:center;font-size:10px;color:var(--accent);flex-shrink:0}
+.app-row .app-name{font-size:12px;color:var(--fg);width:80px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.app-row .bar-track{flex:1;height:6px;background:var(--fg-soft);border-radius:3px;overflow:hidden}
+.app-row .bar-fill{height:100%;background:var(--accent);border-radius:3px;transition:width .4s ease}
+.app-row .bar-count{font-size:11px;color:var(--muted);min-width:24px;text-align:right;font-family:var(--font-mono)}
+
+.bottom-nav{display:flex;align-items:center;justify-content:center;gap:32px;height:48px;border-top:1px solid var(--border);flex-shrink:0;background:var(--bg)}
+.nav-item{display:flex;flex-direction:column;align-items:center;gap:2px;border:none;background:transparent;cursor:pointer;color:var(--muted);text-decoration:none;padding:4px 16px;border-radius:var(--radius-sm);transition:all var(--motion-fast) var(--ease-standard)}
+.nav-item:hover{color:var(--fg)}
+.nav-item.active{color:var(--accent)}
+.nav-item svg{width:18px;height:18px}
+.nav-item span{font-size:10px;font-weight:500}
+</style>
+</head>
+<body>
+<div class="window">
+<div class="app-header">
+  <div class="header-left"><span class="header-title">Sayit</span></div>
+  <div class="header-spacer"></div>
+  <div class="header-actions">
+    <button class="header-btn" id="themeToggle" title="切换主题">
+      <svg id="themeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+    </button>
+    <button class="header-btn minimize" onclick="window.sayitMinimize()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+    <button class="header-btn close" onclick="window.sayitClose()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+  </div>
+</div>
+<div class="content">
+  <div class="stats">
+    <div class="stat-card"><div class="num" id="statCount">-</div><div class="label">录音次数</div></div>
+    <div class="stat-card"><div class="num" id="statWords">-</div><div class="label">转写字数</div></div>
+    <div class="stat-card"><div class="num" id="statRules">-</div><div class="label">学习规则</div></div>
+  </div>
+  <div class="section-title">使用场景</div>
+  <div class="app-bars" id="appStats"><span class="empty">加载中…</span></div>
+</div>
+<nav class="bottom-nav">
+  <a class="nav-item" href="recorder.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg><span>Sayit</span></a>
+  <a class="nav-item active" href="personal.html"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg><span>个人</span></a>
+  <a class="nav-item" href="history.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span>历史</span></a>
+  <a class="nav-item" href="dictionary.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span>词库</span></a>
+  <a class="nav-item" href="settings.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>设置</span></a>
+</nav>
+</div>
+<script src="js/bridge.js"></script>
+<script>
+(function(){
+  // Load stats
+  async function load(){
+    try{
+      var history=[], rules=[], dict=[];
+      if(window.sayit){
+        history=await window.sayit.getHistory('',100,0)||[];
+        rules=await window.sayit.getRules(true)||[];
+        dict=await window.sayit.getDictionary()||[];
+      }
+      document.getElementById('statCount').textContent=history.length;
+      var words=0; history.forEach(function(h){ words+=(h.final_text||h.text||'').replace(/\s/g,'').length });
+      document.getElementById('statWords').textContent=words;
+      document.getElementById('statRules').textContent=rules.length;
+
+      // App usage stats
+      try{
+        var apps=[];
+        if(window.sayit) apps=await window.sayit.api('GET','/api/stats/apps')||[];
+        var container=document.getElementById('appStats');
+        if(!apps.length){container.innerHTML='<span class="empty">暂无数据，开始录音吧</span>';}
+        else{
+          var max=apps[0].count;
+          container.innerHTML=apps.map(function(a,i){
+            var pct=Math.round(a.count/max*100);
+            var short=a.app.replace('.exe','').replace('ApplicationFrameHost','Edge').substring(0,12);
+            return '<div class="app-row">'+
+              '<div class="app-icon">'+(i+1)+'</div>'+
+              '<div class="app-name" title="'+a.app+'">'+short+'</div>'+
+              '<div class="bar-track"><div class="bar-fill" style="width:'+pct+'%"></div></div>'+
+              '<div class="bar-count">'+a.count+'</div>'+
+            '</div>';
+          }).join('');
+        }
+      }catch(e){}
+    }catch(e){}
+  }
+  load();
+
+  // Theme
+  var html=document.documentElement;
+  function getMode(){return localStorage.getItem('sayit-theme')||'light'}
+  function apply(m){
+    html.setAttribute('data-theme',m==='dark'?'dark':'light');
+    localStorage.setItem('sayit-theme',m);
+    var icon=document.getElementById('themeIcon');
+    icon.innerHTML=m==='dark'?"<path d='M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'/>":"<circle cx='12' cy='12' r='5'/><path d='M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42'/>";
+  }
+  apply(getMode());
+  document.getElementById('themeToggle').onclick=function(){apply(getMode()==='light'?'dark':'light')};
+})();
+window.sayitMinimize=function(){if(window.sayit)window.sayit.minimize()};
+window.sayitClose=function(){if(window.sayit)window.sayit.close()};
+</script>
+</body>
+</html>

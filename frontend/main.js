@@ -1,0 +1,357 @@
+// Typeless ref: Ch_class.js lines 8409-8558
+// Architecture: events drive everything — no polling (like Typeless IPC)
+// Backend events via WebSocket → main.js forwards to float.html
+const { app, BrowserWindow, screen, ipcMain } = require('electron');
+const { spawn } = require('child_process');
+const path = require('path');
+const WebSocket = require('ws');
+
+let mainWin = null, floatWin = null, backendProcess = null;
+let floatReady = false;
+let ws = null;
+
+let mouseTracker = null;
+let currentDisplay = null;
+let mouseDetectorInterval = null;
+let floatTopInterval = null;
+let elementPositions = [];
+let lastIsMouseInside = null;
+let wsReconnectTimer = null;
+
+const BASE = 'http://127.0.0.1:17890';
+const FW = 500;
+const FH = 500;
+
+function getBackendLaunch() {
+  if (app.isPackaged) {
+    const packagedBackend = path.join(process.resourcesPath, 'backend', 'sayit-backend.exe');
+    const packagerBackend = path.join(process.resourcesPath, 'sayit-backend', 'sayit-backend.exe');
+    const backendPath = require('fs').existsSync(packagedBackend) ? packagedBackend : packagerBackend;
+    return {
+      command: backendPath,
+      args: [],
+      cwd: path.dirname(backendPath),
+    };
+  }
+  return {
+    command: 'python',
+    args: [path.join(__dirname, '..', 'server.py')],
+    cwd: path.join(__dirname, '..'),
+  };
+}
+
+async function api(m,u,b){
+  if (u !== '/api/version') await waitForServer(60);
+  const o={method:m,headers:{'Content-Type':'application/json'}};
+  if(b)o.body=JSON.stringify(b);
+  let lastError = '';
+  for (let i=0; i<5; i++) {
+    try {
+      const r = await fetch(BASE+u,o);
+      if (r.ok) return await r.json();
+      lastError = 'HTTP ' + r.status;
+    } catch(e) {
+      lastError = e.message;
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return {error:lastError || 'backend not ready'};
+}
+
+function createMainWindow() {
+  mainWin = new BrowserWindow({ width: 800, height: 600, frame: false, backgroundColor: '#f8f9fa',
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
+  mainWin.loadFile(path.join(__dirname, 'ui', 'recorder.html'));
+  mainWin.on('closed', () => { mainWin = null; destroyFloat(); if (backendProcess) backendProcess.kill(); app.quit(); });
+}
+
+function preCreateFloat() {
+  if (isUsableWindow(floatWin)) return;
+  const opts = getWindowOptions();
+  floatWin = new BrowserWindow(Object.assign(opts, {
+    show: false,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false }
+  }));
+  floatWin.loadFile(path.join(__dirname, 'ui', 'float.html'));
+  floatWin.webContents.on('did-finish-load', () => { floatReady = true; });
+  floatWin.on('closed', () => {
+    floatWin = null;
+    floatReady = false;
+    elementPositions = [];
+    stopMouseTracking();
+    stopMouseDetection();
+  });
+  floatWin.setIgnoreMouseEvents(true, { forward: false });
+  keepFloatOnTop();
+  floatWin.setFullScreenable(false);
+  setupMouseTracking();
+  startMouseDetection();
+  startFloatTopGuard();
+}
+
+function calculateWindowHeight() { return FH; }
+
+function isUsableWindow(win) {
+  return !!win && !win.isDestroyed();
+}
+
+function getWindowOptions() {
+  const d = screen.getPrimaryDisplay();
+  const { x, y } = d.workArea;
+  return { x, y, type: 'panel', width: FW, height: FH,
+    transparent: true, frame: false, hasShadow: false,
+    maximizable: false, resizable: false, minimizable: false,
+    focusable: false, fullscreen: false };
+}
+
+function moveWindowToDisplay(display) {
+  if (!display) return;
+  const { x, y, width, height } = display.workArea;
+  const wh = calculateWindowHeight();
+  const wx = Math.floor(x + (width - FW) / 2);
+  const wy = Math.floor(y + height - wh);
+  try {
+    if (isUsableWindow(floatWin)) {
+      floatWin.setBounds({ x: wx, y: wy, width: FW, height: wh });
+      keepFloatOnTop();
+    }
+  } catch(e) {}
+}
+
+function keepFloatOnTop() {
+  if (!isUsableWindow(floatWin)) return;
+  try { floatWin.setAlwaysOnTop(true, 'screen-saver', 1); } catch(e) {}
+  try { floatWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true }); } catch(e) {}
+  try { floatWin.moveTop(); } catch(e) {}
+}
+
+function startFloatTopGuard() {
+  if (floatTopInterval !== null) clearInterval(floatTopInterval);
+  floatTopInterval = setInterval(() => {
+    if (isUsableWindow(floatWin) && floatWin.isVisible()) keepFloatOnTop();
+  }, 1000);
+}
+
+function stopFloatTopGuard() {
+  if (floatTopInterval !== null) { clearInterval(floatTopInterval); floatTopInterval = null; }
+}
+
+function setupMouseTracking() {
+  if (mouseTracker !== null) clearInterval(mouseTracker);
+  const pt = screen.getCursorScreenPoint();
+  const disp = screen.getDisplayNearestPoint(pt);
+  currentDisplay = disp; moveWindowToDisplay(disp);
+  mouseTracker = setInterval(() => {
+    if (!isUsableWindow(floatWin)) return;
+    const p = screen.getCursorScreenPoint();
+    const nd = screen.getDisplayNearestPoint(p);
+    if (!currentDisplay || currentDisplay.id !== nd.id) {
+      currentDisplay = nd; moveWindowToDisplay(nd);
+    }
+  }, 100);
+}
+
+function startMouseDetection() {
+  if (mouseDetectorInterval !== null) clearInterval(mouseDetectorInterval);
+  mouseDetectorInterval = setInterval(() => {
+    if (!isUsableWindow(floatWin)) return;
+    if (elementPositions.length === 0) {
+      floatWin.setIgnoreMouseEvents(true, { forward: false });
+      return;
+    }
+    const pt = screen.getCursorScreenPoint();
+    const bounds = floatWin.getBounds();
+    // Typeless line 8528 stores elementPositions; Sayit renderer reports viewport rects.
+    const inside = elementPositions.some(el =>
+      pt.x >= bounds.x + el.left && pt.x <= bounds.x + el.right &&
+      pt.y >= bounds.y + el.top && pt.y <= bounds.y + el.bottom);
+    if (inside !== lastIsMouseInside) lastIsMouseInside = inside;
+    floatWin.setIgnoreMouseEvents(!inside, { forward: false });
+  }, 100);
+}
+
+function stopMouseTracking() {
+  if (mouseTracker !== null) { clearInterval(mouseTracker); mouseTracker = null; }
+  currentDisplay = null;
+}
+
+function stopMouseDetection() {
+  if (mouseDetectorInterval !== null) { clearInterval(mouseDetectorInterval); mouseDetectorInterval = null; }
+  lastIsMouseInside = null;
+}
+
+function destroyFloat() {
+  stopMouseTracking();
+  stopMouseDetection();
+  stopFloatTopGuard();
+  elementPositions = [];
+  if (isUsableWindow(floatWin)) floatWin.destroy();
+  floatWin = null;
+  floatReady = false;
+}
+
+function sanitizeElementPositions(positions) {
+  if (!Array.isArray(positions)) return [];
+  return positions
+    .map(el => ({
+      left: Number(el.left),
+      top: Number(el.top),
+      right: Number(el.right),
+      bottom: Number(el.bottom),
+    }))
+    .filter(el =>
+      Number.isFinite(el.left) && Number.isFinite(el.top) &&
+      Number.isFinite(el.right) && Number.isFinite(el.bottom) &&
+      el.right >= el.left && el.bottom >= el.top);
+}
+
+function showFloat() {
+  if (!isUsableWindow(floatWin)) preCreateFloat();
+  try {
+    moveWindowToDisplay(currentDisplay || screen.getPrimaryDisplay());
+    keepFloatOnTop();
+    if (typeof floatWin.showInactive === 'function') floatWin.showInactive();
+    else floatWin.show();
+    keepFloatOnTop();
+  } catch(e) {}
+}
+
+function hideFloat() {
+  try {
+    if (isUsableWindow(floatWin)) {
+      floatWin.setIgnoreMouseEvents(true, { forward: false });
+      floatWin.hide();
+    }
+  } catch(e) {}
+}
+
+function pushToFloat(js) {
+  if (!isUsableWindow(floatWin) || !floatReady) return;
+  try { floatWin.webContents.executeJavaScript(js); } catch(e) {}
+}
+
+function pushToMain(channel, payload) {
+  if (!isUsableWindow(mainWin)) return;
+  try { mainWin.webContents.send(channel, payload || {}); } catch(e) {}
+}
+
+// ── WebSocket: backend events → forward to float ──
+function connectWS() {
+  if (ws) try { ws.removeAllListeners(); ws.close(); } catch(e) {}
+  if (wsReconnectTimer !== null) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  ws = new WebSocket('ws://127.0.0.1:17890/ws/events');
+  ws.on('message', (data) => {
+    try {
+      const evt = JSON.parse(data.toString());
+      switch (evt.event) {
+        case 'recording_started':
+          showFloat();
+          keepFloatOnTop();
+          pushToFloat('if(window.sayitOnRecordingStarted)sayitOnRecordingStarted()');
+          break;
+        case 'recording_stopped':
+          keepFloatOnTop();
+          pushToFloat('if(window.sayitOnRecordingStopped)sayitOnRecordingStopped()');
+          break;
+        case 'pipeline_done':
+          keepFloatOnTop();
+          pushToFloat('if(window.sayitOnPipelineDone)sayitOnPipelineDone(' + JSON.stringify(evt.text) + ')');
+          pushToMain('backend-event', evt);
+          break;
+        case 'injection_done':
+        case 'silent_learned':
+          pushToMain('backend-event', evt);
+          break;
+        case 'error':
+          keepFloatOnTop();
+          pushToFloat('if(window.sayitOnError)sayitOnError(' + JSON.stringify(evt.message) + ')');
+          break;
+        case 'tick':
+          pushToFloat('if(window.sayitOnTick)sayitOnTick(' + evt.seconds + ')');
+          break;
+        case 'rms_level':
+          pushToFloat('if(window.sayitOnRmsLevel)sayitOnRmsLevel(' + evt.level.toFixed(3) + ')');
+          break;
+        case 'asr_result':
+          pushToFloat('if(window.sayitOnAsrResult)sayitOnAsrResult(' +
+            JSON.stringify(evt.text) + ',' + JSON.stringify(evt.engine || '') + ')');
+          break;
+        case 'asr_partial':
+          pushToFloat('if(window.sayitOnAsrPartial)sayitOnAsrPartial(' +
+            JSON.stringify(evt.text) + ',' + JSON.stringify(evt.engine || '') + ')');
+          break;
+        case 'asr_progress':
+          keepFloatOnTop();
+          pushToFloat('if(window.sayitOnAsrProgress)sayitOnAsrProgress(' +
+            JSON.stringify(evt.stage || '') + ',' + JSON.stringify(evt.message || '') + ',' +
+            JSON.stringify(evt.engine || '') + ')');
+          break;
+        case 'asr_degraded':
+          keepFloatOnTop();
+          pushToFloat('if(window.sayitOnAsrDegraded)sayitOnAsrDegraded(' +
+            JSON.stringify(evt.from || '') + ',' + JSON.stringify(evt.to || '') + ',' +
+            JSON.stringify(evt.reason || '') + ')');
+          break;
+        case 'ai_result':
+          pushToFloat('if(window.sayitOnAiResult)sayitOnAiResult(' +
+            JSON.stringify(evt.text) + ',' + JSON.stringify(evt.provider || '') + ',' + JSON.stringify(evt.model || '') + ')');
+          break;
+      }
+    } catch(e) {}
+  });
+  ws.on('close', scheduleWSReconnect);
+  ws.on('error', scheduleWSReconnect);
+}
+
+function scheduleWSReconnect() {
+  if (wsReconnectTimer !== null) return;
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    connectWS();
+  }, 2000);
+}
+
+// ── Fallback poll: 500ms backup for WebSocket gaps ──
+let wasRecording = false;
+async function poll() {
+  try {
+    const r = await (await fetch(BASE + '/api/is-recording')).json();
+    if (r.recording && !wasRecording) { showFloat(); keepFloatOnTop(); pushToFloat('if(window.sayitOnRecordingStarted)sayitOnRecordingStarted()'); }
+    if (!r.recording && wasRecording) { keepFloatOnTop(); pushToFloat('if(window.sayitOnRecordingStopped)sayitOnRecordingStopped()'); }
+    wasRecording = r.recording;
+  } catch(e) {}
+  setTimeout(poll, 500);
+}
+
+ipcMain.handle('api', async (_e, m, u, b) => api(m, u, b));
+ipcMain.handle('show-float', () => showFloat());
+ipcMain.handle('hide-float', () => hideFloat());
+ipcMain.handle('minimize-main', () => { if (mainWin) mainWin.minimize(); });
+ipcMain.handle('close-main', () => { if (mainWin) mainWin.close(); });
+ipcMain.on('float-element-positions', (_e, positions) => { elementPositions = sanitizeElementPositions(positions); });
+ipcMain.on('float-element-positions-clear', () => { elementPositions = []; });
+
+async function waitForServer(retries=20) {
+  for (let i=0; i<retries; i++) {
+    try { const r = await fetch(BASE+'/api/version'); if (r.ok) return true; } catch(e) {}
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  return false;
+}
+
+app.whenReady().then(async () => {
+  if (process.env.SAYIT_SKIP_BACKEND !== '1') {
+    const backend = getBackendLaunch();
+    backendProcess = spawn(backend.command, backend.args, {
+      cwd: backend.cwd,
+      stdio: 'inherit',
+      windowsHide: app.isPackaged,
+    });
+  }
+  createMainWindow();
+  preCreateFloat();
+  await waitForServer();
+  connectWS(); poll();
+});
+app.on('window-all-closed', () => { if (backendProcess) backendProcess.kill(); app.quit(); });
+app.on('before-quit', () => { if (backendProcess) backendProcess.kill(); });

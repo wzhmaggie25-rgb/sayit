@@ -1,0 +1,22 @@
+.venv/
+.tmp_ctx_venv/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+*.db
+.DS_Store
+venv/
+*.egg-info/
+models/
+
+config.json
+native/context_helper/build/
+.tmp_*.log
+.tmp_float_frames/
+sayit-electron-error.log
+
+# Build artifacts
+build/
+frontend/release/
+*.spec
