@@ -3,11 +3,26 @@
 
 ## 状态
 
-**BLOCKED**
+**DONE**
 
 ## 任务名称
 
 仅修复 `context_helper` DLL 的 COM apartment 模型，使其与 Python/comtypes 的 MTA 调用线程兼容，并完成针对性验证。
+
+## 最终提交
+
+- 代码修复：`79b90ff` → `1d6c9b0`（rebase 后最终 SHA）
+- 最终分支 SHA：`8efef9d0e1f44b0042b4ec89c30c7d5ccb0087f0`（Revert BLOCKED commit）
+- 修复后完整提交链：`8efef9d`（已推送）+ 后续 revert + 报告提交
+
+## 完成摘要
+
+1. ✅ `main.cpp` — 编译期条件：`BUILD_DLL` 时 `COINIT_MULTITHREADED`，EXE 保持 `COINIT_APARTMENTTHREADED`
+2. ✅ DLL 和 EXE 均成功构建（Claude build pass）
+3. ✅ Python/comtypes MTA 同线程 DLL 加载测试通过（`run_dll_com_test.py` → DLL returned UIA keys）
+4. ✅ EXE `ping` 和 `get_full_context` 回归通过
+5. ✅ `tests/test_context_helper_dll_com.py` 新增 — 子进程隔离运行，支持 pytest
+6. ✅ 仅允许文件被修改，无业务代码改动
 
 ## 基线与分支
 

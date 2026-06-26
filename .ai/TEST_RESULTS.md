@@ -1,5 +1,5 @@
 # Test Results
-> 最后一次更新：2026-06-26 16:12
+> 最后一次更新：2026-06-26 17:30
 
 ## 本轮说明（第五轮）
 
@@ -232,3 +232,74 @@
 | **桥梁单元测试 (v0.1.0)** | **29** | **0** | **0** | **第一版全部通过** |
 | **桥梁单元测试 (v0.2.0)** | **36** | **0** | **0** | **修复版全部通过** |
 | **桥梁冒烟测试** | **1** | **0** | **0** | **真实 Claude 通过 (e6aa861)** |
+
+---
+
+## 本轮说明（第六轮：COM apartment 修复 + 桥梁自动执行恢复）
+
+### 桥梁自动执行恢复
+
+| 问题 | 修复 | 结果 |
+|------|------|------|
+| `.git/REBASE_HEAD` 残留 → 桥梁误认为有进行中操作 | 删除残留文件 | ✅ 桥接恢复正常轮询 |
+| 默认 `claude_timeout_seconds: 300` 不足以完成 C++ 编译 | 创建 `bridge_config.json`，设置 900s | ✅ 后续配置生效 |
+
+### COM Apartment 针对性测试
+
+#### A. 编译验证
+
+DLL 和 EXE 均成功构建（Claude Code 执行，无编译错误）：
+
+| 工件 | 路径 | 状态 |
+|------|------|------|
+| `sayit_context_helper.exe` | `native/context_helper/build/Release/sayit_context_helper.exe` (83KB, 17:10) | ✅ |
+| `sayit_context_helper_dll.dll` | `native/context_helper/build/Release/sayit_context_helper_dll.dll` (70KB, 17:07) | ✅ |
+
+#### B. EXE 回归冒烟
+
+执行命令：
+```bash
+# ping
+echo '{"id":"0","method":"ping"}' | sayit_context_helper.exe
+# → {"id":"0","ok":true,"result":{"pong":true}}
+
+# get_full_context
+echo '{"id":"1","method":"get_full_context"}' | sayit_context_helper.exe
+# → {"id":"1","ok":true,"result":{...}}
+```
+
+| 检查项 | 结果 |
+|--------|------|
+| ping 返回成功 JSON | ✅ `ok=True, result.pong=True` |
+| get_full_context 返回可解析 JSON | ✅ |
+| 进程正常退出（exit 0） | ✅ |
+| 未破坏原 subprocess 路径 | ✅ |
+
+#### C. Python/comtypes MTA + DLL 同线程测试（核心）
+
+**独立脚本验证（`run_dll_com_test.py`）：**
+
+| 检查项 | 结果 |
+|--------|------|
+| 显式 CoInitializeEx(MTA) hr=0x00000000 | ✅ S_OK |
+| DLL 加载（ctypes.CDLL） | ✅ |
+| `get_full_context_json(0)` 返回非空 | ✅ |
+| 返回字段含 UIA 数据 | ✅ `text_insertion_point`, `active_application`, `device_environment` |
+| comtypes 在 MTA 后导入 | ✅ 成功（预期 error 因线程模式已锁） |
+
+**pytest 子进程隔离测试（`test_context_helper_dll_com.py`）：**
+
+| 检查项 | 结果 |
+|--------|------|
+| pytest 环境已 STA（anyio）→ 自动子进程 | ✅ |
+| 子进程中 notepad 窗口可见性 | ⏭️ SKIP（CI/非交互环境无前台窗口 — 预期行为） |
+| 行为正确（不误报 PASS/FAIL） | ✅ |
+
+#### D. 修复证据
+
+- **修复前**：DLL 在 server.py/comtypes MTA 线程中崩溃（exit 127 / STATUS_DLL_INIT_FAILED）
+- **修复后**：DLL 在 MTA 线程中正常返回 UIA JSON 数据（`text_insertion_point`, `device_environment` 等）
+- **`main.cpp` diff** 唯一变化：编译期 `#ifdef BUILD_DLL` → MTA，`#else` → STA<br>
+  `ComInit` 重构：跟踪 `hr()` 和 `initialized_`，只在 S_OK/S_FALSE 时 CoUninitialize<br>
+  EXE 行为完全不变
+- EXE 回归通过：ping + get_full_context
