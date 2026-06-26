@@ -254,13 +254,41 @@ std::string appInfoJson(const AppInfo& info) {
 //  COM + UIA helpers
 // ============================================================
 
+// The EXE entry point owns its own thread/apartment lifecycle so it
+// continues to use STA (matches the legacy subprocess behaviour that has
+// been validated against UIA in production).
+//
+// The DLL is loaded in-process by Python/comtypes, whose threads have
+// already initialised COM as MTA. Asking for STA on an already-MTA
+// thread returns RPC_E_CHANGED_MODE, leaving the apartment unchanged
+// and signalling that the caller's apartment must be used as-is. By
+// requesting MTA in the DLL build we cooperate with the host apartment
+// instead of fighting it, while still surfacing real failures from
+// CoInitializeEx (we do not swallow RPC_E_CHANGED_MODE).
+#ifdef BUILD_DLL
+constexpr DWORD kComInitFlags = COINIT_MULTITHREADED;
+#else
+constexpr DWORD kComInitFlags = COINIT_APARTMENTTHREADED;
+#endif
+
 class ComInit {
  public:
-  ComInit() : ok_(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {}
-  ~ComInit() { if (ok_) CoUninitialize(); }
-  bool ok() const { return ok_; }
+  ComInit() {
+    hr_ = CoInitializeEx(nullptr, kComInitFlags);
+    // Both S_OK (first init on this thread) and S_FALSE (already
+    // initialised with a compatible model) require a matching
+    // CoUninitialize. RPC_E_CHANGED_MODE and other failures must not
+    // pair with CoUninitialize.
+    initialized_ = (hr_ == S_OK || hr_ == S_FALSE);
+  }
+  ~ComInit() {
+    if (initialized_) CoUninitialize();
+  }
+  bool ok() const { return initialized_; }
+  HRESULT hr() const { return hr_; }
  private:
-  bool ok_;
+  HRESULT hr_ = E_FAIL;
+  bool initialized_ = false;
 };
 
 template <typename T>
