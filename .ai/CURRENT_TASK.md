@@ -4,7 +4,7 @@
 
 ## 状态
 
-**DONE** — 自动化已完成；实机最终验收（用户连按 3 次 RAlt + 观察 `/api/diagnostics/hotkey`）仍需用户手动确认。
+**BLOCKED** — 自动化已完成；实机最终验收（用户连按 3 次 RAlt + 观察 `/api/diagnostics/hotkey`）仍需用户手动确认。
 
 **最终提交 SHA：** `5084f7d1ecca6cda2f858b1006fb15ae059007f6`
 
