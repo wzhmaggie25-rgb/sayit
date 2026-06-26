@@ -257,12 +257,14 @@ class RecordingPipeline:
             self.state = RecordingState.INJECTING
             self._eb.emit(Events.ASR_PROGRESS, "injecting", "注入中", engine)
             try:
-                ok = injector.inject(final_text, target=injection_target)
+                inject_result = injector.inject(final_text, target=injection_target)
+                ok = bool(inject_result)
                 self._eb.emit(Events.INJECTION_DONE, ok)
             except Exception as e:
                 logger.warning("Injection failed: %s", e)
                 self._eb.emit(Events.INJECTION_DONE, False)
                 ok = False
+                inject_result = None
 
             # ── Phase 5: Save to history ─────────────────────────────
             history_id = db.add_history(

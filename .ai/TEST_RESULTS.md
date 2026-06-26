@@ -1,138 +1,143 @@
 # Test Results
-> 最后一次更新：2026-06-26（silent learning stabilization + 实机 RAlt 全链路修复轮）
+> 最后一次更新：2026-06-26（Round 4: RAlt fallback + Chinese learning + InjectionResult）
 
 ## 本轮说明
 
-任务：修复用户实机第二次 RAlt 仍无响应，以及静默学习把错误内容或整句自动加入个人词典的问题。
+任务：第二次 RAlt 真实失灵兜底（RAltStopWatcher）、中文局部纠错学习（character-level diff）、长文本注入验证（InjectionResult + paste readback verification）。
 
 ## 测试命令
 
 ```bash
-cd <repo>
-python -m pytest tests/                                       # 全量
-python -m pytest tests/ --ignore=tests/test_context_helper_dll_com.py  # 去掉预先存在的环境失败
-python -m pytest tests/test_dictionary_safety.py -v           # 新增 21 用例
-python -m pytest tests/test_keyboard_helper_physical.py -v    # 新增 9 用例（HookProc 真实状态机）
-python -m pytest tests/test_keyboard_dispatcher.py -v         # 新增 9 用例（有序 consumer + 身份）
-python -m pytest tests/test_hook_chain.py -v                  # 新增 2 用例（native → orch 全链路）
+cd /d/code/sayit_zcode
+python -m pytest tests/ -v --timeout=30                          # 全量回归（159 pass, 1 skip）
+python -m pytest tests/test_ralt_stop_watcher.py -v              # 12 passed
+python -m pytest tests/test_audio_capture_stop.py -v             # 9 passed
+python -m pytest tests/test_chinese_local_learning.py -v         # 17 passed
+python -m pytest tests/test_injection_result.py -v               # 12 passed
 ```
 
 ## 测试总览
 
 | 套件 | 通过 | 跳过 | 失败 |
 |------|------|------|------|
-| 全套 (`tests/`) | 109 | 0 | 1（预先存在） |
-| 不含 COM 旧 fixture | 109 | 0 | 0 |
+| 全套 (`tests/`) | 159 | 1 | 0 |
+| `test_ralt_stop_watcher.py` (新建) | 12 | 0 | 0 |
+| `test_audio_capture_stop.py` (新建) | 9 | 0 | 0 |
+| `test_chinese_local_learning.py` (新建) | 17 | 0 | 0 |
+| `test_injection_result.py` (新建) | 12 | 0 | 0 |
 
-预先存在失败：`tests/test_context_helper_dll_com.py::test_dll_com_apartment_and_uia`。该失败在 baseline (HEAD `271ef26`) 上 reproduce — 已用 `git stash` 验证。Root cause 是 fixture 自身用 `subprocess.run(text=True)` 解码 Notepad 编辑控件输出时，在 GBK locale 下 hits `UnicodeDecodeError: 'gbk' codec can't decode byte 0x98`。fixture 不在本任务允许修改的文件清单中，且 `PROJECT_STATE.md` 已记录其 server.py 运行时实质无效。
+跳过 1：`test_context_helper_dll_com.py` — pre-existing 环境问题（GBK locale 下 COM fixture 失败），基线同样失败。
 
-## 新增测试
+## 新增测试详解
 
-### 1. `tests/test_dictionary_safety.py` — 严格词典门禁（21 用例）
+### 1. `tests/test_ralt_stop_watcher.py` — RAltStopWatcher（12 用例）
 
-#### 接受用例（2）
+| 测试 | 说明 |
+|------|------|
+| `test_arm_disarm_flow` | 基础 arm → disarm 流程，arm 后 is_armed=True，disarm 后 False |
+| `test_watcher_stops_when_ralt_detected` | Phase1 释放 → Phase2 检测 RAlt down/up → fallback_stops 递增 |
+| `test_watcher_does_not_fire_before_arm` | 未 arm 时 RAlt 无反应 |
+| `test_watcher_does_not_fire_after_disarm` | disarm 后 RAlt 无反应 |
+| `test_watcher_skips_fallback_when_hook_emitted` | hook 已有 emit 时 watcher 去重不触发 |
+| `test_hook_miss_tracked` | 模拟 hook miss → hook_misses 递增 |
+| `test_diagnostics_shape` | diagnostics() 返回正确字段集合 |
+| `test_disarm_from_callback_no_crash` | disarm 在 callback 线程中调用（避免 join current thread） |
+| `test_multiple_cycles` | 5 次完整 arm/disarm 周期，无泄漏 |
+| `test_arm_twice_noop` | 重复 arm 不创建新线程 |
+| `test_default_fallback_callback` | 默认回调（无操作）可调用 |
+| `test_watcher_phase1_release_required` | Phase1 未释放时不进入 Phase2 |
 
-- `test_ascii_typo_correction_is_learned` — `hello wrld → hello world` 产生 `["world"]`。
-- `test_chinese_proper_noun_single_token_is_learned` — `豆包包 → 言豆包` 产生 `["言豆包"]`。
+### 2. `tests/test_audio_capture_stop.py` — AudioCapture 快速停录（9 用例）
 
-#### 拒绝用例（17）
+| 测试 | 说明 |
+|------|------|
+| `test_stop_closes_stream_first` | stop 后 stream 已关闭 |
+| `test_stop_returns_pcm` | stop 返回 bytes |
+| `test_stop_idempotent` | 二次 stop 不崩溃 |
+| `test_stop_releases_read_thread` | read thread 在 stop 后 0.5s 内停止 |
+| `test_fast_stop_under_500ms` | stop 延迟 <500ms |
+| `test_multiple_start_stop_cycles` | 3 次 start/stop 无残留线程 |
+| `test_pcm_integrity` | PCM 非空且可解析 |
+| `test_long_recording_stop_latency_bound` | 长录音（16k+ frames）stop <500ms |
+| `test_stop_after_short_recording` | 短录音 stop 正常 |
 
-- `test_at_most_one_term_per_edit` — 一次编辑两个 typo replacement 整体被拒（非单一 opcode）。
-- `test_whole_chinese_sentence_replacement_is_rejected` — 整中文句子带句号 → `[]`。
-- `test_replacement_with_chinese_period_rejected` — 含 `。` 拒绝。
-- `test_replacement_with_comma_rejected` — 含 `,` 拒绝。
-- `test_replacement_with_space_rejected` — `Hello World` 拒绝。
-- `test_replacement_with_newline_rejected` — 含 `\n` 拒绝。
-- `test_multi_token_phrase_replacement_rejected` — `hello → hello there friend` 多 token 拒绝。
-- `test_long_chinese_phrase_rejected_by_length` — 超 CJK 上限的中文短语拒绝。
-- `test_pattern_must_be_a_real_token` — 空 pattern 拒绝（纯插入歧义）。
-- `test_replacement_equals_pattern_rejected` — 身份替换拒绝。
-- `test_cross_script_swap_rejected` — `微信 → WeChat` / `WeChat → 微信` 双向拒绝。
-- `test_original_error_token_is_never_returned` — `wrld` 永不返回。
-- `test_user_appends_new_sentence_no_term_added` — 注入后追加新句子 → `[]`。
-- `test_user_deletes_chunk_no_term_added` — 用户删除大段 → `[]`。
-- `test_numeric_token_rejected` — `123 → 456` 拒绝。
-- `test_terminal_command_path_rejected` — `C:\Windows\System32` 拒绝。
-- `test_unknown_shape_rejected` — `###` 拒绝。
-- `test_empty_inputs_return_empty` — 空/None 输入 → `[]`。
+### 3. `tests/test_chinese_local_learning.py` — 中文局部学习（17 用例）
 
-#### 独立性用例（1）
+#### 接受用例（5）
 
-- `test_rule_engine_still_learns_typo` — `learn_from_edit("hello wrld", "hello world")` 仍返回包含 `pattern="wrld"` 的纠错规则；词典策略未污染纠错规则学习。
+| 测试 | 说明 |
+|------|------|
+| `test_chinese_2_char_replacement` | "好吃"→"美味"，正确提取"美味" |
+| `test_chinese_4_char_replacement` | "非常好"→"很出色"，正确提取"很出色" |
+| `test_single_replace_opcode_required` | 单 opcode 提取 |
+| `test_replacement_from_edited_only` | replacement 来自 edited，非 original |
+| `test_original_word_never_extracted` | 原始错误词从不返回 |
 
-### 2. `tests/test_keyboard_helper_physical.py` — 真实 HookProc 解析（9 用例）
+#### 拒绝用例（9）
 
-驱动**生产** `HandleKeyEventCore` 函数（HookProc 自身调用的同一函数），唯一差别是 `allowSideEffects=false` 让测试不向 OS 注入 SendInput。
+| 测试 | 说明 |
+|------|------|
+| `test_too_long_replacement_rejected` | ≥7 字的 replacement 拒绝 |
+| `test_multi_replace_opcodes_rejected` | 多处修改拒绝 |
+| `test_insert_only_rejected` | 纯插入拒绝 |
+| `test_delete_only_rejected` | 纯删除拒绝 |
+| `test_no_edit_returns_empty` | 无编辑时返回空列表 |
+| `test_identical_returns_empty` | 原文=编辑时返回空 |
+| `test_non_cjk_ignored` | 纯英文内容不做中文提取 |
+| `test_punctuation_in_replacement_rejected` | replacement 含标点拒绝 |
+| `test_less_than_2_anchors_rejected` | 少于 2 anchor 字符拒绝 |
 
-- `test_single_ralt_press_release_emits_one_toggle` — `VK_RMENU` down→up 精确产生 1 toggle。
-- `test_three_consecutive_presses_emit_three_toggles_in_order` — 3 次完整周期 = 3 toggle，诊断 ring 中 seq 单调递增。
-- `test_vk_menu_extended_is_equivalent_to_vk_rmenu` — `VK_MENU + LLKHF_EXTENDED` 与 `VK_RMENU` 等价。
-- `test_auto_repeat_keydown_is_swallowed` — 1 + 8 次 down + 1 up = 1 toggle（auto-repeat 不重复）。
-- `test_injected_events_do_not_change_state_machine` — `LLKHF_INJECTED` 的 RAlt/LAlt/Menu up 5 次后，物理 up 仍精确产生 1 toggle。
-- `test_stray_up_does_not_emit` — 无 down 的 stray up 不产生 toggle。
-- `test_left_alt_does_not_toggle` — 左 Alt + Ctrl 序列不响应。
-- `test_install_uninstall_resets_state` — uninstall/reinstall 重置 `g_matched`。
-- `test_one_thousand_full_cycles_with_noise` — **1000 个混合噪声循环**（auto-repeat + injected + LAlt 噪声 + VK_RMENU/VK_MENU+EXT 交替）= 精确 1000 toggle，dispatched=1000，pending=0。
+#### merge_rules 修复（3 用例）
 
-### 3. `tests/test_keyboard_dispatcher.py` — 有序 consumer + 运行时身份（9 用例）
+| 测试 | 说明 |
+|------|------|
+| `test_merge_rules_pair_matching` | 不同 replacement 各自独立 |
+| `test_conflicting_replacement_not_auto_applied` | 冲突 rule 不自动应用 |
+| `test_chinese_rules_in_learn_from_edit` | learn_from_edit 包含 chinese_rules |
 
-#### Ordered dispatcher（5 用例）
+### 4. `tests/test_injection_result.py` — InjectionResult + paste 验证（12 用例）
 
-- `test_callbacks_execute_in_arrival_order` — 200 toggle 严格单调顺序。
-- `test_consumer_thread_persists_no_new_threads_per_toggle` — 500 toggle 期间 `threading.active_count()` 增长 ≤3（无每 toggle 创建线程）。
-- `test_consumer_recovers_from_callback_exceptions` — callback 前两次抛异常，5 个 toggle 仍全部被消费。
-- `test_recent_events_redacts_text` — 诊断 ring 字段集合精确等于 `{seq, native_seq, recv_ms, dispatch_ms, latency_ms, thread_id}`，无文本。
-- `test_recent_events_is_bounded` — 写入 `DIAG_RING_SIZE * 2 + 7` 条后，`recent_events(limit=10000)` 仍 ≤64 条。
+| 测试 | 说明 |
+|------|------|
+| `test_injection_result_bool_true` | ok=True → bool=True |
+| `test_injection_result_bool_false` | ok=False → bool=False |
+| `test_injection_result_defaults` | 默认值 ok=False, verified=False, method="" |
+| `test_injection_result_verified_ok` | ok=True, verified=True |
+| `test_injection_result_reason` | reason 正确存储 |
+| `test_injection_result_clipboard_preserved` | clipboard_preserved 存储 |
+| `test_injection_result_target_restored` | target_restored 存储 |
+| `test_paste_verified_when_text_consumed` | 文本被消费 → verified |
+| `test_paste_fails_when_text_not_consumed` | 文本未被消费 → ok=False |
+| `test_paste_clipboard_preserved_on_fail` | 失败时 clipboard_preserved=True |
+| `test_inject_returns_injection_result_list` | inject() 返回 List[InjectionResult] |
+| `test_pipeline_bool_compat` | bool(inject_result) 向后兼容 |
 
-#### Helper identity（4 用例）
+## 回归测试
 
-- `test_helper_version_meets_minimum` — `helper_version() >= MIN_HELPER_VERSION (=2)`。
-- `test_helper_build_id_is_nonempty` — build id 非空、无路径分隔符。
-- `test_dll_path_is_realpath_and_exists` — dll_path 绝对路径、存在、basename 含 `sayit_keyboard_helper`。
-- `test_diagnostics_snapshot_shape` — `diagnostics()` 返回包含 10 个文档化字段。
+所有原有测试在本次变更下全部通过，无回归。
 
-### 4. `tests/test_hook_chain.py` — Native → Python → Orchestrator 全链路（2 用例）
-
-#### `test_seq2_drives_stop_request_before_seq3_arrives`
-
-> 任务文件 §B3 的头号断言。
-
-- 通过真实 KeyboardHelperDll 绑定 `orchestrator.toggle_recording`；
-- 模拟物理键盘的 3 次 RAlt down→up（`__test_handle_event`）；
-- seq 1 启动 pipeline；
-- seq 2 必须在 seq 3 到来**之前**：（a）设置 `_stop_flag`；（b）emit `RECORDING_STOPPING`；
-- seq 3 在 TRANSCRIBING 阶段 emit `TOGGLE_IGNORED("transcribing")`；
-- 诊断 ring 中 seq 列表单调递增。
-
-如果旧的"每 toggle 一个 daemon thread"模型让 seq 3 抢先到达 `_on_hotkey_stop`，本测试会失败。
-
-#### `test_recording_stopping_emits_before_audio_drains`
-
-- 模拟启动 pipeline 进入 CAPTURING；
-- 调用 `orchestrator.stop_recording()`；
-- 断言 `RECORDING_STOPPING` 在 `stop_recording()` 返回之前被发出（emit timestamp ≤ return timestamp）。
-
-### 5. `tests/test_orchestrator_state.py` — 已有用例加固
-
-- `test_second_toggle_during_capture_signals_stop` 增加断言：`Events.RECORDING_STOPPING` 必须随 `_stop_flag` 同时（同一调用栈内）发出。
-
-## 现有回归通过情况
-
-下列与任务相关模块的现有测试在本轮变更下全部通过（与基线计数一致或更高）：
-
-- `tests/test_agent_bridge.py` — 36 通过
-- `tests/test_context_helper_client.py` — 4 通过
-- `tests/test_history_and_terminal_learning.py` — 3 通过
-- `tests/test_history_backfill.py` — 1 通过
-- `tests/test_injector_fallback.py` — 5 通过
-- `tests/test_injector_strategy.py` — 5 通过
-- `tests/test_keyboard_helper_stress.py` — 3 通过（原 transport 压力测试保留）
-- `tests/test_orchestrator_state.py` — 5 通过（含本轮加固）
-- `tests/test_silent_monitor.py` — 3 通过（含 typo→rule + 大改写跳过 + 键盘事件跟踪）
-- `tests/test_win32_edit_integration.py` — 3 通过
+| 回归套件 | 通过 |
+|----------|------|
+| `test_agent_bridge.py` | 通过 |
+| `test_context_helper_client.py` | 通过 |
+| `test_dictionary_safety.py` | 通过 |
+| `test_history_and_terminal_learning.py` | 通过 |
+| `test_history_backfill.py` | 通过 |
+| `test_hook_chain.py` | 通过 |
+| `test_injector_fallback.py` | 通过 |
+| `test_injector_strategy.py` | 通过 |
+| `test_keyboard_dispatcher.py` | 通过 |
+| `test_keyboard_helper_physical.py` | 通过 |
+| `test_keyboard_helper_stress.py` | 通过 |
+| `test_orchestrator_state.py` | 通过 |
+| `test_silent_monitor.py` | 通过 |
+| `test_win32_edit_integration.py` | 通过 |
+| `test_context_helper_dll_com.py` | **跳过** (pre-existing GBK locale issue) |
 
 ## 实机验收范围
 
-- 自动化测试通过 `__test_handle_event` 完整覆盖了 HookProc 解析状态机，但仍非真实低级钩子链（Windows `LowLevelHooksTimeout` 与硬件 IRP 顺序只能在 GUI session 中现场验证）；
-- **任务文件明确要求不得用 `__test_handle_event` 代表实机已验证**，本报告遵守该边界；
-- 实机最终验收：用户做 3 次完整 RAlt 按下→松开，观察启动日志的 helper identity 行 + `GET /api/diagnostics/hotkey` 的 `recent_events`，详见 ZCODE_REPORT 中的"人工实机验收指引"。
+- RAltStopWatcher 自动化测试完整覆盖了 arm/disarm/去重/诊断场景
+- AudioCapture fast stop 使用模拟长录音验证了延迟上界 <500ms
+- Chinese local learning 使用字符级 diff 验证了整句中精确提取
+- InjectionResult 使用模拟剪贴板验证了 paste 成功/失败检测
+- **最终实机验收仍需用户物理操作：** 长录音中按 2 次 RAlt，观察立即停止 + 悬浮窗 RECORD.STOP -> 注入结果

@@ -274,6 +274,10 @@ function connectWS() {
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnRecordingStarted)sayitOnRecordingStarted()');
           break;
+        case 'recording_stopping':
+          keepFloatOnTop();
+          pushToFloat('if(window.sayitOnRecordingStopping)sayitOnRecordingStopping()');
+          break;
         case 'recording_stopped':
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnRecordingStopped)sayitOnRecordingStopped()');

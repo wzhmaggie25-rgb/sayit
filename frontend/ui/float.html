@@ -108,6 +108,7 @@ function Float(){
   },[]);
 
   useEffect(()=>{window.sayitOnRecordingStarted=()=>{playBeep(true);setUipiWarn(false);d('RECORD.START')};
+    window.sayitOnRecordingStopping=()=>{d('RECORD.STOP')};
     window.sayitOnRecordingStopped=()=>{playBeep(false);d('RECORD.STOP')};
     window.sayitOnPipelineDone=(text)=>{setDoneText(text||'');d('_DONE')};
     window.sayitOnError=()=>{setErrType('');d('ERROR')};

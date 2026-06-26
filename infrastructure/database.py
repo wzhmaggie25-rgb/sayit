@@ -436,8 +436,8 @@ class Database:
             try:
                 for rule in new_rules:
                     cur = conn.execute(
-                        "SELECT * FROM correction_rules WHERE pattern = ?",
-                        (rule['pattern'],))
+                        "SELECT * FROM correction_rules WHERE pattern = ? AND replacement = ?",
+                        (rule['pattern'], rule['replacement']))
                     existing = cur.fetchone()
                     if existing:
                         new_conf = min(0.95, existing['confidence'] + 0.15)

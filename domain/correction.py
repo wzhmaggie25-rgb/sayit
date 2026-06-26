@@ -78,13 +78,78 @@ def generate_token_rules(original: str, edited: str,
     return rules
 
 
+def _extract_chinese_local_replacement(original: str, edited: str,
+                                        source_history_id: str = None) -> list[dict]:
+    """Extract single-CJK-character correction rules from a Chinese edit.
+
+    Unlike generate_token_rules (which operates on coarse whitespace-separated
+    tokens), this function uses character-level diff on CJK substrings to
+    detect when a SINGLE Chinese character was replaced by another single
+    Chinese character in a local context.
+
+    Examples:
+        "今天天气很好" → "今天天气不错"
+        Finds: "很好" → "不错"  (2-char→2-char replacement)
+
+        "我想去北京" → "我想去上海"
+        Finds: "北京" → "上海"  (2-char→2-char replacement)
+
+    Returns an empty list when the edit is not a clean local CJK replacement
+    (e.g. multi-token edit, cross-script change, insert/delete).
+    """
+    if not original or not edited or original == edited:
+        return []
+
+    # Must contain CJK on both sides
+    has_cjk_orig = bool(re.search(r"[一-鿿]", original))
+    has_cjk_edit = bool(re.search(r"[一-鿿]", edited))
+    if not has_cjk_orig or not has_cjk_edit:
+        return []
+
+    matcher = difflib.SequenceMatcher(None, original, edited, autojunk=False)
+    diffs = [op for op in matcher.get_opcodes() if op[0] != "equal"]
+
+    # Must be exactly one replacement segment (no insert/delete mixed in)
+    if len(diffs) != 1:
+        return []
+    tag, i1, i2, j1, j2 = diffs[0]
+    if tag != "replace":
+        return []
+
+    pattern = original[i1:i2]
+    replacement = edited[j1:j2]
+
+    # Both sides must be short CJK strings (at least 1, at most 6 chars)
+    if not pattern or not replacement:
+        return []
+    if not re.fullmatch(r"[一-鿿]+", pattern):
+        return []
+    if not re.fullmatch(r"[一-鿿]+", replacement):
+        return []
+    if len(pattern) > 6 or len(replacement) > 6:
+        return []
+    if pattern == replacement:
+        return []
+
+    sim = difflib.SequenceMatcher(None, pattern, replacement).ratio()
+    rules = []
+    rules.append(_new_rule(pattern, replacement, source_history_id, sim))
+    return rules
+
+
 def merge_rules(existing_rules: list[dict], new_rules: list[dict]) -> tuple[list[dict], int]:
-    """Merge new rules into existing rule store. Returns (merged_list, added_count)."""
+    """Merge new rules into existing rule store. Returns (merged_list, added_count).
+
+    Matching is done on (pattern, replacement) pair — NOT on pattern alone.
+    This prevents a conflicting replacement (same pattern, different correction)
+    from silently reinforcing the old rule instead of creating a new one.
+    """
     count = 0
     for rule in new_rules:
         existing = None
         for existing_rule in existing_rules:
-            if existing_rule["pattern"] == rule["pattern"]:
+            if (existing_rule["pattern"] == rule["pattern"]
+                    and existing_rule["replacement"] == rule["replacement"]):
                 existing = existing_rule
                 break
         if existing:
@@ -262,11 +327,17 @@ def learn_from_edit(original_text: str, edited_text: str,
     """Full learning pipeline: token diff + character diff -> new rule candidates."""
     token_rules = generate_token_rules(
         original_text, edited_text, source_history_id=history_id)
+    # Also try Chinese local character-level replacement — this catches
+    # single-CJK corrections that tokenize_for_learning would merge into
+    # a whole-sentence token pair and reject.
+    chinese_rules = _extract_chinese_local_replacement(
+        original_text, edited_text, source_history_id=history_id)
     diffs = extract_diffs(original_text, edited_text)
-    if not token_rules and not diffs:
+    if not token_rules and not chinese_rules and not diffs:
         return existing_rules, 0
-    char_rules = [] if token_rules else generate_rules(diffs, source_history_id=history_id)
-    new_rules = _merge_new_rule_candidates(token_rules + char_rules)
+    char_rules = [] if (token_rules or chinese_rules) else generate_rules(
+        diffs, source_history_id=history_id)
+    new_rules = _merge_new_rule_candidates(token_rules + chinese_rules + char_rules)
     if not new_rules:
         return existing_rules, 0
     return new_rules, len(new_rules)

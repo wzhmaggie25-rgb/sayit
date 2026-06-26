@@ -4,9 +4,70 @@
 
 ## 状态
 
-**ZCODE_READY**
+**BLOCKED_USER_VALIDATION**
 
-> 本轮由用户在 ZCode 中可视化执行。不要由 Agent Bridge / Claude Code 后台自动接管。
+> ZCode Round 4 代码实现、测试、提交已完成。等待用户人工实机验收。
+
+## 本轮完成
+
+**最终提交ID：** `1a9d24da446c7fd3a7eb0e18bf3e2f55a3e0b8b4` — `feat(stability): RAlt fallback watcher, fast audio stop, Chinese learning, InjectionResult`
+
+### 完成的子任务
+
+#### A: 中文局部学习 ✓
+- A1: `_extract_chinese_local_replacement(original, edited)` — 字符级 SequenceMatcher diff，single replace opcode，≤6 字 CJK，≥2 anchor 字符稳定，纯 CJK 正则守卫
+- A3: `merge_rules` 按 `(pattern, replacement)` 对匹配，不错误强化旧规则
+- 测试通过：17 用例（5 accept + 9 reject + 3 merge/pair matching）
+
+#### B: 第二次 RAlt 真实失灵兜底 ✓
+- B3: `RAltStopWatcher` polling-based fallback（`GetAsyncKeyState`, 10ms 间隔）
+- Phase 1 (wait release) + Phase 2 (detect cycle) + hook emit 去重
+- Orchestrator 集成：arm on start, disarm on stop + finally safety net
+- 独立 `_fallback_stop()` 兜底方法，幂等检查 `_stop_flag`
+- B5: `AudioCapture.stop()` 顺序修正 — 先 close stream 再 join thread（避免 blocking read 延迟）
+- B6: Frontend `recording_stopping` WS 事件消费（main.js → float.html RECORD.STOP）
+- 测试通过：12 (watcher) + 9 (audio stop) = 21 用例
+
+#### C: 长文本可靠注入 ✓
+- C2: `paste()` Ctrl+V 后读剪贴板验证文本是否被消费
+- C3: `InjectionResult` dataclass（ok/verified/method/reason/clipboard_preserved/target_restored + __bool__）
+- Pipeline 集成：`bool(inject_result)` 向后兼容
+- 测试通过：12 用例
+
+### 测试结果
+
+```
+python -m pytest tests/ -v --timeout=30
+159 passed, 1 skipped (pre-existing COM fixture issue), 6 subtests passed in 22.23s
+```
+
+### 本轮新建文件
+- `infrastructure/ralt_stop_watcher.py` — RAltStopWatcher（233 行）
+- `tests/test_ralt_stop_watcher.py` — 12 用例
+- `tests/test_audio_capture_stop.py` — 9 用例
+- `tests/test_chinese_local_learning.py` — 17 用例
+- `tests/test_injection_result.py` — 12 用例
+
+### 未完成（下一轮需要）
+- **A2: 重复证据提升为热词** — 当前只完成了 A1（局部提取）+ A3（merge_rules 修复）。同一纠错跨 history 重复后自动提升为热词未实现。当前 `learn_from_edit` 返回的 `chinese_rules` 只进了 correction_rules 表，未自动提升到 hotwords/dictionary。
+
+### 人工实机验收指引
+
+1. 终止旧进程：`taskkill /F /IM python.exe` (或 `_kill_all.bat`)
+2. 启动：`start.bat`（或 `python server.py`）
+3. 确认启动日志包含 `[orchestrator] keyboard helper identity: ... version=3 build=2026-06-26-v3`
+4. 打开任意可编辑文本框
+5. 第一次 RAlt 按下→松开：开始录音（悬浮窗波形抖动）
+6. 第二次 RAlt 按下→松开：**录音立即停止**（悬浮窗显示 RECORD.STOP）
+7. 第三次 RAlt 按下→松开：开始新录音
+8. 长语音测试：说话 ≥15秒，按 RAlt 停止 → 确认停止 + 文本注入 + 历史记录
+9. 验证 `curl http://127.0.0.1:17890/api/diagnostics/hotkey` 返回诊断（不含文本）
+
+### 长文本注入验证
+1. 说话一段长文本（≥100 字）
+2. 停止录音后检查：目标输入框有完整文字
+3. 检查历史页：status=completed, pasted=1
+4. 如果注入失败：final_text 保留在剪贴板，UI 提示失败
 
 ## 任务名称
 

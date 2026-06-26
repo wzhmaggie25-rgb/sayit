@@ -137,7 +137,7 @@ RecordingPipeline.run() Phase 6
 |------|------|------|
 | `sayit_context_helper_dll.dll` | `native/context_helper/build/Release/sayit_context_helper_dll.dll` | ✅ 70,656 bytes |
 | `sayit_context_helper.exe` | `native/context_helper/build/Release/sayit_context_helper.exe` | ✅ 存在 |
-| `sayit_keyboard_helper.dll` | `native/context_helper/build/Release/sayit_keyboard_helper.dll` | ✅ 148KB |
+| `sayit_keyboard_helper.dll` | `native/context_helper/build/Release/sayit_keyboard_helper.dll` | ✅ 148KB, ABI v3, build `2026-06-26-v3` |
 
 ### 运行时加载优先级（focus_context.py）
 
@@ -197,6 +197,12 @@ RecordingPipeline.run() Phase 6
 9. **Per-toggle daemon thread 乱序风险** — 修复（2026-06-26）：keyboard_helper_dll.py 改单一 `hotkey-consumer` 线程串行 drain queue，不再每个 toggle spawn 新线程；64 槽诊断 ring + `helper_version=2` / `helper_build_id="2026-06-26-v2"` 在启动日志和 `/api/diagnostics/hotkey` 暴露
 10. **静默学习把整句/错误内容自动加入个人词典** — 修复（2026-06-26）：`extract_dictionary_terms` 严格门禁，仅允许单一 1↔1 token replacement、同字符族、形态/长度受控、最多 1 个候选；纠错规则学习独立未受影响
 11. **第二次 RAlt stop ACK 不可见** — 修复（2026-06-26）：`Events.RECORDING_STOPPING` 在 `pipeline.stop()` 之前同步发出
+12. **第二次 RAlt 真实物理失灵 fallback** — 修复（2026-06-26 Round 4）：新增 `RAltStopWatcher` 使用 `GetAsyncKeyState(VK_RMENU)` 10ms 轮询作为 WH_KEYBOARD_LL 钩子丢失的兜底；orchestrator arm-on-start/disarm-on-stop 集成；`_fallback_stop()` 幂等检查 `_stop_flag`；Phase 1 wait-release + Phase 2 detect-cycle + hook emit count 去重
+13. **AudioCapture 停止延迟** — 修复（2026-06-26 Round 4）：`stop()` 先 close stream（`stream.stop_stream()+stream.close()`）解除 blocking read，再 join thread，避免 3s 阻塞等待
+14. **前端 stop ACK 消费** — 修复（2026-06-26 Round 4）：`frontend/main.js` 转发 `recording_stopping` WS 事件 → `float.html` 立即显示 RECORD.STOP（无提示音）
+15. **中文局部纠错无法学习** — 修复（2026-06-26 Round 4）：`_extract_chinese_local_replacement(original, edited)` 字符级 SequenceMatcher diff，single replace opcode，≤6 字 CJK，≥2 anchor；`merge_rules` 按 `(pattern, replacement)` 对匹配；ABI v3
+16. **Clipboard 注入假成功** — 修复（2026-06-26 Round 4）：`paste()` 在 Ctrl+V 后读剪贴板验证文本是否被消费；未消费时返回 `InjectionResult(ok=False, reason='text_not_consumed', clipboard_preserved=True)`
+17. **注入返回无结构** — 修复（2026-06-26 Round 4）：`InjectionResult` dataclass（ok/verified/method/reason/clipboard_preserved/target_restored + `__bool__` 向后兼容），`inject()` 返回 `List[InjectionResult]`
 
 ## 不允许随意修改的模块
 

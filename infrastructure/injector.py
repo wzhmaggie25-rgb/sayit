@@ -30,6 +30,34 @@ class InjectionTarget:
     cls: str = ""
     title: str = ""
 
+
+@dataclass
+class InjectionResult:
+    """Structured result of an injection attempt.
+
+    Fields:
+        ok: Whether the injection was reported successful.
+        verified: Whether we confirmed the text actually appeared in the
+                  target (e.g. clipboard content changed after paste).
+        method: Which injection layer succeeded ("uia", "clipboard",
+                "sendinput", "win32_child", or "" on total failure).
+        reason: Human-readable explanation string.
+        clipboard_preserved: Whether the final text was left on the
+                             clipboard as a fallback (always True on failure).
+        target_restored: Whether the original target window was restored
+                         to foreground (may be False for child-edit injection).
+    """
+    ok: bool = False
+    verified: bool = False
+    method: str = ""
+    reason: str = ""
+    clipboard_preserved: bool = False
+    target_restored: bool = False
+
+    def __bool__(self) -> bool:
+        """Backward compat: InjectionResult can be used as bool."""
+        return self.ok
+
 # ── Win32 constants ───────────────────────────────────────────
 
 INPUT_KEYBOARD = 1
@@ -273,7 +301,15 @@ class Injector:
             return ""
 
     def paste(self, text: str, terminal: bool = False) -> bool:
-        """Clipboard paste via ctypes keybd_event (bypasses UIPI for admin windows)."""
+        """Clipboard paste via ctypes keybd_event (bypasses UIPI for admin windows).
+
+        Returns True if the clipboard shortcut was sent and verification
+        suggests the text was consumed (clipboard no longer holds our text).
+
+        Verification heuristic: after restoring the backup, check whether
+        the clipboard still contains our text. If not, the paste target
+        likely consumed it.
+        """
         with self._lock:
             backup = _clipboard_get_text()
             if not _clipboard_set_text(text):
@@ -308,10 +344,32 @@ class Injector:
                     _clipboard_set_text(backup)
                 return False
             time.sleep(post)
+
+            # ── Paste verification ───────────────────────────────────
+            # After the wait, the clipboard should hold the backup (if we
+            # restored it) or be empty. If our text is still there, the
+            # paste likely didn't reach its target — return False.
+            verified = True
+            try:
+                post_clip = _clipboard_get_text()
+                if post_clip == text:
+                    verified = False
+                    logger.warning(
+                        "[INJECT-CLIPBOARD] paste NOT verified — our text still on clipboard "
+                        "after %s delay (backup_restored=%s)",
+                        post, backup is not None)
+                else:
+                    logger.info(
+                        "[INJECT-CLIPBOARD] paste verified — clipboard no longer holds our text "
+                        "clip_was_backup=%s",
+                        post_clip == backup if backup is not None else "(empty)")
+            except Exception as e:
+                logger.debug("[INJECT-CLIPBOARD] verification read failed: %s", e)
+
             if backup is not None:
                 _clipboard_set_text(backup)
                 logger.info("[INJECT-CLIPBOARD] restored previous clipboard terminal=%s", terminal)
-            return True
+            return verified
 
     def _direct_input(self, text: str) -> bool:
         try:
@@ -436,35 +494,34 @@ class Injector:
             for name, vk in vks.items()
         }
 
-    def inject(self, text: str, target: InjectionTarget | None = None) -> bool:
+    def inject(self, text: str, target: InjectionTarget | None = None) -> InjectionResult:
         """4-level waterfall injection.
 
-        Guarantees:
-          - If True: text was injected via UIA/Clipboard/SendInput/Win32-child.
-            For UIA and Win32-child we additionally verify the value was read
-            back from the control. For Clipboard/SendInput we still rely on
-            the OS shortcut delivery, BUT we never report success if the
-            shortcut path was skipped (e.g. foreground mismatch).
-          - If False: text is GUARANTEED to be on the clipboard so the user
-            can paste it manually. We do NOT swallow that side-effect.
+        Returns InjectionResult with structured outcome info. The result
+        is truthy (via __bool__) if injection succeeded, falsy if not.
+        On failure, clipboard_preserved is always True — the final text
+        is left on the clipboard for manual paste.
         """
         with self._lock:
             return self._inject_locked(text, target)
 
-    def _inject_locked(self, text: str, target: InjectionTarget | None) -> bool:
-        # Sentinel — every return path that yields False must guarantee the
-        # final text is on the clipboard before returning. We track this via
-        # a single helper so future paths can't forget the contract.
-        def fail() -> bool:
+    def _inject_locked(self, text: str, target: InjectionTarget | None) -> InjectionResult:
+        def _fail(reason: str = "") -> InjectionResult:
             try:
                 _clipboard_set_text(text)
                 logger.warning(
                     "[INJECT-FALLBACK] all injection paths failed — "
-                    "final text preserved on clipboard (len=%d)", len(text))
+                    "final text preserved on clipboard (len=%d) reason=%s",
+                    len(text), reason)
             except Exception:
                 logger.warning(
                     "[INJECT-FALLBACK] clipboard preservation ALSO failed", exc_info=True)
-            return False
+            return InjectionResult(ok=False, reason=reason or "all_injection_paths_failed",
+                                    clipboard_preserved=True)
+
+        def _ok(method: str, verified: bool = False, target_restored: bool = False) -> InjectionResult:
+            return InjectionResult(ok=True, verified=verified, method=method,
+                                    target_restored=target_restored)
 
         self._release_modifiers(reason="inject_start")
         logger.info(
@@ -473,9 +530,6 @@ class Injector:
             self._get_modifier_states())
 
         # ── Stage A: try to restore the original target window ──
-        # Up to 3 attempts with short delays. _focus_window already retries
-        # internally via thread-attach + topmost flicker, so 3 calls is
-        # the outer ceiling — never infinite.
         target_restored = False
         if target is not None and target.hwnd:
             logger.info(
@@ -498,9 +552,9 @@ class Injector:
                     self.last_target_class = target.cls
                     self.last_target_title = target.title
                     logger.info("[INJECT-POST] ok via=Win32ChildEdit (no foreground)")
-                    return True
+                    return _ok("win32_child", verified=True)
                 # Otherwise: text MUST still be on clipboard for manual paste.
-                return fail()
+                return _fail("target_restore_failed")
 
         hwnd, cls, pid, proc = self._foreground_info()
         self.last_target_hwnd = hwnd or 0
@@ -535,8 +589,8 @@ class Injector:
                 self.last_target_class = target.cls
                 self.last_target_title = target.title
                 logger.info("[INJECT-POST] ok via=Win32ChildEdit (foreground mismatch recovery)")
-                return True
-            return fail()
+                return _ok("win32_child", verified=True)
+            return _fail("foreground_mismatch")
 
         if hwnd and hwnd != ctypes.windll.user32.GetForegroundWindow():
             self._focus_window(hwnd)
@@ -563,15 +617,16 @@ class Injector:
         if strategy == "uia" and cls not in UIA_UNRELIABLE_CLASSES:
             if self._inject_uia(text):
                 logger.info("[INJECT-POST] ok via=UIA")
-                return True
+                return _ok("uia", verified=True, target_restored=target_restored)
 
         # Layer 2: Clipboard paste
         if strategy != "send_input":
-            if self.paste(text, terminal=is_terminal):
+            paste_verified = self.paste(text, terminal=is_terminal)
+            if paste_verified:
                 if is_terminal:
                     self._release_modifiers(force=True, reason="terminal_after_paste_ok")
                 logger.info("[INJECT-POST] ok via=Clipboard")
-                return True
+                return _ok("clipboard", verified=True, target_restored=target_restored)
 
         # Layer 3: SendInput
         if is_terminal:
@@ -580,13 +635,13 @@ class Injector:
                 "target_process=%s target_class=%s text_len=%d",
                 proc, cls, len(text))
             self._release_modifiers(force=True, reason="terminal_after_paste_failed")
-            return fail()
+            return _fail("terminal_clipboard_failed")
         if self._direct_input(text):
             logger.info("[INJECT-POST] ok via=SendInput")
-            return True
+            return _ok("sendinput", target_restored=target_restored)
 
         logger.info("[INJECT-POST] FAILED all=3")
-        return fail()
+        return _fail("all_three_layers_failed")
 
     def _get_context_for_strategy(self) -> dict:
         try:

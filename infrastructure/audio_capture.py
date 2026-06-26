@@ -190,9 +190,9 @@ class AudioCapture:
     def _close_stream(self):
         """Close the stream. Safe to call even if already closed."""
         self._read_stop.set()
-        if self._read_thread and self._read_thread.is_alive():
-            self._read_thread.join(timeout=2.0)
-            self._read_thread = None
+        # Close the stream FIRST to unblock stream.read() in the read
+        # thread (blocking read waits ~64ms per chunk). Only then join
+        # the thread. This prevents multi-second stop delays.
         if self._stream is not None:
             try:
                 if self._stream.is_active():
@@ -204,6 +204,9 @@ class AudioCapture:
             except Exception:
                 pass
             self._stream = None
+        if self._read_thread and self._read_thread.is_alive():
+            self._read_thread.join(timeout=2.0)
+            self._read_thread = None
 
     def start(self):
         # Reset gain from config
@@ -249,10 +252,11 @@ class AudioCapture:
         self._recording = False
         self._read_stop.set()
 
-        # Wait for read thread to finish
-        if self._read_thread and self._read_thread.is_alive():
-            self._read_thread.join(timeout=3.0)
-            self._read_thread = None
+        # Close the stream FIRST to unblock stream.read() in the read
+        # thread immediately (blocking read waits ~64ms per chunk).
+        # Only then join the thread; this reduces stop latency from
+        # up to 3.0s to near-instant.
+        self._close_stream()
 
         # Collect PCM from queue
         chunks = []
@@ -269,9 +273,6 @@ class AudioCapture:
             self._gain_reduced = True
         logger.info("AudioCapture: stopped %d bytes, clip=%.2f%%",
                      len(pcm), self.clip_fraction() * 100)
-
-        # Close the stream — next session opens fresh
-        self._close_stream()
 
         self._capture_stopped.set()
 

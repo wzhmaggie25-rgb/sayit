@@ -1,4 +1,4 @@
-// WH_KEYBOARD_LL hook DLL for Sayit - RAlt toggle (Typeless architecture, v2).
+// WH_KEYBOARD_LL hook DLL for Sayit - RAlt toggle (Typeless architecture, v3).
 //
 // Architecture rationale
 // ----------------------
@@ -14,7 +14,7 @@
 //   1. Marshalling argument-less call back into the Python interpreter.
 //   2. Acquiring the GIL.
 //   3. Constructing the threading.Thread object.
-// Under heavy GIL contention (long recordings → ASR streaming, audio chunk
+// Under heavy GIL contention (long recordings -> ASR streaming, audio chunk
 // callbacks, RMS callbacks, etc.) that round-trip CAN exceed 300 ms, and
 // the hook gets silently unloaded.
 //
@@ -26,6 +26,18 @@
 // A dedicated native worker thread blocks on the auto-reset event and
 // invokes the Python callback FROM ITS OWN CONTEXT. Even if the callback
 // hangs for seconds, the hook thread is never blocked.
+//
+// v3 (2026-06-26-v3):
+//   * Adds a 128-slot native diagnostics ring buffer that records every
+//     keyboard event entering HookProc, BEFORE and AFTER the state-machine
+//     parser runs. This lets us definitively distinguish:
+//       - "HookProc never received the event" (no ring entry)
+//       - "received but not matched/emitted" (entry with emitted=0)
+//       - "emitted but Python didn't consume" (entry with emitted=1)
+//     The ring is exported via `__test_native_diagnostics` as a struct
+//     array — no text, only integer/enum/timestamp metadata.
+//   * Exposes diagnostics to Python: `native_event_count` and
+//     `native_events(limit)`.
 //
 // Exports
 // -------
@@ -39,13 +51,18 @@
 //   __test_trigger_toggle()        test-only: simulate a HookProc-side
 //                                  toggle WITHOUT invoking Python from the
 //                                  caller's thread. Used by stress tests
-//                                  to verify the C++→Python transport.
+//                                  to verify the C++->Python transport.
 //                                  This entry point is intentionally not
 //                                  reachable from physical keys.
+//   __test_handle_event()          test-only: drive HandleKeyEventCore
+//   __test_reset_state()           test-only: clear g_matched
+//   native_event_count()           number of events recorded in ring
+//   native_events(out, max)        copy up to max entries to caller buffer
 
 #include <windows.h>
 #include <thread>
 #include <atomic>
+#include <cstdint>
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,6 +77,37 @@ extern "C" {
 #define KF_UP       0x0002
 #endif
 
+// ── Native diagnostics ring buffer ──────────────────────────────────
+//
+// Records every keyboard event that reaches HookProc. A consumer (Python)
+// can read the ring to determine whether a suspected second RAlt was
+// delivered to HookProc at all, or was dropped between the OS and our
+// callback. No text or personal data is stored — only Win32 event codes
+// and state-machine metadata.
+//
+#define NATIVE_DIAG_RING_SIZE 128
+
+struct NativeEventRecord {
+    // Monotonic sequence number (1-based, wraps at UINT32_MAX)
+    uint32_t    seq;
+    // Values from KBDLLHOOKSTRUCT
+    uint32_t    vkCode;
+    uint32_t    wParam;      // WM_KEYDOWN / WM_KEYUP / WM_SYSKEYDOWN / WM_SYSKEYUP
+    uint32_t    flags;       // LLKHF_* flags (LLKHF_EXTENDED, LLKHF_INJECTED, etc.)
+    // State-machine snapshot BEFORE HandleKeyEventCore
+    uint32_t    matched_before; // g_matched before parse (0/1)
+    // State-machine snapshot AFTER HandleKeyEventCore
+    uint32_t    matched_after;  // g_matched after parse (0/1)
+    // Did this event cause an EmitToggle?
+    uint32_t    emitted;        // 0/1
+    // Monotonic OS tick at the moment HookProc entered (GetTickCount64)
+    uint64_t    tick_ms;
+};
+
+static NativeEventRecord  g_native_ring[NATIVE_DIAG_RING_SIZE];
+static uint32_t           g_native_seq = 0;      // next seq (never decremented)
+static uint32_t           g_native_write = 0;    // next write slot (mod NATIVE_DIAG_RING_SIZE)
+
 // ── Hook state (process-global singleton) ───────────────────────────
 static HHOOK                g_hHook = nullptr;
 static std::thread          g_hookThread;
@@ -69,7 +117,7 @@ static DWORD                g_workerThreadId = 0;
 static std::atomic<bool>    g_running{false};
 static bool                 g_matched = false;
 
-// Worker-thread synchronization (HookProc → worker → Python)
+// Worker-thread synchronization (HookProc -> worker -> Python)
 // ---------------------------------------------------------
 // g_toggleEvent is auto-reset — every SetEvent wakes one waiter or arms one.
 // g_pending counts toggles emitted but not yet drained by the worker so we
@@ -87,6 +135,23 @@ static void D(const char* msg) {
     OutputDebugStringA("[keyboard-helper] ");
     OutputDebugStringA(msg);
     OutputDebugStringA("\n");
+}
+
+// ── Native diagnostics helpers ─────────────────────────────────────
+
+static void RecordNativeEvent(UINT vk, WPARAM wParam, DWORD flags,
+                               uint32_t matched_before, uint32_t matched_after,
+                               uint32_t emitted) {
+    uint32_t seq = ++g_native_seq;          // starts at 1
+    uint32_t slot = g_native_write++ % NATIVE_DIAG_RING_SIZE;
+    g_native_ring[slot].seq = seq;
+    g_native_ring[slot].vkCode = static_cast<uint32_t>(vk);
+    g_native_ring[slot].wParam = static_cast<uint32_t>(wParam);
+    g_native_ring[slot].flags = static_cast<uint32_t>(flags);
+    g_native_ring[slot].matched_before = matched_before;
+    g_native_ring[slot].matched_after = matched_after;
+    g_native_ring[slot].emitted = emitted;
+    g_native_ring[slot].tick_ms = GetTickCount64();
 }
 
 // ── Native helpers ──────────────────────────────────────────────────
@@ -184,13 +249,34 @@ static bool HandleKeyEventCore(UINT vk, WPARAM wParam, DWORD flags,
 
 // ── Hook procedure (called on the hook thread) ──────────────────────
 //
-// Thin wrapper over HandleKeyEventCore.
+// Thin wrapper over HandleKeyEventCore. Records a native diagnostics entry
+// before and after the state-machine parse so we can distinguish "event
+// never reached HookProc" from "event reached but not matched".
 //
 static LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode < 0)
         return CallNextHookEx(nullptr, nCode, wParam, lParam);
     KBDLLHOOKSTRUCT& kbd = *reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
-    if (HandleKeyEventCore(static_cast<UINT>(kbd.vkCode), wParam, kbd.flags, true))
+
+    uint32_t mb = g_matched ? 1 : 0;
+
+    bool eaten = HandleKeyEventCore(static_cast<UINT>(kbd.vkCode), wParam, kbd.flags, true);
+
+    uint32_t ma = g_matched ? 1 : 0;
+    // Determine if this event triggered an emit: compare total_emitted
+    // before/after. Since we just called HandleKeyEventCore, we check
+    // whether g_matched flipped from matched(true) to unmatched(false)
+    // AND the event was main+up — that's the only emit path.
+    uint32_t emitted = 0;
+    if (mb == 1 && ma == 0 && (kbd.vkCode == VK_RMENU ||
+        (kbd.vkCode == VK_MENU && (kbd.flags & LLKHF_EXTENDED)))) {
+        emitted = 1;
+    }
+
+    RecordNativeEvent(static_cast<UINT>(kbd.vkCode), wParam, kbd.flags,
+                      mb, ma, emitted);
+
+    if (eaten)
         return 1;
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
@@ -279,6 +365,10 @@ __declspec(dllexport) int install_hook(void* callback_ptr) {
     g_total_emitted.store(0);
     g_total_consumed.store(0);
 
+    // Reset native diagnostics ring
+    g_native_seq = 0;
+    g_native_write = 0;
+
     if (!g_toggleEvent) {
         g_toggleEvent = CreateEventA(nullptr, FALSE, FALSE, nullptr);  // auto-reset
         if (!g_toggleEvent) {
@@ -364,10 +454,48 @@ __declspec(dllexport) unsigned long get_total_consumed(void) {
     return g_total_consumed.load(std::memory_order_relaxed);
 }
 
+// ── Native diagnostics exports ──────────────────────────────────────
+
+__declspec(dllexport) unsigned long native_event_count(void) {
+    // Total events recorded since install (== g_native_seq).
+    // Safe to read without lock — only HookProc writes (serialized by hook
+    // thread), and we only need a consistent-ish snapshot for diagnostics.
+    return g_native_seq;
+}
+
+// Copy up to `max_entries` NativeEventRecord structs from the ring into
+// the caller's buffer, starting from the oldest entry, in seq order.
+// Returns the number of entries actually copied.
+//
+// Calling convention: the Python side allocates a buffer of
+// `max_entries * sizeof(NativeEventRecord)` bytes and passes a pointer.
+// This is safe because NativeEventRecord is a plain-old-data struct with
+// no pointers; copying it is a shallow memcpy of integer fields only.
+__declspec(dllexport) unsigned long native_events(
+        NativeEventRecord* out_buffer, unsigned long max_entries) {
+    if (!out_buffer || max_entries == 0) return 0;
+
+    uint32_t total = g_native_seq;         // total written since install
+    uint32_t write = g_native_write;       // current write position (mod ring)
+    uint32_t available = (total < NATIVE_DIAG_RING_SIZE) ? total : NATIVE_DIAG_RING_SIZE;
+    uint32_t to_copy = (static_cast<uint32_t>(max_entries) < available)
+                       ? static_cast<uint32_t>(max_entries) : available;
+    if (to_copy == 0) return 0;
+
+    // The ring wraps: oldest entry is at (write - available) mod ring size.
+    uint32_t start_slot = (write + NATIVE_DIAG_RING_SIZE - available) % NATIVE_DIAG_RING_SIZE;
+
+    for (uint32_t i = 0; i < to_copy; i++) {
+        uint32_t slot = (start_slot + i) % NATIVE_DIAG_RING_SIZE;
+        out_buffer[i] = g_native_ring[slot];
+    }
+    return static_cast<unsigned long>(to_copy);
+}
+
 // ── Test-only entry point ───────────────────────────────────────────
 //
 // Simulates an emit from the HookProc WITHOUT a physical key, so the
-// transport from native producer → worker thread → Python callback can
+// transport from native producer -> worker thread -> Python callback can
 // be stress-tested. Behavior is exactly what HookProc does on RAlt-up
 // minus the SendInput cleanup — we only touch the lock-free counter and
 // the auto-reset event. Physical keys never reach this entry point; it
@@ -387,7 +515,7 @@ __declspec(dllexport) int __test_trigger_toggle(void) {
 // fields Windows fills into KBDLLHOOKSTRUCT for a real physical key.
 // Returns 1 if the parser would have eaten the key, 0 if it would have
 // passed through. Used by tests/test_keyboard_helper_physical.py to
-// cover the real RAlt down→up state machine that the existing transport
+// cover the real RAlt down->up state machine that the existing transport
 // stress test bypasses.
 //
 // `allowSideEffects` is forced to false: we MUST NOT inject real keys
@@ -399,11 +527,22 @@ __declspec(dllexport) int __test_handle_event(
     if (!g_running.load()) {
         return -1;
     }
+    uint32_t mb = g_matched ? 1 : 0;
     bool eaten = HandleKeyEventCore(
         static_cast<UINT>(vkCode),
         static_cast<WPARAM>(wParam),
         static_cast<DWORD>(flags),
         false);
+    uint32_t ma = g_matched ? 1 : 0;
+    // Record native diagnostics for the test event too (helps verify the
+    // ring in unit tests). Determine emitted based on state flip.
+    uint32_t emitted = 0;
+    if (mb == 1 && ma == 0 && (static_cast<UINT>(vkCode) == VK_RMENU ||
+        (static_cast<UINT>(vkCode) == VK_MENU && (flags & LLKHF_EXTENDED)))) {
+        emitted = 1;
+    }
+    RecordNativeEvent(static_cast<UINT>(vkCode), static_cast<WPARAM>(wParam),
+                      static_cast<DWORD>(flags), mb, ma, emitted);
     return eaten ? 1 : 0;
 }
 
@@ -427,8 +566,11 @@ __declspec(dllexport) void __test_reset_state(void) {
 //   1  initial v2 transport (worker thread + event)
 //   2  + __test_handle_event / __test_reset_state, RAlt state machine
 //        coverage hooks (2026-06-26)
-#define SAYIT_KEYBOARD_HELPER_VERSION 2
-#define SAYIT_KEYBOARD_HELPER_BUILD   "2026-06-26-v2"
+//   3  + native diagnostics ring (NativeEventRecord, native_event_count,
+//        native_events exports); HookProc records before/after each event
+//        (2026-06-26-v3)
+#define SAYIT_KEYBOARD_HELPER_VERSION 3
+#define SAYIT_KEYBOARD_HELPER_BUILD   "2026-06-26-v3"
 
 __declspec(dllexport) unsigned int helper_version(void) {
     return SAYIT_KEYBOARD_HELPER_VERSION;

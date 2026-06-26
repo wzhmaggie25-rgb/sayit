@@ -21,6 +21,7 @@ from infrastructure.hotwords_manager import HotwordsManager
 from infrastructure.config_store import ConfigStore
 from infrastructure.database import Database
 from infrastructure.keyboard_helper_dll import KeyboardHelperDll
+from infrastructure.ralt_stop_watcher import RAltStopWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ class SayitOrchestrator:
 
         # Keyboard hook: WH_KEYBOARD_LL via ctypes DLL (Typeless architecture)
         self._keyboard_helper = None
+        self._stop_watcher: Optional[RAltStopWatcher] = None
 
     # ── Public API ──────────────────────────────────────────
 
@@ -102,6 +104,12 @@ class SayitOrchestrator:
         """Stop the orchestrator gracefully."""
         self._uninstall_keyboard_hook()
         self._stop_config_watcher()
+        # Disarm RAlt watcher before stopping pipeline
+        try:
+            if self._stop_watcher is not None:
+                self._stop_watcher.disarm()
+        except Exception:
+            pass
         with self._pipeline_lock:
             if self._pipeline and self._pipeline_active and not self._pipeline.is_idle():
                 self._pipeline.stop()
@@ -214,6 +222,10 @@ class SayitOrchestrator:
             ok = self._keyboard_helper.install(self.toggle_recording)
             if ok:
                 logger.info("[orchestrator] RAlt hotkey installed via keyboard helper DLL")
+                self._stop_watcher = RAltStopWatcher(
+                    self._fallback_stop, self._keyboard_helper)
+                logger.info("[orchestrator] RAltStopWatcher created with helper v%d",
+                            self._keyboard_helper.helper_version)
             else:
                 logger.warning("[orchestrator] RAlt hotkey install failed")
         except Exception as e:
@@ -299,6 +311,14 @@ class SayitOrchestrator:
                     self._audio.wait_for_stop(timeout=3.0)
                 except Exception:
                     pass
+                # Safety net: disarm the RAlt stop watcher in case
+                # _on_hotkey_stop never ran (e.g. pipeline self-terminated
+                # or an error path bypassed normal stop). Idempotent.
+                try:
+                    if self._stop_watcher is not None:
+                        self._stop_watcher.disarm()
+                except Exception:
+                    pass
                 with self._pipeline_lock:
                     if self._pipeline is _my_pipeline:
                         self._pipeline_active = False
@@ -309,6 +329,20 @@ class SayitOrchestrator:
         self._pipeline_thread = threading.Thread(
             target=_pipeline_wrapper, daemon=True, name="pipeline")
         self._pipeline_thread.start()
+
+        # Arm the RAlt stop watcher as soon as the pipeline is running.
+        # It will detect the second RAlt down→up and fire a fallback stop
+        # if the hook misses it. The snapshot of total_emitted must be
+        # taken AFTER the pipeline thread starts so that the start-toggle
+        # has already been processed by the hook.
+        if self._stop_watcher is not None:
+            try:
+                te = self._keyboard_helper.get_total_emitted() \
+                    if self._keyboard_helper else -1
+                self._stop_watcher.arm(total_emitted=te)
+            except Exception as e:
+                logger.warning("[orchestrator] RAltStopWatcher arm failed: %s", e)
+
         return True
 
     def _on_hotkey_stop(self):
@@ -346,12 +380,57 @@ class SayitOrchestrator:
         except Exception:
             pass
         pipeline.stop()
+        # Disarm the RAlt watch now — the stop signal has been sent to the
+        # pipeline; we don't need the fallback anymore for this cycle.
+        try:
+            if self._stop_watcher is not None:
+                self._stop_watcher.disarm()
+        except Exception:
+            pass
         # NB: we don't wait_for_stop / clear flags here. The pipeline
         # thread runs through to DONE/ERROR, and only then does its
         # _pipeline_wrapper.finally clear _pipeline_active. That is what
         # keeps RAlt presses arriving during ASR/AI/inject from racing
         # into a parallel pipeline.
         return True
+
+    def _fallback_stop(self):
+        """Fallback stop invoked by RAltStopWatcher when hook missed second RAlt.
+
+        This method is called from the watcher's polling thread (daemon).
+        It must NOT hold _pipeline_lock to avoid deadlock with the pipeline
+        thread (which may be in _on_hotkey_stop already if the hook just
+        barely processed the event). We acquire the lock only to read the
+        shared pipeline reference, then call _on_hotkey_stop (which itself
+        acquires the lock).
+        """
+        logger.warning(
+            "[orchestrator] _fallback_stop invoked — RAlt hook miss detected, "
+            "forcing stop via fallback path")
+        # Collect native event diagnostics before stopping
+        try:
+            if self._keyboard_helper:
+                diag = self._keyboard_helper.diagnostics()
+                native_count = diag.get("native_event_count", -1)
+                logger.info(
+                    "[orchestrator] fallback diagnostic: total_emitted=%s "
+                    "native_events=%s hook_misses=%s fallback_stops=%s "
+                    "helper_version=%s",
+                    self._keyboard_helper.get_total_emitted(),
+                    native_count,
+                    self._stop_watcher.hook_misses if self._stop_watcher else -1,
+                    self._stop_watcher.fallback_stops if self._stop_watcher else -1,
+                    self._keyboard_helper.helper_version)
+        except Exception as e:
+            logger.debug("[orchestrator] fallback diagnostic error: %s", e)
+
+        # Delegate to the same stop logic the hook callback would use.
+        # _on_hotkey_stop is safe to call from any thread since it acquires
+        # _pipeline_lock internally.
+        try:
+            self._on_hotkey_stop()
+        except Exception as e:
+            logger.error("[orchestrator] _fallback_stop -> _on_hotkey_stop failed: %s", e)
 
     def _start_config_watcher(self):
         """Start background thread that watches config.json for changes."""

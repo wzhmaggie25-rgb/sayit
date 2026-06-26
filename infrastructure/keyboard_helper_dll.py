@@ -64,7 +64,7 @@ _CALLBACK_HANDLE = None  # keep ctypes thunk alive while installed
 # export `helper_version` and return >= MIN_HELPER_VERSION; otherwise the
 # loader logs a clear error and disables the hook rather than silently
 # binding to a stale build.
-MIN_HELPER_VERSION = 2
+MIN_HELPER_VERSION = 3
 
 # Diagnostic ring buffer size. Each toggle records ~80 bytes of metadata
 # (sequence numbers + monotonic timestamps + thread ids) — bounded so the
@@ -146,6 +146,21 @@ class _LibLoader:
         except AttributeError:
             logger.info(
                 "[keyboard-helper] optional export __test_handle_event not present")
+
+        # Native diagnostics (v3+)
+        try:
+            fn = getattr(self._lib, "native_event_count")
+            fn.argtypes = []
+            fn.restype = ctypes.c_ulong
+        except AttributeError:
+            pass
+        try:
+            fn = getattr(self._lib, "native_events")
+            # native_events(NativeEventRecord* out, unsigned long max)
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            fn.restype = ctypes.c_ulong
+        except AttributeError:
+            pass
 
         version_str = ""
         build_id = ""
@@ -475,6 +490,7 @@ class KeyboardHelperDll:
             "pending": pending,
             "dispatched": dispatched,
             "queue_depth": self._toggle_queue.qsize(),
+            "native_event_count": self.native_event_count(),
         }
 
     # ── Test-only introspection ─────────────────────────────
@@ -533,3 +549,53 @@ class KeyboardHelperDll:
         except AttributeError:
             return
         fn()
+
+    # ── Native diagnostics (v3+) ──────────────────────────
+
+    def native_event_count(self) -> int:
+        """Number of keyboard events recorded by the native ring buffer since install."""
+        if not self._lib or not hasattr(self._lib, "native_event_count"):
+            return -1
+        try:
+            return int(self._lib.native_event_count())
+        except Exception:
+            return -1
+
+    def native_events(self, limit: int = 128) -> list[dict]:
+        """Read most-recent native keyboard event records from the DLL ring buffer.
+
+        Returns a list of dicts with fields:
+          seq, vkCode, wParam, flags, matched_before, matched_after,
+          emitted, tick_ms
+
+        Only integer/enum/timestamp metadata — no text or personal data.
+        Returns up to `limit` entries, oldest first.
+        """
+        if not self._lib or not hasattr(self._lib, "native_events"):
+            return []
+        max_entries = min(limit, 128)
+        # Each NativeEventRecord is 8 × uint32 = 32 bytes
+        buf_size = max_entries * 32
+        buf = ctypes.create_string_buffer(buf_size)
+        try:
+            count = int(self._lib.native_events(buf, ctypes.c_ulong(max_entries)))
+        except Exception:
+            return []
+        entries = []
+        for i in range(count):
+            offset = i * 32
+            fields = [
+                int.from_bytes(buf[offset + j*4: offset + j*4 + 4], 'little')
+                for j in range(8)
+            ]
+            entries.append({
+                "seq": fields[0],
+                "vkCode": fields[1],
+                "wParam": fields[2],
+                "flags": fields[3],
+                "matched_before": fields[4],
+                "matched_after": fields[5],
+                "emitted": fields[6],
+                "tick_ms": fields[7],
+            })
+        return entries

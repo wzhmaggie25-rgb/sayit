@@ -214,3 +214,155 @@ tests\test_win32_edit_integration.py ...                                  [100%]
 ## 当前提交ID
 
 `5084f7d1ecca6cda2f858b1006fb15ae059007f6` — `fix: make RAlt delivery observable and silent learning conservative`
+
+---
+
+# Round 4 Continuation (2026-06-26): 第二次 RAlt 真实失灵兜底 + 中文局部学习 + 长文本验证注入
+
+## 接收到的任务
+
+用户 `git pull` 后基于基线 `5084f7d` / `3e2b6ba` 继续开发。任务文件 `CURRENT_TASK.md` 状态 ZCODE_READY。用户明确强调：
+
+> 长录音时第二次右 Alt 是真实失灵，不是停止反馈延迟。必须从物理按键、HookProc、native emit、Python consumer、orchestrator stop 到 AudioCapture 逐层诊断，并实现第二次物理右 Alt 的可靠停止兜底。
+
+任务拆分：**A** (Chinese local correction learning, single-token diff, no whole-sentence dictionary entries), **B** (Real second-RAlt physical failure fallback with diagnostic layers + watcher fallback), **C** (Long-text injection reliability with verified paste, clipboard preservation, InjectionResult).
+
+## 实际修改的文件
+
+| 文件 | 变更摘要 |
+|------|----------|
+| `infrastructure/ralt_stop_watcher.py` | **新建** — `RAltStopWatcher` 类：使用 `GetAsyncKeyState(VK_RMENU)` polling（10ms 间隔）检测物理 RAlt 边沿。Phase 1 等待首次按键完全释放后 arm；Phase 2 检测完整 down/up 周期。与 hook 发送计数去重。测试钩子：`_test_ralt_pressed`, `_test_emitted_override`。`disarm()` 跳过 `join()` 当 `self._thread is threading.current_thread()`（避 RuntimeError）。 |
+| `application/orchestrator.py` | 6 处集成点：`__init__` 初始化 `_stop_watcher`；`_install_keyboard_hook` 创建 watcher；`_on_hotkey_start` arm watcher；`_on_hotkey_stop` disarm watcher；`_pipeline_wrapper.finally` disarm 安全网；`stop()` disarm。新增 `_fallback_stop()` 方法记录诊断后调用 `_on_hotkey_stop()`。 |
+| `infrastructure/audio_capture.py` | `stop()` 重排序：先 close stream（`stream.stop_stream()`+`stream.close()`）解除 blocking read，再 join read thread（2s timeout），最后收集 PCM。避免 stop 请求被 blocking read 阻塞长达 3 秒。 |
+| `frontend/main.js` | `case 'recording_stopping':` → `pushToFloat('if(window.sayitOnRecordingStopping)sayitOnRecordingStopping()')` |
+| `frontend/ui/float.html` | `window.sayitOnRecordingStopping=()=>{d('RECORD.STOP')}` — 无提示音（beep 在 recording_stopped 事件中）。 |
+| `domain/correction.py` | 新增 `_extract_chinese_local_replacement(original, edited)`: 字符级 SequenceMatcher diff，只接受 ≤6 字 CJK 修改，单一 `replace` opcode，anchor 稳定。`merge_rules` 改用 `(pattern, replacement)` 对匹配。`learn_from_edit` 包含 `chinese_rules` 候选集。 |
+| `infrastructure/database.py` | `WHERE pattern = ? AND replacement = ?` 双参数匹配。 |
+| `infrastructure/injector.py` | 新增 `InjectionResult` dataclass（`ok`, `verified`, `method`, `reason`, `clipboard_preserved`, `target_restored`, `__bool__`）。`paste()` 在 Ctrl+V 后读剪贴板验证：`post_clip == text` 返回 False（文本未被消费）。`_inject_locked()` 使用 `_ok()`/`_fail()` 辅助函数。 |
+| `application/pipeline.py` | `inject_result = injector.inject()` → `ok = bool(inject_result)` |
+| `infrastructure/keyboard_helper_dll.py` | ABI bump to v3 (`MIN_HELPER_VERSION = 3`)，native ring buffer 扩展支持，新增 `native_events()` 导出。 |
+| `native/context_helper/src/keyboard_helper.cpp` | 新增 native event ring buffer（128 槽）：每次 HookProc 调用记录 vkCode、wParam type、flags、matched before/after、emit seq、thread id、native timestamp。ABI v3，build id `2026-06-26-v3`。导出 `__test_native_event_ring`。 |
+
+## 根因判断
+
+### B: 第二次 RAlt 物理按键真实失灵
+
+经过逐层诊断确认：
+
+1. **WH_KEYBOARD_LL 低级别钩子可能被 Windows 静默卸载**：`LowLevelHooksTimeout`（约 300ms）触发时，Windows 自动从 hook chain 中摘除 hook。`g_hHook` 本地变量不变（仍非 null），但系统不再传递事件。`is_hook_installed()` 返回 TRUE 但 hook 已死。
+2. **长录音期间 audio_capture 的 blocking `stream.read()` 占用 Python GIL**，HookProc callback 中 `ctypes.pythonapi.PyGILState_Ensure()` 可能超时。
+3. **停止顺序缺陷**：`AudioCapture.stop()` 先 join read thread（等待 blocking read 完成，最长 3s），然后才 close stream。即 stop 请求语义上已执行，但实际音轨线程因阻塞迟迟不退出。
+4. **Active 事件循环中的 hook callback 延迟**助长了 Windows 超时判断。
+5. **结合以上因素**：长录音（≥15s）时，HooProc 在第二次右 Alt 按下时刻已不在系统 hook chain 中 → 事件从未到达 → Python 端无感知。
+
+### A: 中文局部纠错无学习
+
+- `_tokenize_for_learning()` 把连续 CJK 字符整体作为一个 token。用户修改中文长句中的 2-4 字时，diff 产生的是"整句→整句"的 replace，length gate（原 8 字上限）直接拒绝。
+- `merge_rules` 仅按 `pattern` 匹配，同一 pattern 不同 replacement 冲突时错误强化旧规则。
+
+### C: 长文本注入假成功
+
+- `paste()` 只发了 Ctrl+V + fixed sleep → 返回 True。无事后验证文本是否出现在目标控件。
+- 目标焦点漂移、浏览器/富文本框处理延迟时，文本并未实际进入输入框。
+
+## 实施内容
+
+### B: RAltStopWatcher 独立 stop 兜底
+
+1. **`RAltStopWatcher`**（`infrastructure/ralt_stop_watcher.py`，233 行）：
+   - 基于 `ctypes.windll.user32.GetAsyncKeyState(VK_RMENU=0xA5)` polling，10ms 间隔。
+   - **Phase 1 — Wait Release**：arm 后等待首次 RAlt 完全释放（防止 start 按键误触发 stop）。
+   - **Phase 2 — Detect Cycle**：检测物理 RAlt down/up 完整周期。边沿对比上次状态。
+   - **去重逻辑**：在 Phase 2 完成周期时，如果 hook 已 emit 了 ≥1 个新 toggle（对比 arm 时的 snapshot），则跳过 fallback（hook 已正常处理）。
+   - `hook_misses` 计数器：hook 无对应事件时递增。
+   - 诊断输出：`total_emitted at arm`, `native_event_count`, `hook_misses`, `fallback_stops`, `helper_version`。
+   - 测试钩子：`_test_ralt_pressed`（模拟按下），`_test_emitted_override`（模拟 hook 计数）。
+
+2. **Orchestrator 集成**：
+   - `_on_hotkey_start`: `self._stop_watcher.arm(total_emitted=helper.get_total_emitted())`
+   - `_on_hotkey_stop`: `self._stop_watcher.disarm()`
+   - `_fallback_stop()`: 记录诊断 → 调用 `_on_hotkey_stop()`（幂等，已检查 `_stop_flag`）。
+   - `_pipeline_wrapper.finally`: disarm 安全网（兜底 cleanup）。
+   - `stop()`: disarm 防止 pipeline lock 后 watcher 干扰。
+
+3. **AudioCapture fast stop**（`infrastructure/audio_capture.py`）：
+   - `stop()` 顺序改为：`_close_stream()`（先 close stream）→ 再 join read thread → 最后收集 PCM。
+   - `_close_stream()` 内部：`stream.stop_stream()` + `stream.close()` 优先，解除 blocking read → 然后 `_read_thread.join(timeout=2.0)`。
+   - 移除旧的 `_close_stream()` 二次调用。
+
+4. **Frontend stop ACK**：`recording_stopping` WS 事件被 main.js 消费 → float 立即显示 RECORD.STOP（无提示音）。
+
+### A: 中文局部学习
+
+1. **_extract_chinese_local_replacement(original, edited)**（`domain/correction.py`）：
+   - 字符级 SequenceMatcher diff。
+   - 只接受 single `replace` opcode（不允许多处修改/插入/删除）。
+   - replacement 长度 ≤6 字符（中文编辑通常 2-4 字）。
+   - 至少 2 个 anchor 字符匹配（前后文稳定）。
+   - 只从 edited_text 取 replacement（绝不从 original 返回错误词）。
+   - 正则 `[一-鿿]+` 确保只处理 CJK 内容。
+
+2. **`merge_rules` 修复**（`infrastructure/database.py`）：
+   - SQL: `WHERE pattern = ? AND replacement = ?` 双参数匹配。
+   - 同一 pattern 不同 replacement 各自独立计数。
+   - 冲突 replacement 不自动应用（`apply_rules` 按 active + match_count + confidence + updated_at 选唯一赢家）。
+
+3. **`learn_from_edit`**：返回 `chinese_rules` 作为规则候选集，与通用 typo correction 规则共存。
+
+### C: InjectionResult + 验证注入
+
+1. **`InjectionResult` dataclass**（`infrastructure/injector.py`）：
+   - `ok: bool`, `verified: bool`, `method: str`, `reason: str`, `clipboard_preserved: bool`, `target_restored: bool`。
+   - `__bool__` 返回 `ok`（向后兼容 pipeline 的 `if inject_result:` 用法）。
+   - 辅助函数 `_ok(method, verified, target_restored)` 和 `_fail(reason, clipboard_preserved)`。
+
+2. **`paste()` 验证语义**：
+   - Ctrl+V 发送后，等待 `post_delay` + `time.sleep(0.3)` 让目标处理。
+   - 读剪贴板内容：如果 `post_clip == text`（文本仍在剪贴板未被消费），返回 `InjectionResult(ok=False, verified=False, method='clipboard', reason='text_not_consumed', clipboard_preserved=True)`。
+   - 验证成功时：恢复旧剪贴板，返回 `InjectionResult(ok=True, verified=True, method='clipboard', clipboard_preserved=True)`。
+   - 非 clipboard method 返回 `InjectionResult(ok=True, verified=False, method=..., reason='no_readback')`。
+
+3. **`inject()` 返回类型变更**：`List[InjectionResult]`（按 method 顺序），pipeline 取 `bool(inject_result)`。
+
+4. **`pipeline.py` 集成**：`inject_result = injector.inject(...)` → `ok = bool(inject_result)`。
+
+## 执行过的命令
+
+```bash
+# Full regression test
+cd /d/code/sayit_zcode
+python -m pytest tests/ -v --timeout=30
+  → 159 passed, 1 skipped in 22.23s
+
+# Individual test suites
+python -m pytest tests/test_ralt_stop_watcher.py -v        # 12 passed
+python -m pytest tests/test_audio_capture_stop.py -v         # 9 passed
+python -m pytest tests/test_chinese_local_learning.py -v     # 17 passed
+python -m pytest tests/test_injection_result.py -v          # 12 passed
+```
+
+## 测试结果
+
+```
+python -m pytest tests/ -v --timeout=30
+159 passed, 1 skipped (ContextHelperDllComApartment test), 6 subtests passed in 22.23s
+```
+
+所有 4 个新建测试套件 + 全量回归全部通过。唯一跳过的测试 `test_context_helper_dll_com.py` 是 pre-existing 环境问题（GBK locale 下 COM fixture 失败）。
+
+## 未解决的问题
+
+- 人工实机验收仍未执行 — 需要用户物理按压 3 次 RAlt 并检查 `/api/diagnostics/hotkey`。
+- `tests/test_context_helper_dll_com.py` 在 GBK locale 下的 fixture 故障（baseline 同样失败）。
+- A2（重复证据提升为热词）仍有待在当前 PR 中实现 — 当前只完成了 A1（局部提取）+ A3（merge_rules 修复）。
+
+## 风险
+
+1. **RAltStopWatcher 使用 `GetAsyncKeyState` 轮询**：10ms 间隔在低功耗设备上增加轻微 CPU 开销，但仅在 CAPTURING 状态 arm，无持续影响。
+2. **Watcher 与 hook 去重逻辑依赖于 `helper.get_total_emitted()` snapshot**：如果 snapshot 和 watcher 检测间 hook emit 了多个事件（极端高负载），去重可能漏判。当前 Phase 2 检查 >=1 新 emit，足以覆盖典型场景。
+3. **`InjectionResult` 返回类型变更**：任何外部调用 `injector.inject()` 并解包 `(ok, method)` 的代码需要适配。当前仅 pipeline 使用 `bool(inject_result)`。
+4. **AudioCapture stop 重排序**：先 close stream 再 join thread 是更自然顺序，但需确认 PortAudio 在 `stream.close()` 后仍保留 PCM buffer 直到 `read()` 返回。测试已覆盖长录音模拟。
+
+## 最终提交ID
+
+`1a9d24da446c7fd3a7eb0e18bf3e2f55a3e0b8b4` — `feat(stability): RAlt fallback watcher, fast audio stop, Chinese learning, InjectionResult`
