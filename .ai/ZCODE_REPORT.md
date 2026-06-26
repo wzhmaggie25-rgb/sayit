@@ -1,53 +1,52 @@
 # ZCode Report
-> 最后一次更新：2026-06-26 14:54
+> 最后一次更新：2026-06-26 15:56
 
-## 接收到的任务（第三轮）
+## 接收到的任务（第四轮）
 
-读取 `.ai/CURRENT_TASK.md` 中的 READY 任务——搭建 SayIt 本地 AI 任务桥梁第一版
-（`tools/agent_bridge/`），每 30 秒轮询 GitHub，调用 Claude Code 非交互执行。
+修复 Agent Bridge v0.1.0 的 9 个关键问题（A–H）并执行真实 Claude Code 冒烟测试。
 
 ### 范围
-- 新建桥梁代码、配置模板、启动脚本、设计文档
-- 新建测试文件（单元测试 + 冒烟脚本）
-- 更新 `.gitignore` 排除运行时文件
+- 重写 `tools/agent_bridge/bridge.py` 为 v0.2.0 — 修复 B/C/D/E/F/H
+- 修复 `start_bridge.bat` 启动目录 — A
+- 修复 `.gitignore` 移除冒烟测试排除 — G
+- 重写 `tests/test_agent_bridge.py` — 36 个测试覆盖 C/D/H
+- 修复 `tests/smoke_agent_bridge.py` — 严格退出码 + `--allowedTools`
 - **不修改任何 SayIt 业务代码**
 
-### 创建的文件
+### v0.2.0 修复摘要
 
-| 文件 | 说明 |
-|------|------|
-| `tools/agent_bridge/bridge.py` | 核心桥梁（~500 行） |
-| `tools/agent_bridge/bridge_config.example.json` | 配置模板 |
-| `tools/agent_bridge/README.md` | 用户文档 |
-| `start_bridge.bat` | 启动脚本 |
-| `.ai/BRIDGE_DESIGN.md` | 设计文档 |
-| `tests/test_agent_bridge.py` | 29 个单元测试 |
-| `tests/smoke_agent_bridge.py` | Claude 冒烟测试 |
+| 问题 | 修复 | 验证 |
+|------|------|------|
+| A: 启动目录 | `start_bridge.bat` 使用 `cd /d "%~dp0"` | ✅ 单元 + 人工 |
+| B: Claude cwd | `call_claude()` 和 `claude_binary_path()` 使用 `cwd=PROJECT_ROOT` | ✅ ClaudeInvocationTests × 2 |
+| C: 重启恢复 | fetch 后总是读取 CURRENT_TASK，指纹 = HEAD SHA | ✅ PreconditionTests × 8 |
+| D: JSON envelope | `parse_claude_result()` 支持 5 种输出形态 | ✅ ParseResultTests × 8 |
+| E: 权限模式 | `--allowedTools` 替代 `--dangerously-skip-permissions` | ✅ 设计文档 + README |
+| F: 模型配置 | 不硬编码 `--model`，继承 CC Switch | ✅ 配置逻辑审查 |
+| G: 冒烟退出码 | 严格 tracking，任何失败返回 1 | ✅ 真实冒烟执行 |
+| H: BLOCKED 同步 | 精确 stage 仅 .ai 文件，commit + push | ✅ 测试 + 设计文档 |
 
-### 修改的文件
+### 真实冒烟测试结果
 
-| 文件 | 变更 |
-|------|------|
-| `.gitignore` | 新增桥梁运行时文件排除规则 |
-| `.ai/CURRENT_TASK.md` | 状态改为 DONE |
-| `.ai/ZCODE_REPORT.md` | 新增本轮记录 |
-| `.ai/TEST_RESULTS.md` | 新增桥梁测试结果 |
+在 `feature/silent-learning-stabilization` 分支执行 `python tests/smoke_agent_bridge.py`：
 
-### 桥梁核心行为
-
-1. 每 30 秒 `git fetch origin feature/silent-learning-stabilization`
-2. 安全检查：分支正确、工作目录干净、无进行中操作、可 ff-only、CURRENT_TASK 为 READY、未重复执行、无并发锁
-3. 通过后调用 `claude -p <prompt> --output-format json` (timeout=300s)
-4. Claude 执行任务、更新 .ai 报告、提交推送
-5. 更新状态文件、释放锁
+- Claude 版本：2.1.163
+- 模型：`glm-latest`（继承 CC Switch 配置，未强制 `--model`）
+- 退出码：0
+- 耗时：38.4 秒
+- 权限提示：无（`--allowedTools` 正常工作）
+- 结果：成功创建 `.ai/BRIDGE_SMOKE_TEST.md`，提交 `e6aa861`，推送至 `origin`
+- 提交消息：`test: bridge smoke test`
+- 仅 1 个文件被修改：`.ai/BRIDGE_SMOKE_TEST.md` ✅
 
 ### 执行过的命令
 
 ```bash
-# 单元测试
-python -m pytest tests/test_agent_bridge.py -v    # 29/29 通过
+# 单元测试（36/36 通过）
+python -m pytest tests/test_agent_bridge.py -v
 
-# 注意：冒烟测试（真实 Claude）尚未执行
+# 真实 Claude 冒烟测试
+python tests/smoke_agent_bridge.py
 ```
 
 执行 `.ai/CURRENT_TASK.md` 中的"只读审计静默学习"任务。

@@ -48,6 +48,10 @@ cp tools/agent_bridge/bridge_config.example.json tools/agent_bridge/bridge_confi
 | `claude_timeout_seconds` | `300` | Claude 执行超时（秒） |
 | `claude_binary` | `claude` | Claude 可执行文件 |
 | `log_level` | `info` | 日志级别 |
+| `claude_allowed_tools` | `["Read","Edit","Write","Bash(git*)","Bash(python*)","Bash(pytest*)","Bash(claude*)"]` | Claude 工具权限白名单 |
+
+> **模型配置**：桥梁默认不设置 `--model`，继承 CC Switch 中配置的模型。
+> 如需要覆盖，可在配置中添加 `"model": "claude-sonnet-4-20250514"`。
 
 ## 命令行选项
 
@@ -67,18 +71,20 @@ python tools/agent_bridge/bridge.py --version
 ### 每轮循环
 
 1. `git fetch origin feature/silent-learning-stabilization`
-2. 如果无新提交 → 等待 → 回到步骤 1
+2. 如果远程领先且可 fast-forward，`git pull --ff-only`
 3. 安全检查：
    - 当前分支正确
    - 工作目录干净
    - 无进行中的 merge/rebase/cherry-pick
-   - `git pull --ff-only` 成功
    - `CURRENT_TASK.md` 状态为 `**READY**`
-   - 该提交 SHA 尚未处理过
+   - 该任务指纹（HEAD SHA）尚未处理过
    - 无其他 bridge 实例运行（锁文件）
-4. 通过检查后，调用 `claude -p <prompt> --output-format json`
+4. 通过检查后，调用 `claude -p <prompt> --output-format json --allowedTools Read Edit Write 'Bash(git*)' 'Bash(python*)' 'Bash(pytest*)'`
 5. Claude 执行任务、更新代码和 .ai 报告、提交推送
 6. 更新状态文件、释放锁
+
+> **注意**：桥梁每轮强制 fetch 并读取 CURRENT_TASK.md，不依赖远程是否产生新提交。
+> 重启时可恢复本地已有的未处理 READY 任务。
 
 ### Claude 被要求
 

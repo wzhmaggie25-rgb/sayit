@@ -1,36 +1,71 @@
 # Test Results
-> 最后一次更新：2026-06-26 14:54
+> 最后一次更新：2026-06-26 15:56
 
-## 本轮说明（第三轮）
+## 本轮说明（第四轮）
 
-本轮为搭建桥梁第一版。**详细设计见 `.ai/BRIDGE_DESIGN.md`**。
+修复 Agent Bridge v0.1.0 9 个问题（A–H），更新至 v0.2.0。**详细设计见 `.ai/BRIDGE_DESIGN.md`**。
 
-## 桥梁单元测试
+## 桥梁单元测试（v0.2.0）
 
-文件：`tests/test_agent_bridge.py`（29 个测试，全部通过）
+文件：`tests/test_agent_bridge.py`（36 个测试，全部通过）
 
 | Suite | Tests | Pass | Fail | Notes |
 |-------|-------|------|------|-------|
-| PreconditionTests | 6 | 6 | 0 | 安全检查：分支/脏目录/锁/状态/重复/无远程 |
-| ClaudeInvocationTests | 4 | 4 | 0 | Claude 调用/解析/JSON 容错/失败处理 |
+| PreconditionTests | 8 | 8 | 0 | C 设计：重启恢复、新任务识别、已处理跳过、脏目录/分支/进行中保护 |
+| ParseResultTests | 8 | 8 | 0 | D 覆盖：直接JSON、envelope+json、envelope+codeblock、envelope+纯文本、非零退出、无效JSON、is_error |
+| ClaudeInvocationTests | 2 | 2 | 0 | B 验证：`call_claude` 和 `claude_binary_path` 均使用 `cwd=PROJECT_ROOT` |
 | LockTests | 3 | 3 | 0 | PID 锁获取释放/并发/残留覆盖 |
 | StateTests | 3 | 3 | 0 | 状态持久化：空/匹配/不同 SHA |
-| GitHelperTests | 7 | 7 | 0 | 辅助函数：repo/分支/脏/MERGE_HEAD/SHA |
-| EndToEndMockedTests | 1 | 1 | 0 | mock claude 全生命周期演练 |
+| GitHelperTests | 7 | 7 | 0 | 辅助函数：repo/分支/脏/MERGE_HEAD/SHA/进行中操作 |
 | IsTaskReadyTests | 4 | 4 | 0 | READY/BLOCKED/DONE/空 状态检测 |
 | BuildPromptTests | 1 | 1 | 0 | Prompt 包含任务文本和约束 |
 
-**合计：29/29 通过** ✅
+**合计：36/36 通过** ✅
 
-## 桥梁冒烟测试
+### 新增/修改测试（v0.1.0 → v0.2.0）
+
+新增 7 个测试：
+- `test_local_ready_without_remote_changes_still_executes` — Issue C 核心
+- `test_ready_after_new_commit_is_new_task` — Issue C
+- `test_already_processed_skips` — Issue C 重复防护
+- `test_blocked_without_remote_skips` — Issue C
+- `test_done_without_remote_skips` — Issue C
+- `test_envelope_is_error` — Issue D
+- `test_envelope_plain_text_result` — Issue D
+
+移除 2 个旧测试（EndToEndMockedTests 已拆解到各 suite；ClaudeInvocationTests 从 4 精简为 2 个更聚焦的测试）
+
+## 桥梁冒烟测试（真实 Claude Code）
 
 文件：`tests/smoke_agent_bridge.py`
 
-⚠️ **未执行**——冒烟测试需要真实调用 Claude Code（`claude -p`），将更新 `.ai/BRIDGE_SMOKE_TEST.md`。
-用户可在安全环境手动运行：
-```bash
-python tests/smoke_agent_bridge.py
-```
+**执行时间：2026-06-26 15:56**
+**结果：通过** ✅
+
+| 检查项 | 结果 |
+|--------|------|
+| 正确分支 (`feature/silent-learning-stabilization`) | ✅ |
+| 干净工作目录 | ✅ |
+| 无进行中 git 操作 | ✅ |
+| Claude 退出码 0 | ✅ |
+| `.ai/BRIDGE_SMOKE_TEST.md` 已创建 | ✅ (48 字节) |
+| 内容正确 | ✅ |
+| 存在新提交 | ✅ (`e6aa861`) |
+| 提交消息 `test: bridge smoke test` | ✅ |
+| 已推送至 `origin` | ✅ |
+| 仅 `.ai/BRIDGE_SMOKE_TEST.md` 被修改 | ✅ |
+| Claude 输出指示成功 | ✅ |
+
+**Claude 版本：** 2.1.163
+**模型：** `glm-latest`（继承 CC Switch，未强制 `--model`）
+**耗时：** 38.4 秒
+**权限提示：** 无（`--allowedTools Read Edit Write 'Bash(git*)' 'Bash(python*)' 'Bash(pytest*)'` 正常工作）
+
+## 桥梁冒烟测试（第三轮记录）
+
+文件：`tests/smoke_agent_bridge.py`
+
+⚠️ **未执行**——上一轮冒烟测试需要真实调用 Claude Code（`claude -p`）。本轮已执行并成功通过。
 
 ## 本轮说明（第二轮）
 
@@ -173,4 +208,6 @@ python tests/smoke_agent_bridge.py
 | EXE 通信 | 3 | 0 | 0 | 全部通过 |
 | PortAudio 守卫 | 2 | 0 | 0 | 正确跳/不跳 DLL |
 | Python UIA 降级 | 0 | 1 | 0 | 当前环境无法读取焦点文本 |
-| **桥梁单元测试** | **29** | **0** | **0** | **全部通过** |
+| **桥梁单元测试 (v0.1.0)** | **29** | **0** | **0** | **第一版全部通过** |
+| **桥梁单元测试 (v0.2.0)** | **36** | **0** | **0** | **修复版全部通过** |
+| **桥梁冒烟测试** | **1** | **0** | **0** | **真实 Claude 通过 (e6aa861)** |

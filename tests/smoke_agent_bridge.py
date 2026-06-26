@@ -122,8 +122,14 @@ def main() -> int:
     print(f"  cwd: {ROOT}")
     t0 = time.monotonic()
     try:
+        # Allowed tools must match what the bridge + config grant
+        _ALLOWED = [
+            "Read", "Edit", "Write",
+            "Bash(git*)", "Bash(python*)", "Bash(pytest*)",
+        ]
         result = subprocess.run(
-            ["claude", "-p", PROMPT, "--output-format", "json"],
+            ["claude", "-p", PROMPT, "--output-format", "json",
+             "--allowedTools"] + _ALLOWED,
             capture_output=True, text=True, timeout=120, cwd=ROOT,
         )
     except subprocess.TimeoutExpired:
