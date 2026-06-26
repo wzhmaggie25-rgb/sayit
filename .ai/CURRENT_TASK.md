@@ -3,222 +3,174 @@
 
 ## 状态
 
-**DONE**
+**READY**
 
 ## 任务名称
 
-修复 Agent Bridge 第一版的启动、任务领取、Claude 输出解析与真实冒烟测试问题。
+仅修复 `context_helper` DLL 的 COM apartment 模型，使其与 Python/comtypes 的 MTA 调用线程兼容，并完成针对性验证。
 
-## 背景
+## 基线与分支
 
-提交 `acde6ce` 已建立桥梁框架，29 个 mock 单元测试通过，但审查发现当前版本尚不能投入实际轮询：
+- 仓库：`wzhmaggie25-rgb/sayit`
+- 分支：`feature/silent-learning-stabilization`
+- 任务基线 HEAD：`6d400cfbac05b5e38b69c294c53c5815dbf56541`
+- 稳定备份：commit `0d69a98`，tag `local-working-2026-06-25`
 
-1. 根目录的 `start_bridge.bat` 使用 `cd /d "%~dp0.."`，会进入仓库父目录，随后找不到 `tools/agent_bridge/bridge.py`。
-2. `call_claude()` 未设置 `cwd=PROJECT_ROOT`，Claude 会继承启动终端目录，而不是被强制限定在 SayIt 仓库。
-3. `check_preconditions()` 只有 fetch 到新提交时才读取 READY 任务；桥梁在 READY 任务已存在本地时启动或重启，可能永远不执行。
-4. 无远程变化时 `run_once()` 会把当前 HEAD 标记为已处理，可能错误吞掉尚未执行的 READY 任务。
-5. Claude Code `--output-format json` 可能返回包含 `result` 字段的外层 JSON，而当前解析器只接受顶层直接包含 `ok` 的对象。
-6. `.ai/BRIDGE_SMOKE_TEST.md` 被 `.gitignore` 排除，但冒烟测试要求创建、提交并推送该文件。
-7. `tests/smoke_agent_bridge.py` 即使没有创建文件、没有新提交或 JSON 解析失败，最后仍返回退出码 0。
-8. 真实 Claude 冒烟测试尚未执行。
-9. 失败时桥梁本地写入 BLOCKED，但需要明确如何让远程 GitHub 和 ChatGPT可靠看到阻塞状态，同时不得误提交 Claude留下的业务改动。
+开始前必须确认：
 
-本轮只修桥梁，不修复静默学习，不修改 SayIt 业务代码。
+1. 当前分支严格为 `feature/silent-learning-stabilization`；
+2. 已拉取本任务提交；
+3. 工作目录除桥梁运行文件外干净；
+4. 不修改 `main`、`backup/*` 或稳定 tag；
+5. 不 force push，不执行 `reset --hard` 或 `git clean`。
 
-## 必须修复
+## 已确认的审计结论
 
-### A. 启动目录
+1. EXE subprocess 路径可靠，本轮不得重构或替换 EXE 路径。
+2. DLL 由 Python/comtypes 所在线程进程内加载时，该线程使用 MTA。
+3. `native/context_helper/src/main.cpp` 当前 `ComInit` 无条件调用：
 
-- 将根目录 `start_bridge.bat` 修正为从脚本所在的仓库根目录启动：
-
-```bat
-cd /d "%~dp0"
-python tools/agent_bridge/bridge.py %*
+```cpp
+CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)
 ```
 
-- 启动前验证 `tools/agent_bridge/bridge.py` 和 `.git` 存在；不存在时给出明确错误并退出非零。
-- 增加对应测试或可重复验证记录。
+4. 在已初始化为 MTA 的 Python/comtypes 线程中再次请求 STA，会返回 `RPC_E_CHANGED_MODE`，导致 `ComInit::ok()` 为 false，随后 DLL 的 UI Automation 路径被跳过。
+5. 第一项修复必须严格限制为：让 DLL 构建在 MTA 中初始化 COM，同时保留 EXE 当前已验证行为；暂时不要修改其他静默学习逻辑。
 
-### B. Claude 工作目录
+## 必须实施的最小修复
 
-- `claude --version` 与真实 `claude -p` 调用都必须设置：
+只在 `BUILD_DLL` 构建下把 `ComInit` 的 `CoInitializeEx` flags 改为 `COINIT_MULTITHREADED`。
 
-```python
-cwd=PROJECT_ROOT
+推荐采用清晰、最小的编译期区分，例如：
+
+```cpp
+#ifdef BUILD_DLL
+constexpr DWORD kComInitFlags = COINIT_MULTITHREADED;
+#else
+constexpr DWORD kComInitFlags = COINIT_APARTMENTTHREADED;
+#endif
 ```
 
-- 不得依赖调用者当前终端目录。
-- 增加单元测试验证 subprocess 的 cwd。
+然后让 `ComInit` 使用该 flags。
 
-### C. READY 任务领取与重启恢复
+要求：
 
-重新设计一次轮询逻辑：
+- DLL：MTA；
+- EXE：继续 STA，不改变已验证的 subprocess 行为；
+- 正确处理 `S_OK` 和 `S_FALSE`，仅在 `CoInitializeEx` 成功时配对调用 `CoUninitialize`；
+- 不吞掉或伪装 `RPC_E_CHANGED_MODE`；
+- 不新增线程，不引入全局 COM 生命周期，不做无关重构；
+- 不修改 UIA 搜索、窗口定位、剪贴板、键盘监听、学习判定、文本差异、数据库或 Electron 逻辑。
 
-1. 每轮先做仓库、分支、脏目录、进行中操作检查；
-2. 执行 fetch；
-3. 如果远程领先且可 fast-forward，则 pull；
-4. 无论本轮是否拉到新提交，都读取当前 `.ai/CURRENT_TASK.md`；
-5. 只要状态为 READY 且任务指纹尚未成功/阻塞处理，就应执行；
-6. 任务指纹应基于 CURRENT_TASK 内容哈希，或能唯一对应任务的提交 SHA；不得仅因为“本轮 fetch 无变化”而跳过；
-7. 桥梁重启后，已存在本地的未处理 READY 任务必须能够恢复执行；
-8. 非 READY 状态只等待，不得错误写入 `last_processed_sha`；
-9. 不得把普通 HEAD 自动标记成已处理任务。
+## 针对性测试
 
-增加以下测试：
+先确认并记录当前 Windows 构建方式，然后完成以下测试。
 
-- READY 已在本地、远程无新提交时仍会执行；
-- DONE/BLOCKED、远程无变化时不执行；
-- 重启后未处理 READY 任务能恢复；
-- 已处理的同一任务不会重复执行；
-- 新任务即使基于同一分支仍会被识别。
+### A. 编译验证
 
-### D. Claude JSON 输出
+构建 Release 版本的：
 
-先使用用户当前已配置好的 Claude Code 模型执行一个只读命令，观察本机真实输出格式，不打印或提交任何密钥、环境变量或完整私人配置。
+- `sayit_context_helper.exe`
+- `sayit_context_helper_dll.dll`
 
-解析器必须兼容至少：
+编译必须无新增错误。不得通过降低警告级别、删除代码或跳过 DLL 构建来制造通过。
 
-1. 顶层直接是任务结果：
+### B. EXE 回归冒烟
 
-```json
-{"ok": true, "summary": "..."}
+对 EXE 至少验证：
+
+1. `ping` 返回成功 JSON；
+2. `get_full_context` 返回可解析 JSON；
+3. 进程正常退出；
+4. 证明本轮没有破坏原 subprocess 路径。
+
+### C. Python/comtypes + DLL 同线程测试（本轮核心）
+
+新增或更新一个聚焦的 Windows 测试脚本，优先放在：
+
+```text
+tests/test_context_helper_dll_com.py
 ```
 
-2. Claude Code `--output-format json` 的外层结果对象，其 `result` 字段中包含模型最终文本；如果 `result` 是 JSON 字符串或 Markdown JSON code block，应继续解析内部对象。
+测试必须在同一个 Python 线程中：
 
-3. 如果本机 Claude版本支持且当前模型/供应商兼容，可评估 `--json-schema`；但不得假设，必须通过本机低风险测试验证后才能采用。
+1. 显式按项目实际 comtypes 用法初始化/确认 MTA；
+2. 加载刚构建的 `sayit_context_helper_dll.dll`；
+3. 正确声明 DLL 导出函数和 `free_string`，避免内存泄漏；
+4. 调用 `get_full_context_json` 或 `get_focused_context_json`；
+5. 将返回值解析为 JSON；
+6. 验证不是因 COM apartment 冲突而退化为空结果。
 
-- 外层进程成功但内部结果 `ok=false`，必须判定失败。
-- JSON无法解析必须判定 BLOCKED。
-- 增加直接 JSON、外层 envelope、result code block、无效 JSON、非零退出码测试。
+为了让测试能区分“UIA 真正工作”与“仅返回结构正确的空 JSON”，应采用可重复的 Windows 前台输入框场景，例如启动或定位记事本编辑区、写入唯一 sentinel、取得其 HWND，并通过 DLL 返回确认至少满足下面之一：
 
-### E. Claude 权限模式
+- `full_field_content` 包含 sentinel；或
+- 能明确验证目标 UIA 元素可编辑且返回了非空的 UIA 元数据。
 
-真实非交互调用前，必须验证当前 Claude配置是否能在无人点击的情况下：
+测试结束必须清理自己启动的测试进程，不得影响用户现有窗口和数据。
 
-- 修改指定测试文件；
-- 执行 `git status`、`git add`、`git commit`、`git push`；
-- 不访问仓库外文件；
-- 不出现等待用户授权导致超时。
+如果本机环境限制导致记事本自动化不可稳定执行，可采用等价、低风险、可重复的本地 Win32 编辑控件测试夹具；但不得把核心断言弱化为“JSON 能解析”。
 
-不得直接加入 `--dangerously-skip-permissions` 或 `bypassPermissions`。
+### D. 失败复现与修复证据
 
-如果需要命令行权限配置：
+在报告中记录：
 
-- 使用最小权限原则；
-- 只允许完成任务所需的 Read/Edit/Write 与明确限定的 Bash 命令；
-- 把权限策略写入 `.ai/BRIDGE_DESIGN.md` 和 README；
-- 不把 Token、API Key、Cookie写入仓库。
-
-### F. 模型配置
-
-当前桥梁不得硬编码或强制传入 `--model`，继续使用用户刚在 CC Switch 中配置的 Claude模型。
-
-- README明确说明：桥梁默认继承当前 Claude Code / CC Switch配置；
-- 如未来增加可选 `model` 配置，默认必须为空；只有用户显式配置时才添加 `--model`；
-- 日志不得输出 API Key、Base URL中的凭据或完整环境变量。
-
-### G. 冒烟测试文件与退出码
-
-- 从 `.gitignore` 中移除 `.ai/BRIDGE_SMOKE_TEST.md`；或采用同样清晰、安全、可审查的方案保证测试文件能被提交。
-- `tests/smoke_agent_bridge.py` 必须在以下任一情况返回非零：
-  - Claude退出非零；
-  - 测试文件未创建；
-  - 除允许文件外出现其他改动；
-  - 没有新提交；
-  - 提交未推送到目标远程分支；
-  - Claude输出无法解析为成功结果。
-- 所有 subprocess 必须使用 `cwd=ROOT`。
-- 冒烟测试前要求：正确分支、干净工作目录、无进行中 Git操作。
-
-### H. BLOCKED 状态同步
-
-设计并实现可审查的阻塞回传：
-
-- Claude超时、退出非零、解析失败时，保留其工作现场；不得 reset、clean、checkout覆盖。
-- GitHub远程必须能够看到任务已 BLOCKED及简短脱敏原因。
-- 不得把 Claude意外修改的业务文件一起提交。
-- 可以只 stage/commit `.ai/CURRENT_TASK.md` 和专用 `.ai/BRIDGE_RUN_REPORT.md`，但必须验证不会包含其他文件。
-- 如果 push本身失败，应保留本地状态并在控制台明确显示，不能谎称已通知 ChatGPT。
-- 成功时避免桥梁在 Claude完成提交后再次产生未提交的 CURRENT_TASK变化。
-
-增加成功和失败路径测试。
-
-## 真实冒烟测试
-
-完成以上修复和单元测试后，执行一次真实 Claude低风险冒烟：
-
-```bash
-python tests/smoke_agent_bridge.py
-```
-
-真实 Claude只能：
-
-- 创建或更新 `.ai/BRIDGE_SMOKE_TEST.md`；
-- 写入测试时间和模型执行成功说明；
-- commit：`test: bridge smoke test`；
-- push 当前 `feature/silent-learning-stabilization` 分支。
-
-必须记录：
-
-- Claude版本；
-- 实际命令（不得含密钥）；
-- 退出码；
-- 真实输出结构的脱敏摘要；
-- 冒烟提交完整 SHA；
-- push确认；
-- 是否出现权限提示或等待；
-- CC Switch模型配置是否被正常继承（只能记录可安全确认的模型名称，不得记录密钥/Base URL凭据）。
-
-## 回归测试
-
-至少运行：
-
-```bash
-python -m pytest tests/test_agent_bridge.py -v
-python tests/smoke_agent_bridge.py
-```
-
-不得修改、删除测试来制造通过。
+- 修复前失败现象或已有审计证据；
+- 修复后 Python/comtypes MTA 同线程 DLL 调用结果；
+- EXE 回归结果；
+- 构建命令、测试命令、退出码；
+- 生成的 DLL/EXE 实际路径；
+- 不得记录密钥、私人配置、录音或用户文本。
 
 ## 允许修改
 
-- `start_bridge.bat`
-- `tools/agent_bridge/*`
-- `tests/test_agent_bridge.py`
-- `tests/smoke_agent_bridge.py`
-- `.gitignore`
-- `.ai/BRIDGE_DESIGN.md`
-- `.ai/BRIDGE_SMOKE_TEST.md`
-- `.ai/BRIDGE_RUN_REPORT.md`
+- `native/context_helper/src/main.cpp`
+- `tests/test_context_helper_dll_com.py`（如不存在可新建）
+- 与该聚焦测试直接相关、且确有必要的测试夹具文件
 - `.ai/ZCODE_REPORT.md`
 - `.ai/TEST_RESULTS.md`
 - `.ai/CURRENT_TASK.md`
 
+除非构建完全无法进行且报告中解释必要性，否则不要修改 CMake、Python 业务模块或任何依赖配置。
+
 ## 禁止修改
 
-- 热键、录音、ASR、纠错、注入、静默学习、Electron、进程管理等业务代码；
-- `main`；
-- `backup/*`；
-- 任何凭据、个人配置、数据库、录音或日志；
+- 除上述 COM apartment 修复之外的任何静默学习逻辑；
+- EXE subprocess 架构或 IPC 协议；
+- UIA 元素搜索策略、窗口筛选、文本读取算法；
+- Electron、录音、ASR、纠错、注入、数据库、热键、进程管理；
+- Agent Bridge 代码和启动脚本；
+- `main`、`backup/*`、稳定 tag；
+- 凭据、个人配置、数据库、录音、日志；
 - 不得安装或升级 Claude Code；
-- 不得 force push、reset --hard、git clean；
-- 不得开始下一项静默学习修复任务。
+- 不得扩大为第二项静默学习修复。
 
-## 提交要求
+## 验收标准
 
-修复提交建议：
+同时满足以下条件才可标记 DONE：
 
-```bash
-git add start_bridge.bat tools/agent_bridge tests/test_agent_bridge.py tests/smoke_agent_bridge.py .gitignore .ai
-git commit -m "fix: stabilize local Claude task bridge"
-git push
-```
+1. `main.cpp` 的差异清楚证明：仅 DLL 使用 MTA，EXE 保持 STA；
+2. DLL 和 EXE 均成功构建；
+3. Python/comtypes MTA 同线程加载 DLL 的针对性测试通过；
+4. 测试能够证明 UIA 路径实际工作，而不只是 JSON 外壳可解析；
+5. EXE `ping` 和 `get_full_context` 回归通过；
+6. 除允许文件外没有业务代码改动；
+7. `.ai/TEST_RESULTS.md` 与 `.ai/ZCODE_REPORT.md` 写明命令、结果和限制；
+8. 提交并推送当前分支。
 
-真实冒烟允许产生独立提交：
+建议提交信息：
 
 ```text
-test: bridge smoke test
+fix: align context helper DLL COM apartment
 ```
 
-完成后将本任务标记为 DONE，并停止。
+完成后：
+
+- 将本文件状态改为 `DONE`；
+- 写明最终提交完整 SHA；
+- 停止，不开始其他静默学习修复。
+
+如果无法完成核心 DLL/UIA 断言：
+
+- 将状态改为 `BLOCKED`；
+- 写明脱敏后的具体阻塞原因和已完成证据；
+- 不得把弱化测试伪报为成功。
