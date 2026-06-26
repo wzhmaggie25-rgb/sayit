@@ -83,26 +83,22 @@ cp config.example.json config.json
 
 或右键点击 `launch_sayit.bat` 发送到桌面快捷方式。
 
-**方式 B — 手动启动（开发调试）：**
+**方式 B — 直接启动（开发调试）：**
 
 ```bash
-# 终端 1：启动 Python 后端
-python server.py
-
-# 终端 2：启动 Electron 前端
 cd frontend
-set SAYIT_SKIP_BACKEND=1
 npx electron .
 ```
 
-> `SAYIT_SKIP_BACKEND=1` 表示 Electron 不自动启动 Python 后端（已手动启动）。
+> Electron 会自动 spawn Python 后端（`server.py`）作为子进程管理生命周期。
+> 钩子（RAlt 监听）运行在 Electron 的 C++ addon 中，无双重 Hook 问题。
 >
-> 不加此环境变量，Electron 会自动启动后端：
-
-```bash
-cd frontend
-npx electron .    # 会自动 spawn python ../server.py
-```
+> 如需单独调试后端：
+> ```bash
+> set SAYIT_SKIP_BACKEND=1
+> npx electron .        # 不自动启动后端
+> ```
+> 然后手动启动 `python server.py` 调试。但注意此时无键盘钩子。
 
 ### 使用
 

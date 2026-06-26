@@ -1,0 +1,13 @@
+{
+  "name": "sayit-hotkey-addon",
+  "version": "1.0.0",
+  "description": "WH_KEYBOARD_LL hotkey hook for Sayit (RAlt toggle)",
+  "main": "index.js",
+  "scripts": {
+    "build": "node-gyp configure --msvs_version=2022 && node-gyp build",
+    "rebuild": "node-gyp rebuild --msvs_version=2022"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.3.1"
+  }
+}

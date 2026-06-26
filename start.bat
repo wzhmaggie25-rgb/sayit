@@ -7,7 +7,22 @@ set ELECTRON_RUN_AS_NODE=
 echo ── Sayit Launcher ──
 echo.
 
-:: ── Step 1: Kill any process on port 17890 ──
+:: ── Step 0: Kill existing Sayit processes ──
+:: Kill ALL cmd.exe running npx.cmd electron .
+for /f "tokens=2 delims=," %%a in ('wmic process where "name='cmd.exe' and commandline like '%%npx%%electron%%'" get processid /format:csv 2^>nul ^| findstr /v "ProcessId"') do (
+    taskkill /F /PID %%a >nul 2>&1
+)
+:: Kill electron.exe
+taskkill /F /IM electron.exe >nul 2>&1
+taskkill /F /IM Sayit.exe >nul 2>&1
+
+:: Kill any Python running server.py
+for /f "tokens=2 delims=," %%a in ('wmic process where "name='python.exe' and commandline like '%%server.py%%'" get processid /format:csv 2^>nul ^| findstr /v "ProcessId"') do (
+    echo [清理] 发现 server.py 进程 PID=%%a，正在终止...
+    taskkill /F /PID %%a >nul 2>&1
+)
+
+:: Kill port 17890
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":17890" ^| findstr "LISTENING" 2^>nul') do (
     echo [清理] 发现端口 17890 占用，PID=%%a，正在终止...
     taskkill /F /PID %%a >nul 2>&1
@@ -15,20 +30,9 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":17890" ^| findstr "LISTENIN
 echo [清理] 端口检查完毕。
 echo.
 
-:: ── Step 2: Start Python backend in new window ──
-echo [后端] 启动 Python 后端...
-cd /d "%ROOT%"
-start "Sayit Backend" python server.py
-echo.
-
-:: ── Step 3: Wait ──
-echo [等待] 等待后端就绪（3 秒）...
-ping -n 4 127.0.0.1 >nul
-echo.
-
-:: ── Step 4: Start Electron frontend ──
-echo [前端] 启动 Electron 界面...
+:: ── Step 2: Start Electron (it manages Python backend lifecycle) ──
+echo [启动] Electron 界面（Python 后端由 Electron 自动管理）...
 cd /d "%ROOT%\frontend"
 npx electron .
-echo [前端] Electron 已退出。
+echo [完毕] Electron 已退出。
 pause

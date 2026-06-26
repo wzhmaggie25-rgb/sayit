@@ -376,6 +376,17 @@
 
     // ── Init ────────────────────────────────────────────────────
     loadWords();
+
+    // Auto-refresh when new pipeline completes
+    if (window.sayit && window.sayit.onBackendEvent) {
+      window.sayit.onBackendEvent(function(evt) {
+        if (!evt || !evt.event) return;
+        if (evt.event === 'pipeline_done' || evt.event === 'silent_learned' || evt.event === 'injection_done') {
+          setTimeout(loadWords, evt.event === 'silent_learned' ? 100 : 500);
+        }
+      });
+    }
+
     window.sayitMinimize=function(){if(window.sayit)window.sayit.minimize()};
     window.sayitClose=function(){if(window.sayit)window.sayit.close()};
   </script>

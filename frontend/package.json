@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-packager . Sayit --platform=win32 --arch=x64 --out=release --overwrite --asar --icon=../sayit.ico --extra-resource=../dist/sayit-backend"
+    "build": "electron-packager . Sayit --platform=win32 --arch=x64 --out=release --overwrite --asar --icon=../sayit.ico --extra-resource=../dist/sayit-backend --extra-resource=../native/hotkey-addon/build/Release/hotkey_addon.node"
   },
   "build": {
     "appId": "com.sayit.desktop",
@@ -25,6 +25,10 @@
       {
         "from": "../dist/sayit-backend",
         "to": "backend"
+      },
+      {
+        "from": "../native/hotkey-addon/build/Release/hotkey_addon.node",
+        "to": "native"
       }
     ],
     "win": {

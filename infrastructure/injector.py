@@ -423,11 +423,6 @@ class Injector:
             ctypes.windll.user32.SendInput(
                 1, ctypes.byref(inp), ctypes.sizeof(INPUT))
             time.sleep(0.001)  # tiny gap between events
-        try:
-            ctypes.windll.user32.keybd_event(0xE8, 0, 0, 0)
-            ctypes.windll.user32.keybd_event(0xE8, 0, KEYEVENTF_KEYUP, 0)
-        except Exception:
-            pass
         time.sleep(0.03)  # let OS digest all keyup events
         logger.info(
             "[INJECT-MODIFIERS] release force=%s reason=%s before=%s after=%s",
@@ -680,11 +675,27 @@ class Injector:
 
         success = False
         readback_ok = False
+        com_initialized = False
 
         try:
             comtypes.CoInitialize()
-            uia = comtypes.client.CreateObject(
-                "{ff48dba4-60ef-4201-aa87-54103eef594e}")
+            com_initialized = True
+
+            # ── Properly create IUIAutomation COM object ──
+            # On Windows 10/11 the UIAutomation typelib (UIAutomationClient.tlb)
+            # is always available. Try loading it first for proper vtable binding.
+            # Fallback: use raw IUnknown (won't have GetFocusedElement but will
+            # be caught by outer except and fall through to clipboard).
+            try:
+                from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation
+                uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
+            except Exception:
+                # Typelib not generated yet — CreateObject returns IUnknown,
+                # which will raise AttributeError on GetFocusedElement.
+                # That's caught by outer except and falls through to clipboard.
+                uia = comtypes.client.CreateObject(
+                    "{ff48dba4-60ef-4201-aa87-54103eef594e}")
+
             elem = uia.GetFocusedElement()
             if elem is None:
                 logger.info("[INJECT-UIA] no focused element → fallback")
@@ -724,6 +735,12 @@ class Injector:
         except Exception:
             logger.info("[INJECT-UIA] exception: %s", traceback.format_exc())
             return False
+        finally:
+            if com_initialized:
+                try:
+                    comtypes.CoUninitialize()
+                except Exception:
+                    pass
 
     def _verify_uia_readback(self, expected: str, elem) -> bool:
         """Read back focused element value with 0.1s timeout. Returns True if match."""
@@ -732,11 +749,18 @@ class Injector:
 
         def _read():
             try:
-                vp = elem.GetCurrentPattern(10002).QueryInterface(
-                    "{EA3A3B8A-4B6E-4B9E-9F6A-6F6B5B2F9B8B}")
-                result[0] = (vp.CurrentValue or "")
-            except Exception as e:
-                error[0] = str(e)[:80]
+                import comtypes
+                comtypes.CoInitialize()
+                try:
+                    vp = elem.GetCurrentPattern(10002).QueryInterface(
+                        "{EA3A3B8A-4B6E-4B9E-9F6A-6F6B5B2F9B8B}")
+                    result[0] = (vp.CurrentValue or "")
+                except Exception as e:
+                    error[0] = str(e)[:80]
+                finally:
+                    comtypes.CoUninitialize()
+            except Exception:
+                pass
 
         t = threading.Thread(target=_read, daemon=True, name="uia-readback")
         t.start()

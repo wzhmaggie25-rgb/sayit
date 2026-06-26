@@ -45,22 +45,6 @@ class ContextHelperClient:
         result = self.call("get_full_context_for_window", {"hwnd": int(hwnd)}, timeout=timeout)
         return result if isinstance(result, dict) else None
 
-    def get_focused_app_info(self, timeout: float = 0.5) -> Optional[dict]:
-        result = self.call("get_focused_app_info", timeout=timeout)
-        return result if isinstance(result, dict) else None
-
-    def get_window_app_info(self, hwnd: int, timeout: float = 0.5) -> Optional[dict]:
-        result = self.call("get_window_app_info", {"hwnd": int(hwnd)}, timeout=timeout)
-        return result if isinstance(result, dict) else None
-
-    def get_focused_input_info(self, timeout: float = 0.5) -> Optional[dict]:
-        result = self.call("get_focused_input_info", timeout=timeout)
-        return result if isinstance(result, dict) else None
-
-    def get_window_input_info(self, hwnd: int, timeout: float = 0.5) -> Optional[dict]:
-        result = self.call("get_window_input_info", {"hwnd": int(hwnd)}, timeout=timeout)
-        return result if isinstance(result, dict) else None
-
     def poll_keyboard_events(self, timeout: float = 0.2) -> list[dict]:
         result = self.call("poll_keyboard_events", timeout=timeout)
         return result if isinstance(result, list) else []

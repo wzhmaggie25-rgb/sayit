@@ -127,19 +127,91 @@ def apply_rules_with_stats(text: str, rules: list[dict]) -> tuple[str, list[str]
 
 
 def extract_dictionary_terms(original_text: str, edited_text: str) -> list[str]:
-    """Identify likely proper nouns from user edits for automatic dictionary sync."""
+    """Identify terms from user edits for automatic dictionary sync.
+
+    Extracts all learnable edit segments (both token-level and char-level)
+    for addition to the hotword dictionary. Unlike the guard in _looks_like_dictionary_term,
+    this is intentionally broad — the dictionary feeds ASR context and LLM prompts,
+    and false positives are far less harmful than missed words.
+
+    Uses its own token-level matching rather than generate_token_rules, because
+    the correction rule engine has strict filters (min 2‑char pattern, no digit-only)
+    that reject valid dictionary candidates like single-letter → multi-letter edits.
+    """
     terms: list[str] = []
-    for rule in generate_token_rules(original_text, edited_text):
-        if _looks_like_dictionary_term(rule["replacement"], rule["pattern"]):
-            terms.append(rule["replacement"])
+    seen: set[str] = set()
+
+    # ── Token-level matching (looser than generate_token_rules) ──
+    original_tokens = _tokenize_for_learning(original_text)
+    edited_tokens = _tokenize_for_learning(edited_text)
+    matcher = difflib.SequenceMatcher(None, original_tokens, edited_tokens, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "replace":
+            continue
+        # Single-token ↔ single-token replacements
+        if (i2 - i1) == 1 and (j2 - j1) == 1:
+            replacement = edited_tokens[j1].strip()
+            pattern = original_tokens[i1].strip()
+            if _is_acceptable_dictionary_term(replacement, pattern) and replacement not in seen:
+                seen.add(replacement)
+                terms.append(replacement)
+            continue
+        # Multi-token → single-token (e.g. "一些词" → "CodeX")
+        if (j2 - j1) == 1:
+            replacement = edited_tokens[j1].strip()
+            if replacement and replacement not in seen and len(replacement) >= 2 and len(replacement) <= 40:
+                seen.add(replacement)
+                terms.append(replacement)
+            continue
+        # Multi-token replacements — extract each new token individually
+        for j in range(j1, j2):
+            replacement = edited_tokens[j].strip()
+            if not replacement or replacement in seen:
+                continue
+            if len(replacement) < 2 or len(replacement) > 40:
+                continue
+            # Skip if the replacement is embedded in any original token — this
+            # catches CJK fragments carved out of a larger original string
+            # (e.g. "我用" extracted from "我用口袋写了个软件").
+            if any(replacement in o for o in original_tokens):
+                continue
+            seen.add(replacement)
+            terms.append(replacement)
+
+    # ── Character-level diff (catch what tokenizer missed) ──
     for diff in extract_diffs(original_text, edited_text):
         if diff.get("op") not in ("replace", "insert"):
             continue
         replacement = (diff.get("edited_segment") or "").strip()
         original = (diff.get("original_segment") or "").strip()
-        if _looks_like_dictionary_term(replacement, original):
-            terms.append(replacement)
-    return _dedupe_terms(terms)
+        if not replacement or len(replacement) < 3 or replacement in seen:
+            continue
+        if replacement == original:
+            continue
+        # Skip fragments that are substrings of already-captured terms
+        if any(replacement in t for t in seen):
+            continue
+        seen.add(replacement)
+        terms.append(replacement)
+
+    return terms
+
+
+def _is_acceptable_dictionary_term(replacement: str, pattern: str) -> bool:
+    """Check if a single-token replacement is dictionary-worthy.
+
+    More permissive than _is_learnable_token_pair: allows single-char patterns
+    (e.g. 'C' → 'CodeX'), and only rejects trivial identity/whitespace/path items.
+    """
+    if not replacement or not replacement.strip():
+        return False
+    if len(replacement) > 40:
+        return False
+    if replacement == pattern:
+        return False
+    if PROTECTED_PATTERN.search(replacement):
+        return False
+    return True
 
 
 def learn_from_edit(original_text: str, edited_text: str,

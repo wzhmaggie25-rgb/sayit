@@ -12,7 +12,17 @@ import time
 from typing import Optional
 
 from infrastructure.context_helper_client import ContextHelperClient
+from infrastructure.context_helper_dll import ContextHelperDll
 from infrastructure.injector_uia import get_focused_element_snapshot, read_focus_text
+
+# PortAudio heap corruption guard: once PortAudio has been used, loading
+# UIAutomationCore in a new thread (e.g. ContextHelperDLL) can trigger
+# STATUS_DLL_INIT_FAILED.  See infrastructure/audio_capture.py docstring.
+try:
+    from infrastructure.audio_capture import was_portaudio_used
+except ImportError:
+    def was_portaudio_used() -> bool:
+        return False
 
 logger = logging.getLogger(__name__)
 
@@ -177,11 +187,25 @@ def get_focus_context(
 ) -> Optional[FocusContext]:
     # Reference: reference/focus_context.js lines 6359-6384.
     start_time = _now_ms()
+
+    # ── Path 1: Native exe (JSON-RPC subprocess, process-isolated — Typeless aligned)
     native_context = _get_focus_context_native(inserted_text)
     if native_context is not None:
         if update_last_focused:
             _remember_focus_context(native_context, start_time, _now_ms())
         return native_context
+
+    # ── Path 2: In-process DLL (fallback — may cause heap corruption with PortAudio)
+    if not was_portaudio_used():
+        dll_context = _get_focus_context_via_dll(0, inserted_text)
+        if dll_context is not None:
+            if update_last_focused:
+                _remember_focus_context(dll_context, start_time, _now_ms())
+            return dll_context
+    else:
+        logger.debug("get_focus_context: PortAudio was used, skipping in-process DLL")
+
+    # ── Path 3: Python UIA + Win32 (pure Python fallback)
     python_context = _get_focus_context_python(inserted_text)
     if update_last_focused:
         _remember_focus_context(python_context, start_time, _now_ms())
@@ -197,6 +221,8 @@ def get_focus_context_for_window(
     if not hwnd:
         return None
     start_time = _now_ms()
+
+    # ── Path 1: Win32 child-edit (fast, works for native edit controls)
     win32_context = _get_focus_context_for_window_win32(hwnd, inserted_text)
     if (
         win32_context is not None
@@ -206,6 +232,7 @@ def get_focus_context_for_window(
             _remember_focus_context(win32_context, start_time, _now_ms())
         return win32_context
 
+    # ── Path 2: Native exe (JSON-RPC subprocess, process-isolated — Typeless aligned)
     native_raw = ContextHelperClient().get_full_context_for_window(hwnd)
     native_context = _map_native_context(native_raw, inserted_text)
     if native_context is not None:
@@ -219,7 +246,27 @@ def get_focus_context_for_window(
             if update_last_focused:
                 _remember_focus_context(native_context, start_time, _now_ms())
             return native_context
+        # EXE returned a context but the just-pasted text hasn't rendered in
+        # the UIA tree yet (e.g. Electron/Chrome delayed update).  Instead of
+        # falling through to the in-process DLL (which can crash with PortAudio),
+        # return None — the caller (SilentMonitor._start_track) will retry.
+        logger.debug("get_focus_context_for_window: EXE returned context but text not yet visible; "
+                     "returning None for retry")
+        return None
 
+    # ── Path 3: In-process DLL (fallback — may cause heap corruption with PortAudio)
+    # Skip this path entirely once PortAudio has been used, since loading
+    # UIAutomationCore in a new thread can trigger STATUS_DLL_INIT_FAILED.
+    if not was_portaudio_used():
+        dll_context = _get_focus_context_via_dll(hwnd, inserted_text)
+        if dll_context is not None:
+            if update_last_focused:
+                _remember_focus_context(dll_context, start_time, _now_ms())
+            return dll_context
+    else:
+        logger.debug("get_focus_context_for_window: PortAudio was used, skipping in-process DLL")
+
+    # ── Path 4: Win32 context (even if not editable, last resort)
     if update_last_focused:
         _remember_focus_context(win32_context, start_time, _now_ms())
     return win32_context
@@ -352,6 +399,15 @@ def _get_focus_context_for_window_win32(hwnd: int, inserted_text: str = "") -> O
     except Exception as e:
         logger.debug("ContextHelper target window context failed hwnd=%s err=%s", hwnd, e)
         return None
+
+
+def _get_focus_context_via_dll(hwnd: int, inserted_text: str = "") -> Optional[FocusContext]:
+    """Try in-process DLL first (Typeless-aligned)."""
+    dll = ContextHelperDll()
+    if not dll.is_available:
+        return None
+    raw = dll.get_full_context_for_window(hwnd) if hwnd else dll.get_full_context()
+    return _map_native_context(raw, inserted_text)
 
 
 def _get_focus_context_native(inserted_text: str = "") -> Optional[FocusContext]:

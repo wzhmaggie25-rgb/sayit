@@ -19,8 +19,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 app = FastAPI(title="Sayit Backend")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ── Init backend ──────────────────────────────────
-orchestrator = SayitOrchestrator()
+# ── Init backend (wrapped for graceful failure) ─────
+try:
+    orchestrator = SayitOrchestrator()
+except Exception as e:
+    logger.critical("Orchestrator init failed: %s", e)
+    raise  # Let the process crash visibly — Electron's main.js error handler will catch stderr
 config = orchestrator.get_config()
 db = orchestrator.get_database()
 hotwords = orchestrator.get_hotwords_manager()
@@ -710,26 +714,23 @@ def get_config_value(key: str = ""):
 
 @app.post("/api/hotkey/pause")
 def pause_hotkey():
-    """Pause global keyboard hook (for shortcut recording popup)."""
-    orchestrator._hotkey.pause()
+    """Hotkey pause — no-op (hook is in Electron addon, not Python)."""
+    logger.debug("[server] hotkey/pause ignored — hook lives in Electron addon")
     return {"ok": True}
 
 
 @app.post("/api/hotkey/resume")
 def resume_hotkey():
-    """Resume global keyboard hook."""
-    orchestrator._hotkey.resume()
+    """Hotkey resume — no-op (hook is in Electron addon, not Python)."""
+    logger.debug("[server] hotkey/resume ignored — hook lives in Electron addon")
     return {"ok": True}
 
 
 @app.post("/api/hotkey/set")
 def set_hotkey(data: dict):
-    """Set a new hotkey combo and restart the hook."""
-    hk = data.get("hotkey", "")
-    if not hk:
-        return {"ok": False, "error": "missing hotkey"}
-    ok = orchestrator.update_hotkey(hk)
-    return {"ok": ok}
+    """Hotkey change — no-op (hook is in Electron addon, recompile to change)."""
+    logger.debug("[server] hotkey/set ignored — hook lives in Electron addon")
+    return {"ok": True}
 
 
 # ── WebSocket ────────────────────────────────────
@@ -740,7 +741,20 @@ async def ws_events(ws: WebSocket):
     ws_clients.append(ws)
     try:
         while True:
-            await asyncio.sleep(30)  # keep-alive, no need to receive
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+                cmd = msg.get("command", "")
+                if cmd == "toggle_recording":
+                    orchestrator.toggle_recording()
+                elif cmd == "start_recording":
+                    orchestrator.start_recording()
+                elif cmd == "stop_recording":
+                    orchestrator.stop_recording()
+                else:
+                    logger.debug("[ws] unknown command: %s", cmd)
+            except json.JSONDecodeError:
+                pass
     except Exception:
         pass
     finally:
@@ -979,10 +993,10 @@ def main():
     logging.getLogger().addHandler(
         logging.FileHandler(_log_path(), encoding="utf-8"))
 
-    orchestrator.start()
-    wire_events()
-
-    # ── [PORT-BUSY] guard: fail fast if 17890 already occupied ──
+    # ── [PORT-BUSY] guard: fail fast before installing hook ──
+    # P0: Exit hard (os._exit, not return) to prevent a second process from
+    # staying alive with stale WH_KEYBOARD_LL hook, which would conflict with
+    # the already-running backend's hook.
     import socket as _socket
     _s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
     try:
@@ -995,7 +1009,10 @@ def main():
             logger.error("[PORT-BUSY] 17890 occupied: %s", out.strip())
         except Exception:
             logger.error("[PORT-BUSY] 17890 already in use (could not determine owner)")
-        sys.exit(1)
+        os._exit(1)  # hard exit — no daemon-thread lingering
+
+    orchestrator.start()
+    wire_events()
 
     logger.info("Sayit backend starting on :17890")
     uvicorn.run(app, host="127.0.0.1", port=17890, log_level="info")

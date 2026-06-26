@@ -1,5 +1,89 @@
 # Changelog
 
+## 2026-06-25 — 第二次 Alt 失灵修复 + UIA COM 修复 + 事件刷新
+
+### 根因
+1. **Hook 线程阻塞 → Windows 静默解钩**：`keyboard_helper.cpp` 的 `g_callback()` 在 WH_KEYBOARD_LL 钩子线程上同步调用 Python。首次录音时占用 Hook 线程 5-200ms（`is_uipi_blocked` + `capture_target` + thread spawn）。第二次录音时音频线程持有 GIL，ctypes thunk 等 GIL 超过 `LowLevelHooksTimeout`(~300ms) → Windows 静默卸载钩子。所有后续 RAlt 不再触发。
+2. **UIA COM 接口类型错误**：`injector.py:688` — `comtypes.client.CreateObject(clsid)` 返回 `POINTER(IUnknown)`，没有 `GetFocusedElement` 方法。虽被 `except` 吞掉，但后续 `_verify_uia_readback` 子线程无 `CoInitialize` 访问 COM 对象 → 可能触发 `STATUS_ACCESS_VIOLATION` 导致进程崩溃 → 后端端口 17890 不可用 → 词库/历史页无法加载数据。
+3. **Pipeline 线程缺失 COM 初始化和反初始化**：每次注入泄漏 COM 引用计数。
+4. **词库页缺少事件驱动刷新**：dictionary.html 在 `pipeline_done` 后不自动重新加载。
+
+### 修复
+
+#### Bug 3 — 第二次 Alt 失灵
+- `infrastructure/keyboard_helper_dll.py` — `install()` 的 callback 注册处增加 `_dispatch()` 包装层，在钩子线程上仅 spawn daemon 线程后立即返回（~0.1ms），永不触发超时卸载。
+- `infrastructure/keyboard_helper_dll.py` — `uninstall()` 在释放 `_CALLBACK_HANDLE` 前增加 50ms 延迟，防止 GC 在钩子线程未退出时回收 ctypes thunk。
+
+#### Bug 4 — 词库/历史不显示
+- `infrastructure/injector.py` — `_inject_uia()` 修复 COM 对象创建方式：优先尝试 `UIAutomationClient` 类型库加载 `IUIAutomation` 接口，回退到 `CreateObject(clsid)`（自然失败后 fallback 到 clipboard）。添加 `finally` 块中的 `CoUninitialize()`。
+- `infrastructure/injector.py` — `_verify_uia_readback()` 子线程修复：添加 `CoInitialize`/`CoUninitialize` 配对。
+- `application/pipeline.py` — `run()` 最外层添加 `CoInitialize`/`CoUninitialize` 保护。
+- `frontend/ui/dictionary.html` — 添加 `onBackendEvent` 监听，在 `pipeline_done`/`silent_learned`/`injection_done` 事件后自动刷新词库列表。
+
+### 变更
+| 文件 | 操作 |
+|------|------|
+| `infrastructure/keyboard_helper_dll.py` | **修改** — callback 包装 _dispatch 线程分发 + uninstall 延迟释放 |
+| `infrastructure/injector.py` | **修改** — UIA COM 接口修复 + readback 子线程 CoInitialize + CoUninitialize |
+| `application/pipeline.py` | **修改** — 外层 try/finally CoInitialize/CoUninitialize |
+| `frontend/ui/dictionary.html` | **修改** — 添加 onBackendEvent 自动刷新 |
+
+## 2026-06-25 — RAlt 修复 + 启动弹窗修复（DLL 重构）
+
+### 根因
+1. **N-API addon 无法在 Electron 32 中加载**：`hotkey_addon.node` 的系统 Node 24 与 Electron 32（内置 Node 20）ABI 不兼容，Electron 的 `require()` 拒绝加载 `.node` 文件。`loadHotkeyAddon()` 的 try/catch 无声捕获该异常 → `hotkeyAddon = null` → 全局钩子从未安装 → RAlt 无效。
+2. **启动错误弹窗**：`frontend/main.js` 中 `backendProcess.spawn()` 缺少 `error` 事件处理器。当 Python 进程启动失败（如 PATH 不一致、依赖缺失）时，`error` 事件成为未捕获错误，Electron 弹崩溃对话框退出。
+
+### 修复方案
+将 WH_KEYBOARD_LL 钩子从 N-API addon 迁移到独立 DLL（Typeless 架构：DLL + ctypes），与 `sayit_context_helper_dll.dll` 在同一 CMake 项目中编译。
+
+### 变更
+| 文件 | 操作 |
+|------|------|
+| `native/context_helper/src/keyboard_helper.cpp` | **新建** — WH_KEYBOARD_LL 钩子 DLL，导出 install_hook / uninstall_hook / is_hook_installed，无 N-API 依赖，仅 `windows.h` + `ctypes` |
+| `native/context_helper/CMakeLists.txt` | 新增 `sayit_keyboard_helper` SHARED 目标 |
+| `infrastructure/keyboard_helper_dll.py` | **新建** — ctypes 加载器，与 `context_helper_dll.py` 同模式 |
+| `application/orchestrator.py` | 集成 `KeyboardHelperDll`; `start()` 时自动安装钩子, `stop()` 时卸载; 新增 `_install_keyboard_hook` / `_uninstall_keyboard_hook` |
+| `server.py` | orchestrator 初始化加 try/except 保护; 热键 API 端点保持 no-op（钩子在 Python 端） |
+| `frontend/main.js` | 删除 `loadHotkeyAddon()` / `startHotkeyAddon()` / `hotkeyAddon` 全局变量; 新增 `backendProcess.on('error')` 处理器; WS open 不再 install addon |
+
+### 数据流
+```
+RAlt ↓ → keyboard_helper.dll HookProc → Python callback → orchestrator.toggle_recording()
+```
+
+### DLL 编译
+- 零警告，148KB，导出 3 个函数
+- 测试验证：install → 确认 installed; 二次 install 被拒绝; uninstall → 确认 removed
+
+## 2026-06-24 — Typeless 架构重构（RAlt 无限触发修复）
+
+### 根因
+Python `server.py` 中的 `WH_KEYBOARD_LL` 钩子（`hotkey.py`）与 Electron 主进程的 `spawn` 之间存在双重 Hook 竞争：
+Electron 启动 Python → 安装钩子 → 当第二个 Python 实例因 port-busy 退出前，钩链已被污染 → RAlt 只触发一次就死。
+
+### 修复方案
+将唯一的 `WH_KEYBOARD_LL` 钩子从 Python 迁移到 Electron 的 C++ N-API addon，
+Python 后端不再参与键盘事件处理。
+
+### 变更
+| 文件 | 操作 |
+|------|------|
+| `native/hotkey-addon/` | **新建** — C++ addon: binding.gyp + main.cpp (N-API ThreadSafeFunction) |
+| `native/hotkey-addon/build/Release/hotkey_addon.node` | 148KB, 0 错误 |
+| `frontend/main.js` | 加载 addon, WS 双向化, RAlt → ws.send(toggle_recording) |
+| `application/orchestrator.py` | 移除 HotkeyManager, 保留 start/stop_recording, 新增 toggle_recording |
+| `server.py` | WS 从 asyncio.sleep(30) → receive_text() 分派命令 |
+| `infrastructure/hotkey.py` | **删除** |
+| `start.bat` / `launch_sayit.bat` / `_clean_restart.ps1` | 改为只启动 Electron（后端由 Electron 管理） |
+| `frontend/package.json` | build 脚本 + extraResources 加入 hotkey_addon.node |
+| `README.md` | 启动说明简化 |
+
+### 数据流
+```
+RAlt ↓ → C++ HookProc → ThreadSafeFunction → Node.js → ws.send(toggle_recording) → Python WS → orchestrator.toggle_recording()
+```
+
 ## 2026-06-13 — 注入乱码修复 + 火山 AI Key + 诊断基础设施
 
 ### 注入乱码 fevhlbigktcps（根因 + 修复）

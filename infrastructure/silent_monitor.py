@@ -134,6 +134,7 @@ class SilentMonitor:
                     return
 
                 current_full = context.text_insertion_point.cursor_state.full_field_content
+
                 if not current_full.strip():
                     self._mark_history("", "CLEAR_INPUT")
                     logger.info("SilentMonitor: input cleared; skip learning")
@@ -177,19 +178,21 @@ class SilentMonitor:
 
         input_info = context.text_insertion_point
         full_text = input_info.cursor_state.full_field_content
+        is_editable = input_info.input_capabilities.is_editable
+        contains = _context_contains_inserted(context, self._refined_text)
+
         if (
             not context.active_application
             or (
-                not input_info.input_capabilities.is_editable
+                not is_editable
                 and not is_terminal_app(context.active_application)
             )
-            or not _context_contains_inserted(context, self._refined_text)
+            or not contains
         ):
             self._mark_history(full_text or None, "START_FAILED")
             logger.info(
                 "SilentMonitor: start failed editable=%s contains=%s hwnd=%#x",
-                input_info.input_capabilities.is_editable,
-                _context_contains_inserted(context, self._refined_text),
+                is_editable, contains,
                 context.active_application.hwnd)
             return False
 

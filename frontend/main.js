@@ -1,14 +1,22 @@
 // Typeless ref: Ch_class.js lines 8409-8558
 // Architecture: events drive everything — no polling (like Typeless IPC)
 // Backend events via WebSocket → main.js forwards to float.html
+// Hotkey: WH_KEYBOARD_LL hook lives in Python backend via keyboard_helper DLL
 const { app, BrowserWindow, screen, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 const WebSocket = require('ws');
 
 let mainWin = null, floatWin = null, backendProcess = null;
 let floatReady = false;
 let ws = null;
+
+// ── Single instance lock: prevent multiple Sayit windows ──
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+}
 
 let mouseTracker = null;
 let currentDisplay = null;
@@ -33,8 +41,18 @@ function getBackendLaunch() {
       cwd: path.dirname(backendPath),
     };
   }
+  // Resolve python.exe explicitly — Electron's PATH may differ from shell PATH
+  const pythonCandidates = [
+    'C:\\Users\\46136\\AppData\\Local\\Programs\\Python\\Python312\\python.exe',
+    'C:\\Program Files\\Python312\\python.exe',
+    'python',
+  ];
+  let pythonExe = 'python';
+  for (const c of pythonCandidates) {
+    if (fs.existsSync(c)) { pythonExe = c; break; }
+  }
   return {
-    command: 'python',
+    command: pythonExe,
     args: [path.join(__dirname, '..', 'server.py')],
     cwd: path.join(__dirname, '..'),
   };
@@ -235,11 +253,18 @@ function pushToMain(channel, payload) {
   try { mainWin.webContents.send(channel, payload || {}); } catch(e) {}
 }
 
-// ── WebSocket: backend events → forward to float ──
+// ── WebSocket: bidirectional — backend events → float; RAlt toggle → backend commands ──
+// Note: hotkey (RAlt) is installed by the Python backend via keyboard_helper DLL.
+// The WS connection just relays events — no addon loading needed.
+
 function connectWS() {
   if (ws) try { ws.removeAllListeners(); ws.close(); } catch(e) {}
   if (wsReconnectTimer !== null) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
   ws = new WebSocket('ws://127.0.0.1:17890/ws/events');
+  ws.on('open', () => {
+    console.log('[ws] connected');
+    // Hotkey (RAlt) is installed by Python backend via keyboard_helper DLL — no addon needed
+  });
   ws.on('message', (data) => {
     try {
       const evt = JSON.parse(data.toString());
@@ -299,8 +324,14 @@ function connectWS() {
       }
     } catch(e) {}
   });
-  ws.on('close', scheduleWSReconnect);
-  ws.on('error', scheduleWSReconnect);
+  ws.on('close', () => {
+    console.log('[ws] closed');
+    scheduleWSReconnect();
+  });
+  ws.on('error', () => {
+    console.warn('[ws] error');
+    scheduleWSReconnect();
+  });
 }
 
 function scheduleWSReconnect() {
@@ -342,10 +373,21 @@ async function waitForServer(retries=20) {
 app.whenReady().then(async () => {
   if (process.env.SAYIT_SKIP_BACKEND !== '1') {
     const backend = getBackendLaunch();
+    console.log('[main] spawning backend:', backend.command, backend.args.join(' '));
     backendProcess = spawn(backend.command, backend.args, {
       cwd: backend.cwd,
-      stdio: 'inherit',
+      stdio: 'pipe',
       windowsHide: app.isPackaged,
+    });
+    backendProcess.stdout.on('data', d => process.stdout.write('[backend] ' + d.toString()));
+    backendProcess.stderr.on('data', d => process.stderr.write('[backend-err] ' + d.toString()));
+    backendProcess.on('exit', (code) => {
+      console.warn('[main] backend exited with code', code);
+      backendProcess = null;
+    });
+    backendProcess.on('error', (err) => {
+      console.error('[main] backend spawn error:', err.message);
+      backendProcess = null;
     });
   }
   createMainWindow();
@@ -353,5 +395,15 @@ app.whenReady().then(async () => {
   await waitForServer();
   connectWS(); poll();
 });
+app.on('second-instance', (_event, _commandLine, _workingDirectory) => {
+  // User clicked shortcut again — focus existing window
+  if (mainWin) {
+    if (mainWin.isMinimized()) mainWin.restore();
+    mainWin.focus();
+  }
+});
 app.on('window-all-closed', () => { if (backendProcess) backendProcess.kill(); app.quit(); });
-app.on('before-quit', () => { if (backendProcess) backendProcess.kill(); });
+app.on('before-quit', () => {
+  if (backendProcess) backendProcess.kill();
+  // Hotkey uninstall is handled by Python backend orchestrator.stop()
+});

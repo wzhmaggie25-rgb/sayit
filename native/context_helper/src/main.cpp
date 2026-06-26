@@ -6,17 +6,17 @@
 
 #include <algorithm>
 #include <cctype>
-#include <codecvt>
 #include <cstdio>
 #include <cstdint>
 #include <iostream>
-#include <locale>
 #include <map>
 #include <sstream>
 #include <string>
 #include <vector>
 
-namespace {
+// ============================================================
+//  Utility helpers
+// ============================================================
 
 std::wstring utf8ToWide(const std::string& value) {
   if (value.empty()) return L"";
@@ -175,32 +175,9 @@ bool isBrowserProc(const std::string& proc) {
          proc == "opera.exe" || proc == "brave.exe";
 }
 
-std::string browserUrlFromWindow(HWND hwnd);
-
-std::string domainFromUrl(const std::string& url) {
-  std::string value = url;
-  std::string lower = lowerAscii(value);
-  size_t scheme = lower.find("://");
-  size_t start = scheme == std::string::npos ? 0 : scheme + 3;
-  if (lower.compare(start, 4, "www.") == 0) start += 4;
-  size_t end = lower.find_first_of("/:?#", start);
-  if (end == std::string::npos) end = lower.size();
-  if (end <= start) return "";
-  return value.substr(start, end - start);
-}
-
-std::string stripBrowserSuffix(std::string title) {
-  const std::vector<std::string> suffixes = {
-    " - Google Chrome", " - Microsoft Edge", " - Mozilla Firefox", " - Opera", " - Brave"
-  };
-  for (const auto& suffix : suffixes) {
-    if (title.size() >= suffix.size() &&
-        title.compare(title.size() - suffix.size(), suffix.size(), suffix) == 0) {
-      return title.substr(0, title.size() - suffix.size());
-    }
-  }
-  return title;
-}
+// ============================================================
+//  App info model
+// ============================================================
 
 struct AppInfo {
   HWND hwnd = nullptr;
@@ -230,11 +207,22 @@ AppInfo getAppInfoRaw() {
   return getAppInfoForWindow(GetForegroundWindow());
 }
 
+std::string stripBrowserSuffix(std::string title) {
+  const std::vector<std::string> suffixes = {
+    " - Google Chrome", " - Microsoft Edge", " - Mozilla Firefox", " - Opera", " - Brave"
+  };
+  for (const auto& suffix : suffixes) {
+    if (title.size() >= suffix.size() &&
+        title.compare(title.size() - suffix.size(), suffix.size(), suffix) == 0) {
+      return title.substr(0, title.size() - suffix.size());
+    }
+  }
+  return title;
+}
+
 std::string appInfoJson(const AppInfo& info) {
   std::ostringstream os;
   bool browser = isBrowserProc(info.proc);
-  std::string pageUrl = browser ? browserUrlFromWindow(info.hwnd) : "";
-  std::string domain = domainFromUrl(pageUrl);
   os << "{";
   os << "\"app_name\":" << quote(info.proc) << ",";
   os << "\"app_identifier\":" << quote(info.proc) << ",";
@@ -249,8 +237,8 @@ std::string appInfoJson(const AppInfo& info) {
   if (browser) {
     os << "\"browser_context\":{";
     os << "\"page_title\":" << quote(stripBrowserSuffix(info.title)) << ",";
-    os << "\"page_url\":" << quote(pageUrl) << ",";
-    os << "\"domain\":" << quote(domain);
+    os << "\"page_url\":\"\",";
+    os << "\"domain\":\"\"";
     os << "},";
   } else {
     os << "\"browser_context\":null,";
@@ -261,6 +249,10 @@ std::string appInfoJson(const AppInfo& info) {
   os << "}";
   return os.str();
 }
+
+// ============================================================
+//  COM + UIA helpers
+// ============================================================
 
 class ComInit {
  public:
@@ -311,52 +303,9 @@ bool isPreferredInputElement(IUIAutomationElement* element) {
   );
 }
 
-std::string elementAutomationId(IUIAutomationElement* element) {
-  if (!element) return "";
-  BSTR value = nullptr;
-  if (SUCCEEDED(element->get_CurrentAutomationId(&value))) return bstrToUtf8(value);
-  return "";
-}
-
-std::string elementClassName(IUIAutomationElement* element) {
-  if (!element) return "";
-  BSTR value = nullptr;
-  if (SUCCEEDED(element->get_CurrentClassName(&value))) return bstrToUtf8(value);
-  return "";
-}
-
-std::string elementName(IUIAutomationElement* element) {
-  if (!element) return "";
-  BSTR value = nullptr;
-  if (SUCCEEDED(element->get_CurrentName(&value))) return bstrToUtf8(value);
-  return "";
-}
-
-bool isOfficeChromeInput(IUIAutomationElement* element) {
-  std::string automationId = elementAutomationId(element);
-  std::string classNameValue = elementClassName(element);
-  std::string lowerClass = lowerAscii(classNameValue);
-  return automationId == "TellMeTextBoxAutomationId" ||
-         automationId == "HomePageSearchBox" ||
-         automationId == "Undo" ||
-         automationId == "Redo" ||
-         lowerClass.find("netui") == 0;
-}
-
-bool looksLikeBrowserUrl(const std::string& value) {
-  std::string lower = lowerAscii(value);
-  bool hasWhitespace = lower.find_first_of(" \t\r\n") != std::string::npos;
-  bool looksLikeDomain = !hasWhitespace &&
-                         lower.find('.') != std::string::npos &&
-                         lower.find('\\') == std::string::npos;
-  return lower.rfind("http://", 0) == 0 ||
-         lower.rfind("https://", 0) == 0 ||
-         lower.rfind("file://", 0) == 0 ||
-         lower.rfind("chrome://", 0) == 0 ||
-         lower.rfind("edge://", 0) == 0 ||
-         lower.rfind("about:", 0) == 0 ||
-         looksLikeDomain;
-}
+// ============================================================
+//  Clipboard helpers (used by DLL fallback)
+// ============================================================
 
 std::wstring getClipboardUnicodeText() {
   std::wstring value;
@@ -404,128 +353,9 @@ void sendKeyCombo(const std::vector<WORD>& keys) {
   }
 }
 
-std::string elementValue(IUIAutomationElement* element) {
-  if (!element) return "";
-  IUIAutomationValuePattern* valuePattern = nullptr;
-  if (SUCCEEDED(element->GetCurrentPatternAs(UIA_ValuePatternId, IID_PPV_ARGS(&valuePattern))) && valuePattern) {
-    BSTR value = nullptr;
-    if (SUCCEEDED(valuePattern->get_CurrentValue(&value))) {
-      releaseIf(valuePattern);
-      return bstrToUtf8(value);
-    }
-  }
-  releaseIf(valuePattern);
-  return "";
-}
-
-bool isAddressBarCandidate(IUIAutomationElement* element) {
-  if (!element || !hasPattern(element, UIA_ValuePatternId)) return false;
-  if (looksLikeBrowserUrl(elementValue(element))) return true;
-  std::string automationId = lowerAscii(elementAutomationId(element));
-  std::string name = lowerAscii(elementName(element));
-  std::string cls = lowerAscii(elementClassName(element));
-  std::string haystack = automationId + " " + name + " " + cls;
-  return haystack.find("address") != std::string::npos ||
-         haystack.find("search") != std::string::npos ||
-         haystack.find("url") != std::string::npos ||
-         haystack.find("地址") != std::string::npos ||
-         haystack.find("搜索") != std::string::npos;
-}
-
-IUIAutomationElement* findAddressBarElement(
-    IUIAutomationTreeWalker* walker,
-    IUIAutomationElement* root,
-    int depth,
-    int& visited) {
-  if (!walker || !root || depth > 16 || visited > 3000) return nullptr;
-
-  IUIAutomationElement* child = nullptr;
-  if (FAILED(walker->GetFirstChildElement(root, &child)) || !child) return nullptr;
-
-  while (child && visited <= 3000) {
-    ++visited;
-    if (isAddressBarCandidate(child)) {
-      return child;
-    }
-
-    IUIAutomationElement* nested = findAddressBarElement(walker, child, depth + 1, visited);
-    if (nested) {
-      releaseIf(child);
-      return nested;
-    }
-
-    IUIAutomationElement* next = nullptr;
-    walker->GetNextSiblingElement(child, &next);
-    releaseIf(child);
-    child = next;
-  }
-
-  return nullptr;
-}
-
-std::string browserUrlFromWindow(HWND hwnd) {
-  if (!hwnd) return "";
-  ComInit com;
-  IUIAutomation* uia = nullptr;
-  IUIAutomationElement* root = nullptr;
-  IUIAutomationTreeWalker* walker = nullptr;
-  IUIAutomationElement* addressBar = nullptr;
-  IUIAutomationElement* originalFocus = nullptr;
-  std::string url;
-
-  if (com.ok() && SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-                                            IID_PPV_ARGS(&uia))) && uia &&
-      SUCCEEDED(uia->ElementFromHandle(hwnd, &root)) && root) {
-    uia->GetFocusedElement(&originalFocus);
-    if (SUCCEEDED(uia->get_ControlViewWalker(&walker)) && walker) {
-      int visited = 0;
-      addressBar = findAddressBarElement(walker, root, 0, visited);
-      url = elementValue(addressBar);
-    }
-    releaseIf(addressBar);
-    releaseIf(walker);
-
-    if (!looksLikeBrowserUrl(url) && SUCCEEDED(uia->get_RawViewWalker(&walker)) && walker) {
-      int visited = 0;
-      addressBar = findAddressBarElement(walker, root, 0, visited);
-      url = elementValue(addressBar);
-    }
-    releaseIf(addressBar);
-    releaseIf(walker);
-
-    if (!looksLikeBrowserUrl(url)) {
-      url = "";
-    }
-  }
-
-  if (!looksLikeBrowserUrl(url)) {
-    std::wstring clipboardBackup = getClipboardUnicodeText();
-    HWND previousForeground = GetForegroundWindow();
-    SetForegroundWindow(hwnd);
-    sleepMs(50);
-    sendKeyCombo({VK_CONTROL, 'L'});
-    sleepMs(80);
-    sendKeyCombo({VK_CONTROL, 'C'});
-    sleepMs(80);
-    std::string copied = wideToUtf8(getClipboardUnicodeText());
-    if (looksLikeBrowserUrl(copied)) {
-      url = copied;
-    }
-    sendKeyCombo({VK_ESCAPE});
-    sleepMs(50);
-    if (originalFocus) {
-      originalFocus->SetFocus();
-    } else if (previousForeground && previousForeground != hwnd) {
-      SetForegroundWindow(previousForeground);
-    }
-    setClipboardUnicodeText(clipboardBackup);
-  }
-
-  releaseIf(originalFocus);
-  releaseIf(root);
-  releaseIf(uia);
-  return url;
-}
+// ============================================================
+//  UIA element tree search
+// ============================================================
 
 enum class InputSearchMode {
   Preferred,
@@ -533,7 +363,7 @@ enum class InputSearchMode {
 };
 
 bool matchesInputSearchMode(IUIAutomationElement* element, InputSearchMode mode) {
-  if (!element || isOfficeChromeInput(element) || isAddressBarCandidate(element)) return false;
+  if (!element) return false;
   if (mode == InputSearchMode::Preferred) return isPreferredInputElement(element);
   return hasPattern(element, UIA_TextPatternId);
 }
@@ -627,6 +457,10 @@ IUIAutomationElement* bestInputElementForWindow(IUIAutomation* uia, HWND hwnd) {
   return descendant;
 }
 
+// ============================================================
+//  Text reading via UIA
+// ============================================================
+
 std::string readFocusedText(IUIAutomationElement* element) {
   if (!element) return "";
   IUIAutomationValuePattern* valuePattern = nullptr;
@@ -654,30 +488,23 @@ std::string readFocusedText(IUIAutomationElement* element) {
   return "";
 }
 
-std::string readSelectedText(IUIAutomationElement* element) {
+std::string elementValue(IUIAutomationElement* element) {
   if (!element) return "";
-  IUIAutomationTextPattern* textPattern = nullptr;
-  if (FAILED(element->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&textPattern))) || !textPattern) {
-    return "";
-  }
-  IUIAutomationTextRangeArray* ranges = nullptr;
-  std::string selected;
-  if (SUCCEEDED(textPattern->GetSelection(&ranges)) && ranges) {
-    int length = 0;
-    ranges->get_Length(&length);
-    if (length > 0) {
-      IUIAutomationTextRange* range = nullptr;
-      if (SUCCEEDED(ranges->GetElement(0, &range)) && range) {
-        BSTR text = nullptr;
-        if (SUCCEEDED(range->GetText(5000, &text))) selected = bstrToUtf8(text);
-        releaseIf(range);
-      }
+  IUIAutomationValuePattern* valuePattern = nullptr;
+  if (SUCCEEDED(element->GetCurrentPatternAs(UIA_ValuePatternId, IID_PPV_ARGS(&valuePattern))) && valuePattern) {
+    BSTR value = nullptr;
+    if (SUCCEEDED(valuePattern->get_CurrentValue(&value))) {
+      releaseIf(valuePattern);
+      return bstrToUtf8(value);
     }
   }
-  releaseIf(ranges);
-  releaseIf(textPattern);
-  return selected;
+  releaseIf(valuePattern);
+  return "";
 }
+
+// ============================================================
+//  JSON builders
+// ============================================================
 
 std::string inputJsonForWindow(HWND hwnd) {
   ComInit com;
@@ -687,7 +514,6 @@ std::string inputJsonForWindow(HWND hwnd) {
   std::string automationId;
   std::string classNameValue;
   std::string fullText;
-  std::string selectedText;
   RECT bounds{0, 0, 0, 0};
   bool editable = false;
 
@@ -706,13 +532,11 @@ std::string inputJsonForWindow(HWND hwnd) {
       element->get_CurrentBoundingRectangle(&bounds);
       editable = isEditableElement(element);
       fullText = readFocusedText(element);
-      selectedText = readSelectedText(element);
     }
   }
   releaseIf(element);
   releaseIf(uia);
 
-  bool hasSelected = !selectedText.empty();
   std::ostringstream os;
   os << "{";
   os << "\"input_area_type\":\"text_field\",";
@@ -726,8 +550,8 @@ std::string inputJsonForWindow(HWND hwnd) {
   os << "},";
   os << "\"cursor_state\":{";
   os << "\"cursor_position\":-1,";
-  os << "\"has_text_selected\":" << (hasSelected ? "true" : "false") << ",";
-  os << "\"selected_text\":" << quote(selectedText) << ",";
+  os << "\"has_text_selected\":false,";
+  os << "\"selected_text\":\"\",";
   os << "\"text_before_cursor\":\"\",";
   os << "\"text_after_cursor\":\"\",";
   os << "\"full_field_content\":" << quote(fullText);
@@ -858,7 +682,10 @@ std::string errorResponse(const std::string& id, const std::string& message) {
   return "{\"id\":" + quote(id) + ",\"ok\":false,\"error\":" + quote(message) + "}";
 }
 
-}  // namespace
+// ============================================================
+//  EXE entry point (stdin/stdout JSON-RPC server)
+// ============================================================
+#ifndef BUILD_DLL
 
 int main() {
   SetConsoleOutputCP(CP_UTF8);
@@ -873,36 +700,17 @@ int main() {
     try {
       if (method == "ping") {
         std::cout << response(id, "{\"pong\":true}") << std::endl;
-      } else if (method == "get_focused_app_info") {
-        std::cout << response(id, appInfoJson(getAppInfoRaw())) << std::endl;
-      } else if (method == "get_window_app_info") {
-        HWND hwnd = reinterpret_cast<HWND>(jsonUintField(line, "hwnd"));
-        std::cout << response(id, appInfoJson(getAppInfoForWindow(hwnd))) << std::endl;
-      } else if (method == "get_focused_input_info") {
-        std::cout << response(id, focusedInputJson()) << std::endl;
-      } else if (method == "get_window_input_info") {
-        HWND hwnd = reinterpret_cast<HWND>(jsonUintField(line, "hwnd"));
-        std::cout << response(id, hwnd ? inputJsonForWindow(hwnd) : emptyInputJson()) << std::endl;
       } else if (method == "get_full_context") {
         std::cout << response(id, fullContextJson()) << std::endl;
       } else if (method == "get_full_context_for_window") {
         HWND hwnd = reinterpret_cast<HWND>(jsonUintField(line, "hwnd"));
         std::cout << response(id, fullContextJsonForWindow(hwnd)) << std::endl;
-      } else if (method == "get_selected_text") {
-        ComInit com;
-        IUIAutomation* uia = nullptr;
-        IUIAutomationElement* element = nullptr;
-        std::string selected;
-        if (com.ok() && SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-                                                  IID_PPV_ARGS(&uia))) && uia &&
-            SUCCEEDED(uia->GetFocusedElement(&element)) && element) {
-          selected = readSelectedText(element);
-        }
-        releaseIf(element);
-        releaseIf(uia);
-        std::cout << response(id, quote(selected)) << std::endl;
       } else if (method == "poll_keyboard_events") {
         std::cout << response(id, keyboardEventsJson()) << std::endl;
+      } else if (method == "get_window_input_info") {
+        // Legacy — kept for back-compat, maps to focused input JSON
+        HWND hwnd = reinterpret_cast<HWND>(jsonUintField(line, "hwnd"));
+        std::cout << response(id, hwnd ? inputJsonForWindow(hwnd) : emptyInputJson()) << std::endl;
       } else {
         std::cout << errorResponse(id, "unknown method") << std::endl;
       }
@@ -912,3 +720,44 @@ int main() {
   }
   return 0;
 }
+
+// ============================================================
+//  DLL exports (in-process koffi FFI entry points)
+// ============================================================
+#else
+
+#include <cstdlib>
+
+extern "C" {
+
+__declspec(dllexport) char* get_full_context_json(HWND hwnd) {
+  std::string result = hwnd ? fullContextJsonForWindow(hwnd) : fullContextJson();
+  size_t size = result.size() + 1;
+  char* buf = static_cast<char*>(std::malloc(size));
+  if (buf) std::memcpy(buf, result.c_str(), size);
+  return buf;
+}
+
+__declspec(dllexport) char* get_focused_context_json(HWND hwnd) {
+  std::string result = hwnd ? inputJsonForWindow(hwnd) : focusedInputJson();
+  size_t size = result.size() + 1;
+  char* buf = static_cast<char*>(std::malloc(size));
+  if (buf) std::memcpy(buf, result.c_str(), size);
+  return buf;
+}
+
+__declspec(dllexport) char* poll_keyboard_events_json() {
+  std::string result = keyboardEventsJson();
+  size_t size = result.size() + 1;
+  char* buf = static_cast<char*>(std::malloc(size));
+  if (buf) std::memcpy(buf, result.c_str(), size);
+  return buf;
+}
+
+__declspec(dllexport) void free_string(char* ptr) {
+  if (ptr) std::free(ptr);
+}
+
+}
+
+#endif

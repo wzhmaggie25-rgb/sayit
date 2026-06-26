@@ -1,9 +1,20 @@
-"""Audio capture using PyAudio — raw PCM, gain processing, RMS level callback."""
+"""Audio capture using PyAudio — raw PCM, gain processing, RMS level callback.
+
+Uses blocking (read) mode instead of callback mode to avoid PortAudio heap
+corruption (0xC0000374) on Windows/WASAPI. Callback mode creates a C→Python
+callback thread that, after repeated start/stop cycles, corrupts PortAudio's
+internal heap.
+
+Blocking mode: each start() opens a fresh stream, reads in a loop on the
+pipeline thread, stop() closes the stream. No background callback thread,
+no heap corruption.
+"""
 from __future__ import annotations
 import array
 import logging
 import pyaudio
 import queue
+import threading
 from typing import Callable, Optional
 
 CHUNK = 1024
@@ -17,19 +28,34 @@ MIN_PCM_LENGTH = 9600  # ~0.3s @ 16kHz — discard shorter recordings
 
 logger = logging.getLogger(__name__)
 
+# PortAudio heap corruption guard: once PortAudio has been initialized and used
+# (via AudioCapture.start()), loading UIAutomationCore.dll in a new thread can
+# trigger STATUS_DLL_INIT_FAILED (0xC0000142). Infrastructure that calls into
+# UIA from a background thread (e.g. focus_context's in-process DLL) should
+# check this flag and skip the risky path.
+_portaudio_was_used = False
+
+
+def was_portaudio_used() -> bool:
+    return _portaudio_was_used
+
 
 class AudioCapture:
     def __init__(self, gain: float = 2.0):
         self._pa = pyaudio.PyAudio()
-        self._stream = None
         self._queue: queue.Queue = queue.Queue()
         self._level_cb: Optional[Callable[[float], None]] = None
         self._chunk_cb: Optional[Callable[[bytes], None]] = None
         self._gain = max(1.0, min(float(gain), MAX_GAIN))
         self._clip_samples = 0
         self._total_samples = 0
-        self._gain_reduced = False  # True if stop() auto-reduced gain
-        self._noise_gate: float = 0.0   # 0 = disabled
+        self._gain_reduced = False
+        self._noise_gate: float = 0.0
+        self._recording = False
+        self._stream = None
+        self._read_thread = None
+        self._read_stop = threading.Event()
+        self._capture_stopped = threading.Event()
 
     def set_gain(self, gain: float):
         self._gain = max(1.0, min(float(gain), MAX_GAIN))
@@ -56,22 +82,21 @@ class AudioCapture:
             return 0.0
         return self._clip_samples / self._total_samples
 
-    def _cb(self, in_data, frame_count, time_info, status):
+    def _process_chunk(self, in_data: bytes):
+        """Process a raw PCM chunk: apply gain, noise gate, callbacks."""
         gain = self._gain
         if gain != 1.0:
             arr = array.array("h")
             arr.frombytes(in_data)
             n = len(arr)
 
-            # ── Peak-normalizing soft limiter ──
-            # 1st pass: find absolute peak after gain
+            # Peak-normalizing soft limiter
             peak = 0.0
             for i in range(n):
                 v = abs(arr[i] / 32768.0 * gain)
                 if v > peak:
                     peak = v
 
-            # 2nd pass: apply gain with proportional scaling if peak > 0.95
             clip_hits = 0
             scale = 0.95 / peak if peak > 0.95 else 1.0
             if peak > 0.95:
@@ -79,7 +104,6 @@ class AudioCapture:
 
             for i in range(n):
                 v = arr[i] / 32768.0 * gain * scale
-                # Safety clamp (should rarely trigger with soft limiter active)
                 if v > 1.0:
                     v = 1.0
                 elif v < -1.0:
@@ -92,7 +116,7 @@ class AudioCapture:
         else:
             gained = in_data
 
-        # ── Noise gate: replace low-energy frames with silence ──
+        # Noise gate
         ng = self._noise_gate
         if ng > 0.0 and len(gained) >= 64:
             arr2 = array.array("h")
@@ -121,24 +145,30 @@ class AudioCapture:
                     cb(rms)
             except Exception:
                 pass
-        return (None, pyaudio.paContinue)
 
-    def start(self):
-        # ── Reset gain to user-configured value on each new recording ──
+    def _read_loop(self):
+        """Blocking read loop — runs on dedicated thread while recording."""
+        stream = self._stream
+        if stream is None:
+            return
         try:
-            from infrastructure.config_store import ConfigStore
-            store = ConfigStore()
-            configured_gain = store.get("audio", "gain_multiplier", 2.0)
-            self._gain = max(1.0, min(float(configured_gain), MAX_GAIN))
-            self._noise_gate = max(0.0, float(store.get("audio", "noise_gate_threshold", 0.015)))
+            last_log = 0
+            while not self._read_stop.is_set() and self._recording:
+                try:
+                    in_data = stream.read(CHUNK, exception_on_overflow=False)
+                    self._process_chunk(in_data)
+                except Exception as e:
+                    # Log first error, then keep trying
+                    if last_log < 10:
+                        logger.debug("AudioCapture: read error: %s", e)
+                        last_log += 1
         except Exception:
-            self._noise_gate = 0.0
-        if self._noise_gate > 0.0:
-            logger.info("AudioCapture: noise_gate=%.4f", self._noise_gate)
-        self.reset_clip_stats()
-        while not self._queue.empty():
-            self._queue.get()
-        # ── [AUDIO-DEVICE] diagnostic — log device native rate vs requested rate ──
+            pass
+
+    def _open_stream(self):
+        """Open a fresh input stream for this recording session."""
+        if self._pa is None:
+            self._pa = pyaudio.PyAudio()
         try:
             dev_info = self._pa.get_default_input_device_info()
             logger.info(
@@ -154,21 +184,83 @@ class AudioCapture:
                 RATE, CHUNK)
         self._stream = self._pa.open(
             format=FORMAT, channels=CHANNELS, rate=RATE,
-            input=True, frames_per_buffer=CHUNK, stream_callback=self._cb)
+            input=True, frames_per_buffer=CHUNK,
+            stream_callback=None)  # blocking mode — no callback
+
+    def _close_stream(self):
+        """Close the stream. Safe to call even if already closed."""
+        self._read_stop.set()
+        if self._read_thread and self._read_thread.is_alive():
+            self._read_thread.join(timeout=2.0)
+            self._read_thread = None
+        if self._stream is not None:
+            try:
+                if self._stream.is_active():
+                    self._stream.stop_stream()
+            except Exception:
+                pass
+            try:
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+
+    def start(self):
+        # Reset gain from config
+        try:
+            from infrastructure.config_store import ConfigStore
+            store = ConfigStore()
+            configured_gain = store.get("audio", "gain_multiplier", 2.0)
+            self._gain = max(1.0, min(float(configured_gain), MAX_GAIN))
+            self._noise_gate = max(0.0, float(store.get("audio", "noise_gate_threshold", 0.015)))
+        except Exception:
+            self._noise_gate = 0.0
+        if self._noise_gate > 0.0:
+            logger.info("AudioCapture: noise_gate=%.4f", self._noise_gate)
+        self.reset_clip_stats()
+        self._read_stop.clear()
+        self._capture_stopped.clear()
+
+        # Open a fresh stream for each recording session
+        self._open_stream()
+        if self._stream is None:
+            logger.error("AudioCapture: stream creation failed, cannot start")
+            raise RuntimeError("Audio stream creation failed")
+
         self._stream.start_stream()
-        logger.info("AudioCapture: started gain=%.1fx", self._gain)
+
+        # Fresh queue
+        self._queue = queue.Queue()
+        self._recording = True
+
+        # Start blocking read thread
+        self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._read_thread.start()
+
+        global _portaudio_was_used
+        _portaudio_was_used = True
+        logger.info("AudioCapture: started gain=%.1fx blocking_read", self._gain)
 
     def stop(self) -> bytes:
-        if self._stream is None:
+        if not self._recording:
             return b""
-        self._stream.stop_stream()
-        self._stream.close()
-        self._stream = None
+
+        # Signal read thread to stop
+        self._recording = False
+        self._read_stop.set()
+
+        # Wait for read thread to finish
+        if self._read_thread and self._read_thread.is_alive():
+            self._read_thread.join(timeout=3.0)
+            self._read_thread = None
+
+        # Collect PCM from queue
         chunks = []
         while not self._queue.empty():
             chunks.append(self._queue.get())
         pcm = b"".join(chunks)
-        # Auto-reduce gain if clipping exceeded 10% (runtime only, NOT persisted)
+
+        # Auto-reduce gain if clipping exceeded 10%
         if self.clip_fraction() > 0.10:
             new_gain = max(1.0, self._gain / 2.0)
             logger.warning("AudioCapture: clipping %.1f%%, reducing gain %.1f→%.1f",
@@ -177,24 +269,40 @@ class AudioCapture:
             self._gain_reduced = True
         logger.info("AudioCapture: stopped %d bytes, clip=%.2f%%",
                      len(pcm), self.clip_fraction() * 100)
+
+        # Close the stream — next session opens fresh
+        self._close_stream()
+
+        self._capture_stopped.set()
+
         return pcm
 
+    def wait_for_stop(self, timeout: float = 3.0) -> bool:
+        """Wait for the capture to fully stop (read thread exited, stream closed).
+
+        Returns True if stopped within timeout, False if timed out.
+        Used by orchestrator._on_hotkey_stop() to safely detach the pipeline
+        before a new recording can start.
+        """
+        if not self._recording and not self._read_stop.is_set():
+            return True  # already stopped
+        return self._capture_stopped.wait(timeout=timeout)
+
     def close(self):
-        if self._stream is not None:
-            self._stream.stop_stream()
-            self._stream.close()
-            self._stream = None
-        self._pa.terminate()
+        self._recording = False
+        self._read_stop.set()
+        self._close_stream()
+        if self._pa is not None:
+            self._pa.terminate()
+            self._pa = None
 
     @staticmethod
     def detect_devices() -> list[str]:
-        """Detect available audio input devices. Returns list with default device first."""
         devices = []
         dedup = set()
         default_name = None
         try:
             p = pyaudio.PyAudio()
-            # Try to get system default input device name
             try:
                 default_info = p.get_default_input_device_info()
                 default_name = default_info.get("name", "")
@@ -206,7 +314,6 @@ class AudioCapture:
                     name = info.get("name", "")
                     if not name:
                         continue
-                    # Dedup: use (name, maxInputChannels) tuple to catch cross-host-API duplicates
                     key = (name, info.get("maxInputChannels", 0))
                     if key not in dedup:
                         dedup.add(key)
@@ -214,7 +321,6 @@ class AudioCapture:
             p.terminate()
         except Exception:
             pass
-        # Move default device to front
         if default_name and default_name in devices:
             devices.remove(default_name)
             devices.insert(0, default_name)
