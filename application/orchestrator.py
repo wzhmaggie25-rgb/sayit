@@ -63,11 +63,21 @@ class SayitOrchestrator:
         # Sync hotwords to ASR
         self._hotwords._sync_to_asr()
 
-        # Pipeline — guarded by exclusive mutex
+        # Pipeline — guarded by exclusive mutex.
+        #
+        # The mutex holds for the ENTIRE pipeline lifetime: from
+        # capture-start through post-processing, injection, and history
+        # save. A second hotkey press while the pipeline is past the
+        # capture phase (TRANSCRIBING / CORRECTING / INJECTING) is
+        # silently ignored — never spawns a parallel pipeline.
+        #
+        # _pipeline_active is the canonical busy-flag. It is set under
+        # the lock in _on_hotkey_start and cleared ONLY by
+        # _pipeline_wrapper.finally — never by _on_hotkey_stop.
         self._pipeline: Optional[RecordingPipeline] = None
         self._pipeline_thread: Optional[threading.Thread] = None
-        self._pipeline_lock = threading.Lock()     # ✓ P0: absolute mutex — only 1 pipeline alive
-        self._pipeline_active = False               # ✓ P0: flag checked under lock
+        self._pipeline_lock = threading.Lock()
+        self._pipeline_active = False
 
         # Config hot-reload
         self._reload_running = False
@@ -105,6 +115,11 @@ class SayitOrchestrator:
             pipeline = self._pipeline
         return bool(pipeline and pipeline.state == RecordingState.CAPTURING)
 
+    def is_busy(self) -> bool:
+        """True while a pipeline is active in any phase (capture through DONE)."""
+        with self._pipeline_lock:
+            return self._pipeline_active
+
     def start_recording(self):
         """Public API — start recording manually (e.g. from UI button)."""
         return self._on_hotkey_start()
@@ -114,11 +129,35 @@ class SayitOrchestrator:
         return self._on_hotkey_stop()
 
     def toggle_recording(self):
-        """Toggle recording on/off. Called from Electron addon via WS."""
-        if self.is_recording():
-            return self._on_hotkey_stop()
-        else:
+        """Toggle recording on/off. Called from the keyboard hook worker thread.
+
+        State table:
+          - idle (no pipeline)             → start a new pipeline
+          - CAPTURING                       → signal stop (no new pipeline)
+          - TRANSCRIBING/CORRECTING/INJECTING/DONE/ERROR (pipeline still alive)
+                                            → IGNORED + UI event TOGGLE_IGNORED
+        """
+        with self._pipeline_lock:
+            active = self._pipeline_active
+            pipeline = self._pipeline
+        if not active:
             return self._on_hotkey_start()
+        if pipeline is None:
+            return self._on_hotkey_start()
+        # Pipeline alive — only honor a stop when we are still capturing.
+        state = pipeline.state
+        if state == RecordingState.CAPTURING:
+            return self._on_hotkey_stop()
+        # Past capture: post-processing is in flight. Drop the press so a
+        # second pipeline cannot share the audio device or injector.
+        stage = state.value if hasattr(state, "value") else str(state)
+        logger.info(
+            "[orchestrator] toggle ignored — pipeline busy in stage=%s", stage)
+        try:
+            self._eb.emit(Events.TOGGLE_IGNORED, stage)
+        except Exception:
+            pass
+        return False
 
     def get_hotwords_manager(self) -> HotwordsManager:
         return self._hotwords
@@ -204,6 +243,10 @@ class SayitOrchestrator:
                     "(concurrent pipeline race prevented)")
                 return False
             self._pipeline_active = True
+            # Take the slot under the lock so a concurrent toggle on a
+            # different thread cannot observe active=True with pipeline=None.
+            _my_pipeline = RecordingPipeline(self._eb)
+            self._pipeline = _my_pipeline
 
         injection_target = None
         try:
@@ -211,16 +254,13 @@ class SayitOrchestrator:
         except Exception as e:
             logger.warning("[orchestrator] capture injection target failed: %s", e)
 
-        self._pipeline = RecordingPipeline(self._eb)
-
-        # Capture the pipeline object so the finally block can safely check
-        # whether it's still the active pipeline — _on_hotkey_stop may have
-        # detached it (set self._pipeline = None) and a new _on_hotkey_start
-        # may have created a replacement.
-        _my_pipeline = self._pipeline
-
         def _pipeline_wrapper():
-            """Run pipeline, then clear the active flag so next hotkey works."""
+            """Run pipeline; ALWAYS clear active flag in finally.
+
+            The mutex is held for the entire pipeline life — capture,
+            transcribe, correct, inject, save. _on_hotkey_stop never
+            detaches us; we are the single owner of state reset.
+            """
             try:
                 _my_pipeline.run(
                     audio_capture=self._audio,
@@ -239,9 +279,14 @@ class SayitOrchestrator:
             except Exception as e:
                 logger.error("[orchestrator] pipeline crashed: %s", e)
             finally:
-                # Only clear orchestrator state if WE are still the active
-                # pipeline — if _on_hotkey_stop detached us + a new pipeline
-                # was started, self._pipeline points to the new object.
+                # Defensive: wait for audio device to fully release so the
+                # next pipeline doesn't see a still-active stream. The
+                # pipeline already calls audio_capture.stop() inside run(),
+                # so this is just a guard against early-abort paths.
+                try:
+                    self._audio.wait_for_stop(timeout=3.0)
+                except Exception:
+                    pass
                 with self._pipeline_lock:
                     if self._pipeline is _my_pipeline:
                         self._pipeline_active = False
@@ -255,41 +300,37 @@ class SayitOrchestrator:
         return True
 
     def _on_hotkey_stop(self):
-        """Called by hotkey manager when recording should stop.
+        """Called when the user wants to stop the current capture.
 
-        Signals the pipeline to stop capturing, then waits for the audio
-        device to be fully released before detaching the pipeline.
-        This ensures the shared AudioCapture object is idle before a new
-        pipeline can start recording again.
-
-        The old pipeline thread continues post-processing (ASR → AI → inject
-        → save) independently as a fire-and-forget thread.
+        Only signals the pipeline's _stop_flag. We DO NOT detach the
+        pipeline here — that responsibility lives in _pipeline_wrapper's
+        finally clause, after ASR / AI / inject / history have completed.
+        Returning early from this method must not allow a second pipeline
+        to start while the first is still post-processing — that is the
+        root cause of "third RAlt only stops" in long dictations.
         """
         with self._pipeline_lock:
             pipeline = self._pipeline
             active = self._pipeline_active
-        if pipeline and active and not pipeline.is_idle():
-            pipeline.stop()  # sets _stop_flag — capture loop exits
-
-            # Wait for audio capture to complete (read thread exits, stream
-            # closed). The pipeline thread calls audio_capture.stop() ~50-200ms
-            # after _stop_flag is set. We wait up to 3s to be safe.
-            self._audio.wait_for_stop(timeout=3.0)
-
-            # Now it's safe to detach — audio device is idle, no more
-            # callbacks will fire from the old pipeline.
-            with self._pipeline_lock:
-                if self._pipeline is pipeline:
-                    self._pipeline_active = False
-                    self._pipeline = None
-                    self._pipeline_thread = None
-                    logger.info("[orchestrator] pipeline detached (audio captured)")
-            return True
-        else:
+        if not (pipeline and active):
             logger.debug(
                 "[orchestrator] stop ignored — no active pipeline "
                 "(pipeline=%s active=%s)", pipeline is not None, active)
             return False
+        if pipeline.is_idle():
+            return False
+        # Only stop while still in CAPTURING — any later state means the
+        # pipeline already moved past the user's control point and a stop
+        # signal would be a no-op anyway.
+        if pipeline.state != RecordingState.CAPTURING:
+            return False
+        pipeline.stop()
+        # NB: we don't wait_for_stop / clear flags here. The pipeline
+        # thread runs through to DONE/ERROR, and only then does its
+        # _pipeline_wrapper.finally clear _pipeline_active. That is what
+        # keeps RAlt presses arriving during ASR/AI/inject from racing
+        # into a parallel pipeline.
+        return True
 
     def _start_config_watcher(self):
         """Start background thread that watches config.json for changes."""

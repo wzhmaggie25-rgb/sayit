@@ -1,10 +1,24 @@
-"""Keyboard helper DLL — WH_KEYBOARD_LL hook via ctypes (Typeless architecture).
+"""Keyboard helper DLL — WH_KEYBOARD_LL hook via ctypes (Typeless architecture v2).
 
-Loads sayit_keyboard_helper.dll and provides a Pythonic interface to
-the RAlt toggle hook.
+v2 (2026-06-26)
+---------------
+The C++ HookProc no longer calls Python directly. Instead, the hook thread
+signals a native auto-reset event and a *native worker thread* (inside the
+DLL) consumes the signal and invokes the Python callback. The Python side
+keeps the original guarantee of running each toggle on its own daemon
+thread so the worker thread is never stuck inside long-running Python work.
 
-Typeless pattern: in-process DLL call — identical to Typeless' koffi approach
-but using Python's built-in ctypes to avoid external dependencies.
+ABI exported by sayit_keyboard_helper.dll:
+
+    int install_hook(void* callback)              -> 1 on success
+    int uninstall_hook()                          -> 1
+    int is_hook_installed()                       -> 1 / 0
+    unsigned long get_pending_count()             -> not-yet-consumed toggles
+    unsigned long get_total_emitted()             -> lifetime emitted (install scope)
+    unsigned long get_total_consumed()            -> lifetime consumed (install scope)
+    int __test_trigger_toggle()                   -> test-only; emits one toggle
+                                                     identical to an RAlt up event,
+                                                     bypassing physical keys.
 """
 from __future__ import annotations
 import ctypes
@@ -12,16 +26,14 @@ import logging
 import os
 import threading
 import time
-from ctypes import wintypes
 
 from infrastructure.paths import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
 _CALLBACK_TYPE = ctypes.CFUNCTYPE(None)  # void(*)()
-_HOOK_LIBRARY = None
 _HOOK_INSTALL_LOCK = threading.Lock()
-_CALLBACK_HANDLE = None  # keep reference to prevent gc
+_CALLBACK_HANDLE = None  # keep ctypes thunk alive while installed
 
 
 class _LibLoader:
@@ -60,7 +72,6 @@ class _LibLoader:
             logger.warning("[keyboard-helper] load failed: %s", e)
             return None
 
-        # Bind exported functions
         self._lib.install_hook.argtypes = [ctypes.c_void_p]
         self._lib.install_hook.restype = ctypes.c_int
 
@@ -70,21 +81,43 @@ class _LibLoader:
         self._lib.is_hook_installed.argtypes = []
         self._lib.is_hook_installed.restype = ctypes.c_int
 
+        # Optional symbols (older builds of the DLL may not export these).
+        for name, restype in (
+            ("get_pending_count", ctypes.c_ulong),
+            ("get_total_emitted", ctypes.c_ulong),
+            ("get_total_consumed", ctypes.c_ulong),
+            ("__test_trigger_toggle", ctypes.c_int),
+        ):
+            try:
+                fn = getattr(self._lib, name)
+                fn.argtypes = []
+                fn.restype = restype
+            except AttributeError:
+                logger.info(
+                    "[keyboard-helper] optional export %s not present (older DLL)",
+                    name)
+
         logger.info("[keyboard-helper] loaded from %s", dll_path)
         return self._lib
 
     @staticmethod
     def _find_dll() -> str | None:
-        """Search for sayit_keyboard_helper.dll in known build locations."""
-        candidates = [
-            os.path.join(PROJECT_ROOT, "native", "context_helper", "build", "Release",
-                         "sayit_keyboard_helper.dll"),
-            os.path.join(PROJECT_ROOT, "native", "context_helper", "build", "Debug",
-                         "sayit_keyboard_helper.dll"),
-            os.path.join(PROJECT_ROOT, "native", "context_helper", "build",
-                         "sayit_keyboard_helper.dll"),
-            os.path.join(PROJECT_ROOT, "bin", "sayit_keyboard_helper.dll"),
-        ]
+        # The DLL lives under <repo>/native/context_helper/build/...
+        # Resolve relative to this source file too — PROJECT_ROOT is derived
+        # from __main__.__file__ and is incorrect under pytest / other hosts.
+        here_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        roots = [PROJECT_ROOT, here_root]
+        candidates: list[str] = []
+        for root in roots:
+            candidates.extend([
+                os.path.join(root, "native", "context_helper", "build", "Release",
+                             "sayit_keyboard_helper.dll"),
+                os.path.join(root, "native", "context_helper", "build", "Debug",
+                             "sayit_keyboard_helper.dll"),
+                os.path.join(root, "native", "context_helper", "build",
+                             "sayit_keyboard_helper.dll"),
+                os.path.join(root, "bin", "sayit_keyboard_helper.dll"),
+            ])
         for path in candidates:
             if os.path.exists(path):
                 return os.path.realpath(path)
@@ -120,12 +153,20 @@ class KeyboardHelperDll:
     def is_available(self) -> bool:
         return self._lib is not None
 
+    @property
+    def lib(self):
+        """Test-only accessor for raw ctypes lib handle."""
+        return self._lib
+
     def install(self, callback) -> bool:
         """Install the WH_KEYBOARD_LL hook with a zero-arg Python callback.
 
-        The callback is called on a background daemon thread, NOT on the hook
-        thread — preventing LowLevelHooksTimeout from silently unhooking the
-        hook when the callback takes too long (GIL contention, Win32 calls).
+        v2 layering:
+          - HookProc (C++)                — never touches Python
+          - Worker thread (C++)            — receives SetEvent, calls _dispatch
+          - _dispatch (this module)        — spawns a daemon thread per toggle
+                                             so worker is never blocked
+          - business callback (orchestrator.toggle_recording)
 
         Returns True on success.
         """
@@ -144,37 +185,33 @@ class KeyboardHelperDll:
                 logger.warning("[keyboard-helper] already installed")
                 return False
 
-            # ── Dispatch wrapper ──────────────────────────────────
-            # The hook thread (WH_KEYBOARD_LL) must return within ~300ms
-            # or Windows silently unhooks. We cannot do any Python work
-            # synchronously on it — especially under GIL contention from
-            # _process_chunk (pure-Python per-sample audio processing).
-            #
-            # Solution: the ctypes callback only spawns a daemon thread,
-            # then returns immediately (~0.1ms on hook thread).
+            # ── Worker-thread → Python dispatch ─────────────────
+            # The worker thread invokes _dispatch. We still spawn a daemon
+            # thread per toggle so any business work that blocks (audio
+            # device, ASR, injection) does not starve the worker queue.
             def _dispatch():
-                threading.Thread(
-                    target=callback, daemon=True, name="hotkey-dispatch"
-                ).start()
+                try:
+                    threading.Thread(
+                        target=callback, daemon=True, name="hotkey-dispatch"
+                    ).start()
+                except Exception as e:
+                    logger.warning("[keyboard-helper] dispatch failed: %s", e)
 
-            # Create a ctypes callback pointing to _dispatch, NOT the
-            # original user callback. Keep a reference to prevent GC.
             _CALLBACK_HANDLE = _CALLBACK_TYPE(_dispatch)
 
             result = self._lib.install_hook(_CALLBACK_HANDLE)
             self._installed = (result == 1)
 
-        logger.info("[keyboard-helper] install: %s", "OK" if self._installed else "FAILED")
+        logger.info("[keyboard-helper] install: %s",
+                    "OK" if self._installed else "FAILED")
         return self._installed
 
     def uninstall(self):
         """Uninstall the WH_KEYBOARD_LL hook.
 
-        Thread safety: the DLL sets g_callback = nullptr first (inside
-        uninstall_hook), then posts WM_QUIT to the hook thread. We hold the
-        ctypes callback handle (via _CALLBACK_HANDLE) until the hook thread
-        has had time to exit, preventing a GC race where the ctypes thunk
-        is destroyed while the hook thread still references it.
+        The DLL now joins both the hook thread and the worker thread before
+        uninstall_hook returns, so by the time we drop _CALLBACK_HANDLE no
+        native thread can still reference it.
         """
         global _CALLBACK_HANDLE
 
@@ -182,10 +219,6 @@ class KeyboardHelperDll:
             if self._lib and self._lib.is_hook_installed():
                 self._lib.uninstall_hook()
                 self._installed = False
-                # Give the hook thread time to exit its GetMessage loop,
-                # ensuring g_callback is no longer referenced before we
-                # release the ctypes thunk.
-                time.sleep(0.05)
                 _CALLBACK_HANDLE = None
                 logger.info("[keyboard-helper] uninstalled")
 
@@ -194,3 +227,36 @@ class KeyboardHelperDll:
         if not self._lib:
             return False
         return self._lib.is_hook_installed() == 1
+
+    # ── Test-only introspection ─────────────────────────────
+
+    def get_pending_count(self) -> int:
+        if not self._lib or not hasattr(self._lib, "get_pending_count"):
+            return -1
+        return int(self._lib.get_pending_count())
+
+    def get_total_emitted(self) -> int:
+        if not self._lib or not hasattr(self._lib, "get_total_emitted"):
+            return -1
+        return int(self._lib.get_total_emitted())
+
+    def get_total_consumed(self) -> int:
+        if not self._lib or not hasattr(self._lib, "get_total_consumed"):
+            return -1
+        return int(self._lib.get_total_consumed())
+
+    def test_trigger_toggle(self) -> bool:
+        """Test-only: synthesize an RAlt-up emit from C++ side.
+
+        Behavior is identical to what HookProc does on the RAlt rising edge
+        EXCEPT no physical key is involved and the entry point cannot be
+        reached from the LowLevelHooks pipeline. Used by the stress test to
+        validate the native producer → worker → Python transport.
+        """
+        if not self._lib:
+            return False
+        try:
+            fn = getattr(self._lib, "__test_trigger_toggle")
+        except AttributeError:
+            return False
+        return fn() == 1

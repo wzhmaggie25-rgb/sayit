@@ -84,3 +84,8 @@ class Events:
 
     # Hotkey
     HOTKEY_CHANGED = "hotkey:changed"            # new_hotkey: str
+
+    # Toggle gating — fired by orchestrator when a hotkey press is dropped
+    # because the previous pipeline is still working through ASR / AI / inject.
+    # Payload: stage name (e.g. "transcribing", "injecting") for UI hint.
+    TOGGLE_IGNORED = "toggle:ignored"            # stage: str

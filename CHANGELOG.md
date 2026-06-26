@@ -1,5 +1,41 @@
 # Changelog
 
+## 2026-06-26 — 长录音 Alt 停止 + 注入可靠性彻底修复
+
+### 根因
+1. **HookProc 仍调用 Python（即便 Python 端 spawn daemon thread）**：进入 Python 解释器 + 获取 GIL + 构造 `threading.Thread` 的整段路径在长 streaming ASR + 音频 chunk + RMS 回调引起的高 GIL 竞争下仍可超过 `LowLevelHooksTimeout`(~300ms) → Windows 静默卸载 → 第二次 RAlt 无响应。
+2. **`_on_hotkey_stop` 过早释放 pipeline 互斥**：旧 pipeline 仍在 ASR/AI/注入时，`_pipeline_active=False` 与 `_pipeline=None` 已被清空 → 第二次 RAlt 启动了第二条竞争 pipeline，第三次才"看似停止"。
+3. **注入器 foreground-mismatch 提前 return False**：跳过 Win32 子控件兜底与剪贴板兜底 → 文字只到历史，连剪贴板都没保留。
+
+### 修复
+
+#### A. HookProc v2 — 与 Python 彻底解耦
+- `native/context_helper/src/keyboard_helper.cpp`：HookProc 仅做常数时间 Win32 工作 + `EmitToggle()`（原子 pending + SetEvent）。新增原生 worker thread 在 `WaitForSingleObject` 上阻塞、消费 pending、调用 Python callback。`uninstall_hook` 同时 join hook thread 与 worker thread，确保返回后无悬空回调。
+- 新增测试导出：`__test_trigger_toggle`、`get_pending_count`、`get_total_emitted`、`get_total_consumed`。
+- `infrastructure/keyboard_helper_dll.py`：适配新 ABI，绑定可选符号，修复 DLL 搜索路径（PROJECT_ROOT 在 pytest 下指向 `infrastructure/`，新增 `__file__` 派生根目录回退）。
+
+#### B. Orchestrator 状态门禁
+- `application/orchestrator.py`：`toggle_recording` 按 pipeline.state 路由（idle→start, CAPTURING→stop, 其它→ignore + `Events.TOGGLE_IGNORED`）。
+- `_on_hotkey_stop` 不再清空 `_pipeline_active`/`_pipeline` —— 释放唯一归属 `_pipeline_wrapper.finally`。
+- 创建 pipeline 与 `_pipeline_active=True` 在同一把锁内原子完成。
+- 新增 `is_busy()`、`Events.TOGGLE_IGNORED`。
+
+#### C. 注入兜底契约
+- `infrastructure/injector.py`：`inject()` 引入 `fail()` 闭包，所有 `return False` 之前必走它并 `_clipboard_set_text(text)`。
+- `_focus_window` 最多 3 次重试；恢复失败 / 前台漂移 → 先试 Win32 子 Edit 控件，再走 `fail()`。
+- `_inject_win32_child_edit` 改用 `WINFUNCTYPE` 私有原型避免 64-bit LRESULT 截断与全局 argtypes mutation。
+
+### 新增测试
+- `tests/test_keyboard_helper_stress.py`：1000 toggle 在多线程 GIL 压力下零丢失 / 20 次安装卸载 / 回调线程身份验证。
+- `tests/test_orchestrator_state.py`：5 用例覆盖一开始 / 录音中停 / 处理中忽略 / 异常释放 / 快速双击。
+- `tests/test_injector_fallback.py`：5 用例覆盖目标恢复失败、前台漂移、三层全失败、终端剪贴板失败、成功路径不污染剪贴板。
+- `tests/test_win32_edit_integration.py`：本地启动 Win32 Edit 宿主，sentinel 注入与回读 + 状态门 end-to-end。
+
+### 测试结果
+`68 passed, 1 skipped`（skip 为 PROJECT_STATE 中已知的 CI UIA 用例，任务允许）。
+
+---
+
 ## 2026-06-25 — 第二次 Alt 失灵修复 + UIA COM 修复 + 事件刷新
 
 ### 根因

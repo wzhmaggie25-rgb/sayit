@@ -437,109 +437,156 @@ class Injector:
         }
 
     def inject(self, text: str, target: InjectionTarget | None = None) -> bool:
-        """4-level waterfall injection."""
+        """4-level waterfall injection.
+
+        Guarantees:
+          - If True: text was injected via UIA/Clipboard/SendInput/Win32-child.
+            For UIA and Win32-child we additionally verify the value was read
+            back from the control. For Clipboard/SendInput we still rely on
+            the OS shortcut delivery, BUT we never report success if the
+            shortcut path was skipped (e.g. foreground mismatch).
+          - If False: text is GUARANTEED to be on the clipboard so the user
+            can paste it manually. We do NOT swallow that side-effect.
+        """
         with self._lock:
-            self._release_modifiers(reason="inject_start")
-            # ── diagnostic: pre-injection ──
-            logger.info(
-                "[INJECT-PRE] text=%r len=%d vk_list=%s modifiers=%s",
-                text[:20], len(text), self._MODIFIER_RELEASE_ORDER,
-                self._get_modifier_states())
-            if target is not None and target.hwnd:
-                logger.info(
-                    "[INJECT-TARGET] restoring hwnd=%s pid=%s proc=%s class=%s title=%r",
-                    target.hwnd, target.pid, target.proc, target.cls, target.title[:80])
-                if not self._focus_window(target.hwnd):
-                    logger.warning(
-                        "[INJECT-TARGET] restore failed hwnd=%s proc=%s title=%r",
-                        target.hwnd, target.proc, target.title[:80])
-                    if self._inject_win32_child_edit(text, target.hwnd):
-                        self.last_target_hwnd = target.hwnd
-                        self.last_target_pid = target.pid
-                        self.last_target_proc = target.proc
-                        self.last_target_class = target.cls
-                        self.last_target_title = target.title
-                        logger.info("[INJECT-POST] ok via=Win32ChildEdit")
-                        return True
-            hwnd, cls, pid, proc = self._foreground_info()
-            self.last_target_hwnd = hwnd or 0
-            self.last_target_pid = pid
-            self.last_target_proc = proc
-            self.last_target_class = cls
-            # ── [INJECT-PATH] entry — log target window + injection context ──
-            logger.info(
-                "[INJECT-PATH] entry text_preview=%r len=%d target_hwnd=%s target_class=%s "
-                "target_process=%s injection_mode=%s",
-                text[:8] if len(text) > 8 else text, len(text),
-                hwnd or 0, cls, proc,
-                self.injection_mode)
+            return self._inject_locked(text, target)
 
-            # Get window title
+    def _inject_locked(self, text: str, target: InjectionTarget | None) -> bool:
+        # Sentinel — every return path that yields False must guarantee the
+        # final text is on the clipboard before returning. We track this via
+        # a single helper so future paths can't forget the contract.
+        def fail() -> bool:
             try:
-                title_buf = ctypes.create_unicode_buffer(512)
-                ctypes.windll.user32.GetWindowTextW(hwnd, title_buf, 512)
-                self.last_target_title = title_buf.value or ""
+                _clipboard_set_text(text)
+                logger.warning(
+                    "[INJECT-FALLBACK] all injection paths failed — "
+                    "final text preserved on clipboard (len=%d)", len(text))
             except Exception:
-                self.last_target_title = ""
-
-            if target is not None and target.hwnd and hwnd != target.hwnd:
                 logger.warning(
-                    "[INJECT-TARGET] foreground mismatch after restore: expected=%s actual=%s",
-                    target.hwnd, hwnd)
-                return False
+                    "[INJECT-FALLBACK] clipboard preservation ALSO failed", exc_info=True)
+            return False
 
-            if hwnd and hwnd != ctypes.windll.user32.GetForegroundWindow():
-                self._focus_window(hwnd)
+        self._release_modifiers(reason="inject_start")
+        logger.info(
+            "[INJECT-PRE] text=%r len=%d vk_list=%s modifiers=%s",
+            text[:20], len(text), self._MODIFIER_RELEASE_ORDER,
+            self._get_modifier_states())
 
-            context = self._get_context_for_strategy()
-            strategy = self._strategy_for_context(proc, cls, context)
-            is_terminal = self._is_terminal_target(proc, cls)
-            if is_terminal:
-                self._release_modifiers(force=True, reason="terminal_before_paste")
-
-            # ── [INJECT-PATH] route — log which injection path will be attempted ──
+        # ── Stage A: try to restore the original target window ──
+        # Up to 3 attempts with short delays. _focus_window already retries
+        # internally via thread-attach + topmost flicker, so 3 calls is
+        # the outer ceiling — never infinite.
+        target_restored = False
+        if target is not None and target.hwnd:
             logger.info(
-                "[INJECT-PATH] route strategy=%s terminal=%s text_len=%d "
-                "target_process=%s target_class=%s target_title=%r "
-                "will_try_uia=%s will_try_clipboard=%s will_try_sendinput=%s "
-                "cls_in_unreliable=%s context_app_type=%s",
-                strategy, is_terminal, len(text), proc, cls, self.last_target_title[:80],
-                bool(strategy == "uia" and cls not in UIA_UNRELIABLE_CLASSES),
-                bool(strategy != "send_input"),
-                bool(not is_terminal),
-                cls in UIA_UNRELIABLE_CLASSES,
-                (context.get("active_application") or {}).get("app_type") if context else "")
-
-            # Layer 1: UIA
-            if strategy == "uia" and cls not in UIA_UNRELIABLE_CLASSES:
-                if self._inject_uia(text):
-                    logger.info("[INJECT-POST] ok via=UIA")
-                    return True
-
-            # Layer 2: Clipboard paste
-            if strategy != "send_input":
-                if self.paste(text, terminal=is_terminal):
-                    if is_terminal:
-                        self._release_modifiers(force=True, reason="terminal_after_paste_ok")
-                    logger.info("[INJECT-POST] ok via=Clipboard")
-                    return True
-
-            # Layer 3: SendInput
-            if is_terminal:
+                "[INJECT-TARGET] restoring hwnd=%s pid=%s proc=%s class=%s title=%r",
+                target.hwnd, target.pid, target.proc, target.cls, target.title[:80])
+            for attempt in range(3):
+                if self._focus_window(target.hwnd):
+                    target_restored = True
+                    break
+                time.sleep(0.05 * (attempt + 1))
+            if not target_restored:
                 logger.warning(
-                    "[INJECT-PATH] terminal clipboard failed; no SendInput fallback "
-                    "target_process=%s target_class=%s text_len=%d",
-                    proc, cls, len(text))
-                self._release_modifiers(force=True, reason="terminal_after_paste_failed")
-                return False
-            if self._direct_input(text):
-                logger.info("[INJECT-POST] ok via=SendInput")
+                    "[INJECT-TARGET] restore failed after 3 attempts hwnd=%s proc=%s title=%r",
+                    target.hwnd, target.proc, target.title[:80])
+                # Prefer control-level injection — does not need foreground.
+                if self._inject_win32_child_edit(text, target.hwnd):
+                    self.last_target_hwnd = target.hwnd
+                    self.last_target_pid = target.pid
+                    self.last_target_proc = target.proc
+                    self.last_target_class = target.cls
+                    self.last_target_title = target.title
+                    logger.info("[INJECT-POST] ok via=Win32ChildEdit (no foreground)")
+                    return True
+                # Otherwise: text MUST still be on clipboard for manual paste.
+                return fail()
+
+        hwnd, cls, pid, proc = self._foreground_info()
+        self.last_target_hwnd = hwnd or 0
+        self.last_target_pid = pid
+        self.last_target_proc = proc
+        self.last_target_class = cls
+        logger.info(
+            "[INJECT-PATH] entry text_preview=%r len=%d target_hwnd=%s target_class=%s "
+            "target_process=%s injection_mode=%s",
+            text[:8] if len(text) > 8 else text, len(text),
+            hwnd or 0, cls, proc,
+            self.injection_mode)
+
+        try:
+            title_buf = ctypes.create_unicode_buffer(512)
+            ctypes.windll.user32.GetWindowTextW(hwnd, title_buf, 512)
+            self.last_target_title = title_buf.value or ""
+        except Exception:
+            self.last_target_title = ""
+
+        # If the foreground HWND drifted away from the captured target, try
+        # the direct Win32 control route before giving up — it works without
+        # needing the window to be foreground.
+        if target is not None and target.hwnd and hwnd != target.hwnd:
+            logger.warning(
+                "[INJECT-TARGET] foreground mismatch after restore: expected=%s actual=%s",
+                target.hwnd, hwnd)
+            if self._inject_win32_child_edit(text, target.hwnd):
+                self.last_target_hwnd = target.hwnd
+                self.last_target_pid = target.pid
+                self.last_target_proc = target.proc
+                self.last_target_class = target.cls
+                self.last_target_title = target.title
+                logger.info("[INJECT-POST] ok via=Win32ChildEdit (foreground mismatch recovery)")
+                return True
+            return fail()
+
+        if hwnd and hwnd != ctypes.windll.user32.GetForegroundWindow():
+            self._focus_window(hwnd)
+
+        context = self._get_context_for_strategy()
+        strategy = self._strategy_for_context(proc, cls, context)
+        is_terminal = self._is_terminal_target(proc, cls)
+        if is_terminal:
+            self._release_modifiers(force=True, reason="terminal_before_paste")
+
+        logger.info(
+            "[INJECT-PATH] route strategy=%s terminal=%s text_len=%d "
+            "target_process=%s target_class=%s target_title=%r "
+            "will_try_uia=%s will_try_clipboard=%s will_try_sendinput=%s "
+            "cls_in_unreliable=%s context_app_type=%s",
+            strategy, is_terminal, len(text), proc, cls, self.last_target_title[:80],
+            bool(strategy == "uia" and cls not in UIA_UNRELIABLE_CLASSES),
+            bool(strategy != "send_input"),
+            bool(not is_terminal),
+            cls in UIA_UNRELIABLE_CLASSES,
+            (context.get("active_application") or {}).get("app_type") if context else "")
+
+        # Layer 1: UIA
+        if strategy == "uia" and cls not in UIA_UNRELIABLE_CLASSES:
+            if self._inject_uia(text):
+                logger.info("[INJECT-POST] ok via=UIA")
                 return True
 
-            logger.info("[INJECT-POST] FAILED all=3")
-            _clipboard_set_text(text)
-            logger.warning("[injector] All 3 levels failed — text in clipboard")
-            return False
+        # Layer 2: Clipboard paste
+        if strategy != "send_input":
+            if self.paste(text, terminal=is_terminal):
+                if is_terminal:
+                    self._release_modifiers(force=True, reason="terminal_after_paste_ok")
+                logger.info("[INJECT-POST] ok via=Clipboard")
+                return True
+
+        # Layer 3: SendInput
+        if is_terminal:
+            logger.warning(
+                "[INJECT-PATH] terminal clipboard failed; no SendInput fallback "
+                "target_process=%s target_class=%s text_len=%d",
+                proc, cls, len(text))
+            self._release_modifiers(force=True, reason="terminal_after_paste_failed")
+            return fail()
+        if self._direct_input(text):
+            logger.info("[INJECT-POST] ok via=SendInput")
+            return True
+
+        logger.info("[INJECT-POST] FAILED all=3")
+        return fail()
 
     def _get_context_for_strategy(self) -> dict:
         try:
@@ -549,6 +596,12 @@ class Injector:
             return {}
 
     def _inject_win32_child_edit(self, text: str, hwnd: int) -> bool:
+        """Inject text into a Win32 Edit/RichEdit child of `hwnd`.
+
+        Uses SendMessage(WM_SETTEXT) + WM_GETTEXT readback so the path is
+        deterministic and does not depend on the target being foreground.
+        Returns True only if the readback matches `text` exactly.
+        """
         child = self._find_child_edit(hwnd)
         if not child:
             return False
@@ -556,14 +609,30 @@ class Injector:
             WM_SETTEXT = 0x000C
             WM_GETTEXT = 0x000D
             WM_GETTEXTLENGTH = 0x000E
-            if not ctypes.windll.user32.SendMessageW(child, WM_SETTEXT, 0, text):
+            user32 = ctypes.windll.user32
+            # SendMessageW returns LRESULT (pointer-sized). Without restype
+            # ctypes truncates to 32 bits — break out a private prototype so
+            # we don't mutate global SendMessageW state.
+            send_proto = ctypes.WINFUNCTYPE(
+                ctypes.c_ssize_t,
+                wintypes.HWND, wintypes.UINT,
+                wintypes.WPARAM, wintypes.LPARAM,
+            )
+            send = send_proto(("SendMessageW", user32))
+            # Pass `text` as a buffer pointer cast to LPARAM — equivalent
+            # to MSDN's "(LPARAM)lpString" convention.
+            text_buf = ctypes.create_unicode_buffer(text)
+            r = send(child, WM_SETTEXT, 0,
+                     ctypes.cast(text_buf, ctypes.c_void_p).value or 0)
+            if not r:
                 return False
             time.sleep(0.05)
-            length = int(ctypes.windll.user32.SendMessageW(child, WM_GETTEXTLENGTH, 0, 0))
+            length = int(send(child, WM_GETTEXTLENGTH, 0, 0))
             if length < 0:
                 return False
             buf = ctypes.create_unicode_buffer(length + 1)
-            ctypes.windll.user32.SendMessageW(child, WM_GETTEXT, length + 1, buf)
+            send(child, WM_GETTEXT, length + 1,
+                 ctypes.cast(buf, ctypes.c_void_p).value or 0)
             return buf.value == text
         except Exception:
             logger.info("[INJECT-WIN32] child edit injection failed: %s", traceback.format_exc())
