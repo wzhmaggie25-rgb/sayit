@@ -10,6 +10,20 @@ venv/
 *.egg-info/
 models/
 
+# Audio / recording files (forbidden from upload)
+*.wav
+*.mp3
+*.pcm
+*.flac
+*.ogg
+*.aac
+*.m4a
+*.webm
+
+# Extended database files
+*.sqlite
+*.sqlite3
+
 config.json
 native/context_helper/build/
 .tmp_*.log
