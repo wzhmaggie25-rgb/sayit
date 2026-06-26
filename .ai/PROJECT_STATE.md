@@ -1,5 +1,5 @@
 # Project State
-> 最后一次更新：2026-06-26 14:00
+> 最后一次更新：2026-06-26 14:45
 
 ## Overview
 
@@ -96,10 +96,7 @@ RAlt press → pipeline.run()
         → daemon thread "silent-monitor-{hash}" 启动
         → _start_track(): 1.2s 内轮询 UIA 确认注入文本存在
         → 循环 15s，每 0.3s poll 键盘事件 + 取焦点上下文
-        → 检测到用户编辑（内容变化 + 非大修改 + 锚点可对齐）
-        → learn_from_edit() → db.merge_rules()
-        → _auto_add_dictionary_terms() → hotwords_mgr.add_word()
-        → EventBus SILENT_LEARNED → WebSocket → UI
+        → 检测到用户编辑 → learn_from_edit() → db.merge_rules()
 ```
 
 ### 静默学习的完整调用链
@@ -110,48 +107,68 @@ RecordingPipeline.run() Phase 6
     → 创建 daemon 线程 silent-monitor-{hid}
     → _monitor_loop():
       1. _start_track() — 1.2s 超时内确认注入文本存在于输入框
-         → 取焦点上下文（ContextHelperDll / ContextHelperClient）
+         → _get_current_context() 实际调用链：
+           [有 hwnd] → get_focus_context_for_window(hwnd, text)
+             Path 1: Win32 child-edit (SendMessage WM_GETTEXT) — 最快
+             Path 2: ContextHelperClient EXE subprocess (get_full_context_for_window)
+             Path 3: ContextHelperDll DLL (如果 PortAudio 未使用)
+             Path 4: Win32 上下文（最后手段）
+           [无 hwnd] → get_focus_context(text)
+             Path 1: ContextHelperClient EXE subprocess (get_full_context)
+             Path 2: ContextHelperDll DLL (如果 PortAudio 未使用)
+             Path 3: Python UIA + Win32 纯 Python 降级
          → 验证 editable + contains text + hwnd 匹配
          → 记录 track_context（基准快照）
       2. 循环 15s，每 0.3s:
          → _poll_keyboard_events()
-           → ContextHelperClient().poll_keyboard_events() (首选)
-           → fallback: GetAsyncKeyState(Enter)
+           Path 1: ContextHelperClient().poll_keyboard_events() (EXE subprocess)
+           Path 2: ctypes.windll.user32.GetAsyncKeyState(Enter) 降级
+           → 注意：**永远不走 ContextHelperDll.poll_keyboard_events()**
          → _get_current_context()
-         → 检查 hwnd/input_box 未切换
-         → 检查 full_field_content 是否还包含注入文本
-         → 不再包含 → 用户已编辑 → 触发 _check_edited_text()
-      3. _check_edited_text():
-         → 比较当前文本 vs 基准文本
-         → extract_inserted_region() 定位编辑范围
-         → analyze_modification() 检查是否大修改 (>50%)
-         → _learn() — 核心学习:
-           → learn_from_edit(original, edited, existing_rules)
-           → db.merge_rules(merged)
-           → _auto_add_dictionary_terms()
-           → _on_learned callback → EventBus SILENT_LEARNED
+         → 内容变化 → _check_edited_text()
+      3. _check_edited_text() → _learn() → db.merge_rules()
 ```
 
-### Context Helper 实际加载方式
+## Context Helper 实际加载方式（审计确认）
 
-两种加载路径，按优先级：
+### 两种路径的文件存在性（2026-06-26 确认）
 
-1. **`ContextHelperDll`**（新，进程内 UIA）— `infrastructure/context_helper_dll.py`
-   - `ctypes.CDLL` 加载 `sayit_context_helper_dll.dll`
-   - 导出函数：`get_full_context_json`, `get_focused_context_json`, `poll_keyboard_events_json`, `free_string`
-   - 搜索路径：`native/context_helper/build/Release/` → `Debug/` → `build/` → `bin/`
-   - `get_focused_input_info()` 被 `focus_context.py` 中的 `get_focus_context()` 使用
+| 组件 | 路径 | 存在 |
+|------|------|------|
+| `sayit_context_helper_dll.dll` | `native/context_helper/build/Release/sayit_context_helper_dll.dll` | ✅ 70,656 bytes |
+| `sayit_context_helper.exe` | `native/context_helper/build/Release/sayit_context_helper.exe` | ✅ 存在 |
+| `sayit_keyboard_helper.dll` | `native/context_helper/build/Release/sayit_keyboard_helper.dll` | ✅ 148KB |
 
-2. **`ContextHelperClient`**（旧，subprocess）— `infrastructure/context_helper_client.py`
-   - `subprocess.Popen` 启动 `sayit_context_helper.exe`
-   - JSON-RPC over stdin/stdout（每请求一个 JSON line）
-   - 搜索路径同上 + `SAYIT_CONTEXT_HELPER` 环境变量覆盖
-   - `poll_keyboard_events()` 被 `SilentMonitor._poll_keyboard_events()` 使用
-   - 被 `focus_context.py` 用做 `get_focus_context()` 的回退
+### 运行时加载优先级（focus_context.py）
 
-**调用方使用链:**
-- `focus_context.get_focus_context()` → 优先试 `ContextHelperDll.get_focused_input_info()` → 失败时回退 `ContextHelperClient.get_full_context()`
-- `silent_monitor.SilentMonitor._poll_keyboard_events()` → 直接调用 `ContextHelperClient().poll_keyboard_events()`
+**`get_focus_context()`（无指定 hwnd）：**
+1. **ContextHelperClient EXE subprocess**（首选）— 通过 JSON-RPC over stdin/stdout
+2. **ContextHelperDll 进程内 DLL**（降级）— 仅当 `was_portaudio_used() == False` 时尝试
+3. **Python UIA + Win32**（最后手段）— 使用 comtypes + ctypes
+
+**`get_focus_context_for_window(hwnd)`：**
+1. **Win32 child-edit**（最快）— `SendMessage(WM_GETTEXT)` 直接读取子窗口
+2. **ContextHelperClient EXE subprocess** — 调用 `get_full_context_for_window`
+3. **ContextHelperDll 进程内 DLL** — 仅当 `was_portaudio_used() == False` 时尝试
+4. **Win32 上下文**（最后手段）
+
+### DLL 实际运行状态（审计发现）
+
+- **DLL 加载成功**（`ctypes.CDLL` 返回有效句柄）
+- **DLL 函数调用崩溃**（exit 127 / STATUS_DLL_INIT_FAILED）
+  - 根因：Python comtypes 先将 COM 公寓模型设为 MTA（`CoInitializeEx(None, 2)`）
+  - DLL 内部的 `ComInit` 尝试 `CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)`（STA）
+  - STA 初始化失败 → `CoCreateInstance(CLSID_CUIAutomation)` 崩溃
+  - **结论：在 server.py 运行时 DLL 永远不可用**
+- **EXE subprocess 稳定工作**（独立进程，有自己的 COM 公寓，不受主进程影响）
+- **KeyboardHelperDll 正常工作**（仅使用 `WH_KEYBOARD_LL`，不涉及 UIA）
+
+### SilentMonitor 键盘轮询路径
+
+- **`_poll_keyboard_events()` 只用 `ContextHelperClient`（EXE subprocess）**
+- 无需回退到 `ContextHelperDll`
+- 降级路径：`GetAsyncKeyState(Enter)` — 仅检测 Enter 键
+- **这个路径设计是合理的**：EXE 独立进程，不受 COM 公寓约束
 
 ## Branches
 
@@ -163,13 +180,20 @@ RecordingPipeline.run() Phase 6
 
 ## 已知问题
 
-1. **PortAudio + UIA DLL 初始化冲突**：`STATUS_DLL_INIT_FAILED (0xC0000142)` — PortAudio 初始化后，在新线程加载 `UIAutomationCore.dll` 可能触发进程崩溃。`audio_capture.py` 中 `was_portaudio_used()` 守卫标记此风险，`focus_context.py` 对其有检查。
-2. **Hook 线程阻塞 → Windows 静默解钩**：`keyboard_helper.cpp` 的 HookProc 如果同步调用 Python 超过 `LowLevelHooksTimeout`(~300ms)，Windows 静默卸载钩子（**已修复**：`keyboard_helper_dll.py` 增加 `_dispatch()` 包装层，hook 线程仅 0.1ms spawn 后返回）。
-3. **UIA COM 接口类型错误**：`injector.py` `CreateObject(clsid)` 返回 `POINTER(IUnknown)` 无 `GetFocusedElement` 方法（**已修复**：优先类型库加载 `IUIAutomation` + `finally` CoUninitialize）。
-4. **词库页缺少事件驱动刷新**：dictionary.html 在 `pipeline_done` 后不自动重新加载（**已修复**）。
-5. **双重 Hook 竞争**：旧架构中 Electron + Python 各装一个 WH_KEYBOARD_LL（**已修复**：Typeless 架构将唯一钩子移到 Python 端 ctypes DLL）。
-6. **N-API addon 不兼容 Electron 32**：`hotkey_addon.node` 的 Node ABI 与 Electron 内置 Node 不兼容（**已修复**：迁移到 Typeless DLL + ctypes）。
-7. **注入乱码 `fevhlbigktcps`**：`_release_modifiers()` 对未按下的键发送 KEYUP（**已修复**：加 `GetAsyncKeyState` 守卫）。
+### 已确认（审计验证）
+
+1. **DLL 的 UIA 函数因 COM 公寓模型不一致而崩溃**（STATUS_DLL_INIT_FAILED）— server.py 中 comtypes 设置 MTA，DLL 尝试 STA。`focus_context.py` 的 `was_portaudio_used()` 守卫只能部分缓解（PortAudio 也会设 MTA），但即使无 PortAudio，comtypes 导入后 COM 已初始化。**DLL 路径在 server.py 上下文中实质无效。**
+
+2. **Python UIA 降级路径（Path 3）在无焦点可编辑文本框时返回空** — `read_focus_text()` 调用 `CoCreateInstance` 创建 `CUIAutomation` 对象，但 `GetFocusedElement()` 在 VS Code / ZCode 等非标准编辑器中可能返回 None。`_get_focus_context_python()` 对 editable 的判断依赖 `focused_element_snapshot.editable` 的值，该值在无 UIA 焦点元素时为 None → `is_editable=False`。
+
+### 已修复（CHANGELOG 记录）
+
+3. **Hook 线程阻塞 → Windows 静默解钩** — 修复：`_dispatch()` 线程分发
+4. **UIA COM 接口类型错误** — 修复：类型库加载 + CoUninitialize
+5. **词库页缺少事件驱动刷新** — 修复：onBackendEvent 监听
+6. **双重 Hook 竞争** — 修复：Typeless 架构迁移
+7. **N-API addon 不兼容 Electron 32** — 修复：迁移到 Typeless DLL
+8. **注入乱码 fevhlbigktcps** — 修复：GetAsyncKeyState 守卫
 
 ## 不允许随意修改的模块
 
@@ -183,17 +207,17 @@ RecordingPipeline.run() Phase 6
 
 ## 最近重要提交
 
-- `0d69a98` — `backup: working local version after hotkey and lifecycle fixes`
-  - 稳定备份点，包含：第二次 Alt 失灵修复、UIA COM 修复、词库事件刷新、CoInitialize/CoUninitialize 保护
-
+- `1077cb7` — `docs: populate SayIt project handoff context`
 - `d7ac403` — `chore: add AI handoff workflow`
-  - 新建 AI 交接机制：AGENTS.md + .ai/ 目录（PROJECT_STATE / CURRENT_TASK / ZCODE_REPORT / TEST_RESULTS）
+  - 新建 AI 交接机制：AGENTS.md + .ai/ 目录
+- `0d69a98` — `backup: working local version after hotkey and lifecycle fixes`
+  - 稳定备份点：第二次 Alt 失灵修复、UIA COM 修复、词库事件刷新、CoInitialize/CoUninitialize 保护
 
 ## Configuration & Secrets
 
 - `.env` / `.env.*` — 不上传
 - `config.json` — 不上传
 - `*.db` / `*.sqlite` / `*.sqlite3` — 不上传
-- `*.wav` / `*.mp3` / `*.pcm` / `*.flac` / `*.ogg` / `*.aac` / `*.m4a` / `*.webm` — 不上传
+- `*.wav` / `*.mp3` / `*.pcm` — 不上传
 - `*.log` — 不上传
 - API keys, tokens — 不上传
