@@ -3,7 +3,17 @@
 
 ## 状态
 
-**READY**
+**DONE**
+
+## 备注
+
+桥梁已完成搭建，详情见：
+- `tools/agent_bridge/bridge.py` — 核心桥梁（29 单元测试全部通过）
+- `tools/agent_bridge/README.md` — 用户文档
+- `.ai/BRIDGE_DESIGN.md` — 设计文档
+- `tests/test_agent_bridge.py` — 29 个单元测试
+
+下一轮：如期望启用桥梁，运行 `start_bridge.bat` 启动轮询。
 
 ## 任务名称
 

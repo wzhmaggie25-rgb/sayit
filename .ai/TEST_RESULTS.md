@@ -1,12 +1,43 @@
 # Test Results
 > 最后一次更新：2026-06-26 14:54
 
-## 本轮说明
+## 本轮说明（第三轮）
+
+本轮为搭建桥梁第一版。**详细设计见 `.ai/BRIDGE_DESIGN.md`**。
+
+## 桥梁单元测试
+
+文件：`tests/test_agent_bridge.py`（29 个测试，全部通过）
+
+| Suite | Tests | Pass | Fail | Notes |
+|-------|-------|------|------|-------|
+| PreconditionTests | 6 | 6 | 0 | 安全检查：分支/脏目录/锁/状态/重复/无远程 |
+| ClaudeInvocationTests | 4 | 4 | 0 | Claude 调用/解析/JSON 容错/失败处理 |
+| LockTests | 3 | 3 | 0 | PID 锁获取释放/并发/残留覆盖 |
+| StateTests | 3 | 3 | 0 | 状态持久化：空/匹配/不同 SHA |
+| GitHelperTests | 7 | 7 | 0 | 辅助函数：repo/分支/脏/MERGE_HEAD/SHA |
+| EndToEndMockedTests | 1 | 1 | 0 | mock claude 全生命周期演练 |
+| IsTaskReadyTests | 4 | 4 | 0 | READY/BLOCKED/DONE/空 状态检测 |
+| BuildPromptTests | 1 | 1 | 0 | Prompt 包含任务文本和约束 |
+
+**合计：29/29 通过** ✅
+
+## 桥梁冒烟测试
+
+文件：`tests/smoke_agent_bridge.py`
+
+⚠️ **未执行**——冒烟测试需要真实调用 Claude Code（`claude -p`），将更新 `.ai/BRIDGE_SMOKE_TEST.md`。
+用户可在安全环境手动运行：
+```bash
+python tests/smoke_agent_bridge.py
+```
+
+## 本轮说明（第二轮）
 
 本轮为 ZCode 自动化能力评估（只读探查），**未运行业务代码测试**。
 所有调查结果见 `.ai/ZCODE_AUTOMATION_CAPABILITY.md`。
 
-## 环境能力扫描
+### 环境能力扫描
 
 | 项目 | 结果 | 方法 |
 |------|------|------|
@@ -142,3 +173,4 @@
 | EXE 通信 | 3 | 0 | 0 | 全部通过 |
 | PortAudio 守卫 | 2 | 0 | 0 | 正确跳/不跳 DLL |
 | Python UIA 降级 | 0 | 1 | 0 | 当前环境无法读取焦点文本 |
+| **桥梁单元测试** | **29** | **0** | **0** | **全部通过** |

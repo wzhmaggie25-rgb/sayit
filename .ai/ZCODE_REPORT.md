@@ -1,16 +1,54 @@
 # ZCode Report
 > 最后一次更新：2026-06-26 14:54
 
-## 接收到的任务（第二轮）
+## 接收到的任务（第三轮）
 
-只读检查 ZCode 的 CLI/Headless/MCP/URI Scheme 自动化能力，写入 `.ai/ZCODE_AUTOMATION_CAPABILITY.md`。
+读取 `.ai/CURRENT_TASK.md` 中的 READY 任务——搭建 SayIt 本地 AI 任务桥梁第一版
+（`tools/agent_bridge/`），每 30 秒轮询 GitHub，调用 Claude Code 非交互执行。
 
-重点：
-1. 是否有 `zcode` CLI 或 headless 模式
-2. ZCode 是否暴露 MCP 服务端
-3. Windows 注册表是否有 `zcode://` 协议处理器
-4. 本机有哪些可命令行调用的代码代理候选
-5. 不得读取/输出任何密钥和聊天内容
+### 范围
+- 新建桥梁代码、配置模板、启动脚本、设计文档
+- 新建测试文件（单元测试 + 冒烟脚本）
+- 更新 `.gitignore` 排除运行时文件
+- **不修改任何 SayIt 业务代码**
+
+### 创建的文件
+
+| 文件 | 说明 |
+|------|------|
+| `tools/agent_bridge/bridge.py` | 核心桥梁（~500 行） |
+| `tools/agent_bridge/bridge_config.example.json` | 配置模板 |
+| `tools/agent_bridge/README.md` | 用户文档 |
+| `start_bridge.bat` | 启动脚本 |
+| `.ai/BRIDGE_DESIGN.md` | 设计文档 |
+| `tests/test_agent_bridge.py` | 29 个单元测试 |
+| `tests/smoke_agent_bridge.py` | Claude 冒烟测试 |
+
+### 修改的文件
+
+| 文件 | 变更 |
+|------|------|
+| `.gitignore` | 新增桥梁运行时文件排除规则 |
+| `.ai/CURRENT_TASK.md` | 状态改为 DONE |
+| `.ai/ZCODE_REPORT.md` | 新增本轮记录 |
+| `.ai/TEST_RESULTS.md` | 新增桥梁测试结果 |
+
+### 桥梁核心行为
+
+1. 每 30 秒 `git fetch origin feature/silent-learning-stabilization`
+2. 安全检查：分支正确、工作目录干净、无进行中操作、可 ff-only、CURRENT_TASK 为 READY、未重复执行、无并发锁
+3. 通过后调用 `claude -p <prompt> --output-format json` (timeout=300s)
+4. Claude 执行任务、更新 .ai 报告、提交推送
+5. 更新状态文件、释放锁
+
+### 执行过的命令
+
+```bash
+# 单元测试
+python -m pytest tests/test_agent_bridge.py -v    # 29/29 通过
+
+# 注意：冒烟测试（真实 Claude）尚未执行
+```
 
 执行 `.ai/CURRENT_TASK.md` 中的"只读审计静默学习"任务。
 
@@ -154,5 +192,5 @@ python -c "..."  # PROJECT_ROOT 验证、server.py vs 独立脚本
 ## 当前提交ID
 
 ```
-f6ae3e7
+6173a8e
 ```

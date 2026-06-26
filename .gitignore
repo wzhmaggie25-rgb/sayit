@@ -5,6 +5,15 @@ __pycache__/
 node_modules/
 dist/
 *.db
+
+# Agent bridge runtime files (excluded from Git)
+tools/agent_bridge/bridge_config.json
+tools/agent_bridge/bridge.lock
+tools/agent_bridge/bridge_state.json
+tools/agent_bridge/bridge.log
+.ai/bridge_state.json
+tools/agent_bridge/__pycache__/
+.ai/BRIDGE_SMOKE_TEST.md
 .DS_Store
 venv/
 *.egg-info/

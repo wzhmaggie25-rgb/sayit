@@ -1,0 +1,12 @@
+{
+  "_comment": "Agent Bridge configuration. Local settings — excluded from Git.",
+  "branch": "feature/silent-learning-stabilization",
+  "remote": "origin",
+  "poll_interval_seconds": 30,
+  "claude_timeout_seconds": 300,
+  "claude_binary": "claude",
+  "log_level": "info",
+  "log_file": "tools/agent_bridge/bridge.log",
+  "lock_file": "tools/agent_bridge/bridge.lock",
+  "state_file": "tools/agent_bridge/bridge_state.json"
+}
