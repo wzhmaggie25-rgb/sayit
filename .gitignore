@@ -13,7 +13,6 @@ tools/agent_bridge/bridge_state.json
 tools/agent_bridge/bridge.log
 .ai/bridge_state.json
 tools/agent_bridge/__pycache__/
-.ai/BRIDGE_SMOKE_TEST.md
 .DS_Store
 venv/
 *.egg-info/

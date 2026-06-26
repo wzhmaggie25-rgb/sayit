@@ -8,6 +8,7 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ from pathlib import Path
 # Constants
 # ---------------------------------------------------------------------------
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TOOLS_DIR = PROJECT_ROOT / "tools" / "agent_bridge"
 AI_DIR = PROJECT_ROOT / ".ai"
@@ -37,6 +38,16 @@ DEFAULT_CONFIG = {
     "lock_file": str(TOOLS_DIR / "bridge.lock"),
     "state_file": str(TOOLS_DIR / "bridge_state.json"),
     "config_file": str(TOOLS_DIR / "bridge_config.json"),
+    "claude_allowed_tools": [
+        "Read",
+        "Edit",
+        "Write",
+        "Bash(git*)",
+        "Bash(python*)",
+        "Bash(pytest*)",
+        "Bash(claude*)",
+    ],
+    # "model": "",  # optional — if non-empty, passed as --model
 }
 
 _LOG_LEVELS = {
@@ -116,10 +127,11 @@ def resolve_project_root() -> Path:
 # Git helpers
 # ---------------------------------------------------------------------------
 
-def _git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
+def _git(args: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
     """Run a git command and return the CompletedProcess.
 
-    Raises RuntimeError on non-zero exit.
+    When *check* is True (default), raises RuntimeError on non-zero exit.
+    When *check* is False, returns the CompletedProcess regardless of exit code.
     """
     if cwd is None:
         cwd = PROJECT_ROOT
@@ -130,7 +142,7 @@ def _git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
         text=True,
         timeout=30,
     )
-    if result.returncode != 0:
+    if check and result.returncode != 0:
         raise RuntimeError(
             f"git {' '.join(args)} failed (exit {result.returncode}): "
             f"{result.stderr.strip()}"
@@ -176,32 +188,16 @@ def get_local_sha(path: Path | None = None) -> str:
     return result.stdout.strip()
 
 
-def fetch_remote(remote: str = "origin", branch: str | None = None, path: Path | None = None) -> bool:
+def fetch_remote(remote: str = "origin", branch: str | None = None, path: Path | None = None) -> None:
     """Fetch remote tracking branch.
 
-    Returns True if new commits were fetched (fast-forward possible), False if
-    already up-to-date.
+    Raises RuntimeError on failure.
     """
     cwd = path or PROJECT_ROOT
-    # Before fetching, record the local SHA of the remote-tracking branch to
-    # detect whether new commits arrive.
-    ref = f"refs/remotes/{remote}/{branch}" if branch else remote
-    try:
-        before = _git(["rev-parse", ref], cwd=cwd).stdout.strip()
-    except RuntimeError:
-        before = ""
-
     args = ["fetch", remote]
     if branch:
         args.append(branch)
     _git(args, cwd=cwd)
-
-    try:
-        after = _git(["rev-parse", ref], cwd=cwd).stdout.strip()
-    except RuntimeError:
-        after = ""
-
-    return before != after
 
 
 def can_fast_forward(remote: str = "origin", branch: str | None = None, path: Path | None = None) -> bool:
@@ -213,7 +209,6 @@ def can_fast_forward(remote: str = "origin", branch: str | None = None, path: Pa
     cwd = path or PROJECT_ROOT
     ref = f"{remote}/{branch}" if branch else remote
     try:
-        # We need the remote ref to exist locally.
         _git(["rev-parse", ref], cwd=cwd)
         _git(["merge-base", "--is-ancestor", "HEAD", ref], cwd=cwd)
         return True
@@ -234,12 +229,15 @@ def pull_ff_only(remote: str = "origin", branch: str | None = None, path: Path |
     return get_local_sha(cwd)
 
 
+def get_staged_files() -> list[str]:
+    """Return list of files that would be committed (git diff --cached --name-only)."""
+    result = _git(["diff", "--cached", "--name-only"])
+    return [l.strip() for l in result.stdout.splitlines() if l.strip()]
+
+
 # ---------------------------------------------------------------------------
 # Lock
 # ---------------------------------------------------------------------------
-
-_LOCK = object()  # sentinel for compare
-
 
 def acquire_lock(lock_file: str) -> bool:
     """Try to acquire a PID-based lock file.
@@ -289,6 +287,9 @@ def release_lock(lock_file: str) -> None:
 # ---------------------------------------------------------------------------
 # State persistence
 # ---------------------------------------------------------------------------
+
+State = dict  # internal type alias
+
 
 def _load_state(state_file: str) -> dict:
     path = Path(state_file)
@@ -347,13 +348,13 @@ def is_task_ready(task_text: str) -> bool:
 def claude_binary_path(config: dict) -> str:
     """Resolve Claude binary; raise if not found on PATH."""
     binary = config.get("claude_binary", "claude")
-    # On Windows, `where` returns the path; null_device suppresses stderr.
     try:
         subprocess.run(
             [binary, "--version"],
             capture_output=True,
             text=True,
             timeout=10,
+            cwd=PROJECT_ROOT,  # B: force cwd
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(
@@ -424,25 +425,74 @@ def call_claude(prompt: str, config: dict) -> subprocess.CompletedProcess:
     """Invoke Claude Code in non-interactive mode.
 
     Uses ``claude -p <prompt>`` with ``--output-format json``.
-    Returns the raw CompletedProcess.
+    Sets cwd=PROJECT_ROOT so Claude operates inside the SayIt repo.
     """
     binary = claude_binary_path(config)
     timeout = config.get("claude_timeout_seconds", 300)
+
     args = [binary, "-p", prompt, "--output-format", "json"]
 
-    logger.info("Invoking: %s (timeout=%ss)", " ".join(args[:3]) + " ...", timeout)
+    # E: add allowed tools for minimal permission
+    allowed = config.get("claude_allowed_tools", [])
+    if allowed:
+        args.append("--allowedTools")
+        args.extend(allowed)
+
+    # F: optional model override — only if user explicitly configured
+    model = config.get("model", "")
+    if model:
+        args.extend(["--model", model])
+
+    logger.info(
+        "Invoking: %s (timeout=%ss, cwd=%s)",
+        " ".join(args[:3]) + " ...",
+        timeout,
+        PROJECT_ROOT,
+    )
     result = subprocess.run(
         args,
         capture_output=True,
         text=True,
         timeout=timeout,
+        cwd=PROJECT_ROOT,  # B: force cwd
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Claude output parsing — D
+# ---------------------------------------------------------------------------
+
+def _try_parse_json(text: str) -> dict | None:
+    """Attempt to parse *text* as JSON.  Returns None on failure."""
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    # Try extracting from ```json...``` block
+    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+    if match:
+        try:
+            obj = json.loads(match.group(1).strip())
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 def parse_claude_result(result: subprocess.CompletedProcess) -> dict:
     """Parse Claude's stdout into a result dict.
 
+    Handles three formats:
+    1. Direct flat JSON:  {"ok": true, ...}
+    2. Envelope with `result` string field (Claude --output-format json)
+    3. Envelope with `is_error` field
     Returns a dict with at least ``{"ok": bool}``.
     """
     if result.returncode != 0:
@@ -454,27 +504,49 @@ def parse_claude_result(result: subprocess.CompletedProcess) -> dict:
         }
 
     stdout = result.stdout.strip() if result.stdout else ""
-    # Try to extract JSON from the output
-    # Claude may wrap json in ```json ... ``` blocks
-    json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", stdout, re.DOTALL)
-    if json_match:
-        json_str = json_match.group(1).strip()
-    else:
-        json_str = stdout
 
-    try:
-        parsed = json.loads(json_str)
-        if not isinstance(parsed, dict):
-            raise ValueError("Claude output is not a JSON object")
-        return parsed
-    except (json.JSONDecodeError, ValueError) as exc:
-        # The JSON parse failed — return the raw output for inspection
+    # 1. Try parsing top-level JSON directly
+    parsed = _try_parse_json(stdout)
+    if parsed is None:
         return {
             "ok": False,
             "phase": "parse",
-            "summary": f"Failed to parse Claude JSON output: {exc}",
+            "summary": "No valid JSON found in Claude output",
             "raw_stdout": stdout[:3000],
         }
+
+    # 2. If it has a top-level "ok" field, it's already the direct format
+    if "ok" in parsed:
+        return parsed
+
+    # 3. Envelope format: check the "result" field
+    result_text = parsed.get("result")
+    if result_text is not None and isinstance(result_text, str) and result_text.strip():
+        inner = _try_parse_json(result_text)
+        if inner is not None and "ok" in inner:
+            inner["_envelope_type"] = parsed.get("type", "")
+            inner["_session_id"] = parsed.get("session_id", "")
+            inner["_is_error"] = parsed.get("is_error", False)
+            return inner
+        # result field is a plain string, not JSON — wrap it
+        return {
+            "ok": not parsed.get("is_error", True),
+            "summary": result_text,
+            "_envelope_type": parsed.get("type", ""),
+            "_session_id": parsed.get("session_id", ""),
+            "_is_error": parsed.get("is_error", True),
+        }
+
+    # 4. Envelope with is_error field but no result
+    if "is_error" in parsed:
+        return {
+            "ok": not parsed["is_error"],
+            "summary": str(parsed.get("result", "")),
+            "_envelope_type": parsed.get("type", ""),
+        }
+
+    # 5. Unknown shape — return as-is, caller checks "ok"
+    return dict(parsed)
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +561,6 @@ def set_task_status(status: str, notes: str = "") -> None:
         return
 
     text = task_path.read_text(encoding="utf-8")
-    # Replace first occurrence of **READY** or **DONE** or **BLOCKED**
     new_text = re.sub(
         r"\*\*[A-Z]+\*\*",
         f"**{status}**",
@@ -500,71 +571,160 @@ def set_task_status(status: str, notes: str = "") -> None:
     logger.info("Set CURRENT_TASK status to %s", status)
 
 
+def write_run_report(status: str, reason: str, details: str = "") -> None:
+    """Write .ai/BRIDGE_RUN_REPORT.md with execution status."""
+    report = AI_DIR / "BRIDGE_RUN_REPORT.md"
+    report.write_text(
+        f"# Bridge Run Report\n"
+        f"\n"
+        f"**Status:** {status}\n"
+        f"**Timestamp:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"**Reason:** {reason}\n"
+        f"**Details:** {details[:2000]}\n",
+        encoding="utf-8",
+    )
+    logger.info("Wrote BRIDGE_RUN_REPORT.md (status=%s)", status)
+
+
 # ---------------------------------------------------------------------------
-# Main orchestration
+# H: BLOCKED commit + push
+# ---------------------------------------------------------------------------
+
+def commit_and_push_blocked(reason: str, result_summary: str) -> bool:
+    """Commit a BLOCKED status + run report to GitHub, then push.
+
+    Only stages .ai/CURRENT_TASK.md and .ai/BRIDGE_RUN_REPORT.md.
+    Does NOT include any unintended Claude changes.
+    Returns True on success.
+    """
+    try:
+        # Write report and set status locally
+        write_run_report("BLOCKED", reason, result_summary)
+        set_task_status("BLOCKED")
+
+        # Stage ONLY .ai files
+        r = subprocess.run(
+            ["git", "add", ".ai/CURRENT_TASK.md", ".ai/BRIDGE_RUN_REPORT.md"],
+            cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            logger.error("git add for BLOCKED failed: %s", r.stderr)
+            return False
+
+        # Verify only our files are staged
+        staged = get_staged_files()
+        extra = [f for f in staged if f not in (".ai/CURRENT_TASK.md", ".ai/BRIDGE_RUN_REPORT.md")]
+        if extra:
+            logger.warning("Extra files staged for BLOCKED commit: %s — unshallowing", extra)
+            subprocess.run(
+                ["git", "reset", "HEAD", "--"] + extra,
+                cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=30,
+            )
+
+        r = subprocess.run(
+            ["git", "commit", "-m", "chore: bridge BLOCKED"],
+            cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            # If nothing to commit (already BLOCKED), that's OK
+            if "nothing to commit" in r.stderr or "nothing to commit" in r.stdout:
+                logger.info("No new changes for BLOCKED commit (already up-to-date)")
+                return True
+            logger.error("git commit for BLOCKED failed: %s", r.stderr)
+            return False
+
+        r = subprocess.run(
+            ["git", "push"],
+            cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=60,
+        )
+        if r.returncode != 0:
+            logger.error("git push for BLOCKED failed: %s", r.stderr)
+            return False
+
+        logger.info("BLOCKED status committed and pushed to remote")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to report BLOCKED: %s", exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Main orchestration — C: redesigned
 # ---------------------------------------------------------------------------
 
 def check_preconditions(config: dict) -> str | None:
-    """Check all preconditions before executing a task.
+    """Check preconditions, fetch remote, pull if needed, return task SHA.
 
-    Returns None if all checks pass, or a human-readable description of the
-    first failing check.
+    Returns None if no task should be attempted (already logged).
+    Returns a 40-char SHA if a READY, unprocessed task exists.
+
+    New design (C):
+    - Always fetch; pull only if ff-safe.
+    - Regardless of whether new commits arrived, read CURRENT_TASK.md.
+    - If READY and SHA not processed → execute.
     """
     branch = config["branch"]
     remote = config["remote"]
 
-    # 1. Is this a git repo?
+    # 1. Git repo
     if not is_git_repo():
-        return "Not a Git repository"
+        logger.warning("Not a Git repository")
+        return None
 
-    # 2. Correct branch?
+    # 2. Correct branch
     try:
-        current_branch = get_current_branch()
+        current = get_current_branch()
     except RuntimeError as exc:
-        return f"Cannot determine branch: {exc}"
-    if current_branch != branch:
-        return f"Wrong branch: {current_branch} (expected {branch})"
+        logger.warning("Cannot determine branch: %s", exc)
+        return None
+    if current != branch:
+        logger.info("Wrong branch: %s (expected %s)", current, branch)
+        return None
 
-    # 3. Clean working tree?
+    # 3. Clean working tree
     if not is_working_directory_clean():
-        return "Working directory has uncommitted changes"
+        logger.info("Working directory has uncommitted changes")
+        return None
 
-    # 4. In-progress merge/rebase?
+    # 4. No in-progress operation
     if has_in_progress_operation():
-        return "Merge/rebase/cherry-pick in progress"
+        logger.info("Merge/rebase/cherry-pick in progress")
+        return None
 
-    # 5. Fetch remote to see if there are changes
+    # 5. Fetch remote
     try:
-        new_commits = fetch_remote(remote, branch)
+        fetch_remote(remote, branch)
     except RuntimeError as exc:
-        return f"git fetch failed: {exc}"
+        logger.warning("git fetch failed: %s", exc)
+        return None
 
-    if not new_commits:
-        return None  # No actionable changes — silent wait
+    # 6. If remote ahead and ff-only possible, pull
+    if can_fast_forward(remote, branch):
+        try:
+            pull_ff_only(remote, branch)
+            logger.info("Pulled fast-forward")
+        except RuntimeError as exc:
+            logger.warning("git pull --ff-only failed: %s", exc)
+            return None
 
-    # 6. Can fast-forward?
-    if not can_fast_forward(remote, branch):
-        return "Local branch has diverged — cannot fast-forward"
-
-    # 7. Pull
-    try:
-        new_sha = pull_ff_only(remote, branch)
-    except RuntimeError as exc:
-        return f"git pull --ff-only failed: {exc}"
-
-    # 8. Is CURRENT_TASK.md READY?
+    # 7. Read CURRENT_TASK.md — always (C: not gated on new commits)
     task_text = read_current_task()
     if not task_text:
-        return "CURRENT_TASK.md not found"
+        logger.info("CURRENT_TASK.md not found")
+        return None
     if not is_task_ready(task_text):
-        return "CURRENT_TASK status is not READY"
+        logger.info("CURRENT_TASK status is not READY")
+        return None
+
+    # 8. Task fingerprint = current HEAD SHA (C)
+    task_sha = get_local_sha()
 
     # 9. Already processed?
-    state_file = config["state_file"]
-    if is_task_already_processed(state_file, new_sha):
-        return f"Task SHA {new_sha[:12]} already processed"
+    if is_task_already_processed(config["state_file"], task_sha):
+        logger.info("Task SHA %s already processed", task_sha[:12])
+        return None
 
-    return new_sha  # Running value = new SHA
+    return task_sha
 
 
 def run_claude_task(task_sha: str, config: dict) -> dict:
@@ -601,40 +761,48 @@ def run_claude_task(task_sha: str, config: dict) -> dict:
 def run_once(config: dict) -> bool:
     """Execute a single poll-check-run cycle.
 
-    Returns True if a task was executed, False otherwise.
+    New design (C, H):
+    - Preconditions → if fail, log and return False (don't mark processed).
+    - If task SHA → execute Claude.
+    - Success → mark processed, return True.  Claude already committed DONE.
+    - Failure → mark processed as BLOCKED, commit BLOCKED to remote, return True.
+    - No task → return False (nothing done).
     """
-    # Lock
     lock_file = config["lock_file"]
     if not acquire_lock(lock_file):
         logger.warning("Another bridge instance is running (lock file %s)", lock_file)
         return False
 
     try:
-        task_sha_or_reason = check_preconditions(config)
+        task_sha = check_preconditions(config)
 
-        if task_sha_or_reason is None:
-            logger.info("No actionable changes — waiting")
-            mark_task_processed(config["state_file"], get_local_sha())
+        if task_sha is None:
+            # C: No task to do — don't mark anything processed
             return False
 
-        # If it's an error string, log it and bail
-        if not re.match(r"^[0-9a-f]{40}$", task_sha_or_reason):
-            logger.info("Precondition not met: %s", task_sha_or_reason)
-            return False
-
-        # We have a new task → execute
-        result = run_claude_task(task_sha_or_reason, config)
+        # We have a task → execute
+        result = run_claude_task(task_sha, config)
 
         if result.get("ok"):
             logger.info("Task completed successfully")
-            mark_task_processed(config["state_file"], task_sha_or_reason, result)
-            set_task_status("DONE")
+            # H: On success, Claude already committed+push DONE.
+            # Bridge only updates local state.
+            mark_task_processed(config["state_file"], task_sha, result)
+            return True
         else:
-            logger.error("Task failed or blocked: %s", result.get("summary", ""))
-            mark_task_processed(config["state_file"], task_sha_or_reason, result)
-            set_task_status("BLOCKED", result.get("summary", ""))
+            # H: On failure, commit BLOCKED to remote
+            summary = result.get("summary", "")[:500]
+            reason = result.get("phase", "unknown")
+            logger.error("Task failed (phase=%s): %s", reason, summary)
+            blocked_ok = commit_and_push_blocked(reason, summary)
+            if not blocked_ok:
+                logger.warning(
+                    "BLOCKED report could not be pushed — remote may not see it. "
+                    "Check local files: .ai/CURRENT_TASK.md, .ai/BRIDGE_RUN_REPORT.md"
+                )
+            mark_task_processed(config["state_file"], task_sha, result)
+            return True
 
-        return True
     finally:
         release_lock(lock_file)
 
@@ -675,7 +843,6 @@ def main(args: list[str] | None = None) -> int:
     if args is None:
         args = sys.argv[1:]
 
-    # Quick flags
     if "--version" in args:
         print(f"agent-bridge v{VERSION}")
         return 0

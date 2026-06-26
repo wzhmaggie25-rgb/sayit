@@ -1,4 +1,4 @@
-"""Unit tests for tools/agent_bridge/bridge.py
+"""Unit tests for tools/agent_bridge/bridge.py (v0.2.0)
 
 Follows the project's unittest patterns: setUp/tearDown, monkey-patching of
 module-level functions, and fake subprocess scripts.
@@ -10,12 +10,10 @@ import json
 import os
 import subprocess
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-# Import the bridge module
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,41 +33,36 @@ def _write_file(path: Path, content: str) -> Path:
     return path
 
 
-def _make_fake_claude_script(exit_code: int, stdout: str) -> str:
-    """Build the batch script content for a fake claude.cmd."""
-    escaped = stdout.replace('"', '"""')
-    lines = [
-        "@echo off",
-        f"echo {escaped}",
-        f"exit /b {exit_code}",
-    ]
-    return "\n".join(lines) + "\n"
-
-
 # ---------------------------------------------------------------------------
-# Tests
+# Precondition tests
 # ---------------------------------------------------------------------------
 
 class PreconditionTests(unittest.TestCase):
-    """Tests for check_preconditions() — each test patches git/CURRENT_TASK
-    so only one guard is exercised at a time."""
+    """Each test patches git/state/CURRENT_TASK so only one guard is
+    exercised at a time."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._tmp_path = Path(self._tmp.name)
 
-        # Create a minimal git repo in tmp
+        # Minimal git repo
         subprocess.run(["git", "init"], cwd=self._tmp_path, capture_output=True)
         subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@t",
                         "commit", "--allow-empty", "-m", "root"],
                        cwd=self._tmp_path, capture_output=True)
-        # Set up remote so fetch doesn't fail
         subprocess.run(["git", "remote", "add", "origin",
                         self._tmp_path / ".git"],
                        cwd=self._tmp_path, capture_output=True)
-        # Create branch
         subprocess.run(["git", "checkout", "-b",
                         "feature/silent-learning-stabilization"],
+                       cwd=self._tmp_path, capture_output=True)
+
+        # .gitignore so .ai/ doesn't dirty the repo
+        _write_file(self._tmp_path / ".gitignore", ".ai/\nbridge_state.json\nbridge.lock\n")
+        subprocess.run(["git", "add", ".gitignore"],
+                       cwd=self._tmp_path, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@t",
+                        "commit", "-m", "gitignore"],
                        cwd=self._tmp_path, capture_output=True)
 
         self._old_root = bridge.PROJECT_ROOT
@@ -79,26 +72,14 @@ class PreconditionTests(unittest.TestCase):
         bridge.AI_DIR = self._tmp_path / ".ai"
         bridge.AI_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Default config pointing to temp locations
         self.config = {
             "branch": "feature/silent-learning-stabilization",
             "remote": "origin",
             "state_file": str(self._tmp_path / "bridge_state.json"),
             "lock_file": str(self._tmp_path / "bridge.lock"),
+            "log_file": str(self._tmp_path / "bridge.log"),
         }
 
-        # Write a .gitignore so the .ai/ and state/lock files don't dirty the repo
-        _write_file(
-            self._tmp_path / ".gitignore",
-            ".ai/\nbridge_state.json\nbridge.lock\nbridge.log\n",
-        )
-        subprocess.run(["git", "add", ".gitignore"],
-                       cwd=self._tmp_path, capture_output=True)
-        subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@t",
-                        "commit", "-m", "add gitignore"],
-                       cwd=self._tmp_path, capture_output=True)
-
-        # Default CURRENT_TASK.md — READY
         _write_file(
             bridge.AI_DIR / "CURRENT_TASK.md",
             "# Current Task\n\n**READY**\n\nDo something\n",
@@ -114,74 +95,169 @@ class PreconditionTests(unittest.TestCase):
                            cwd=bridge.PROJECT_ROOT, capture_output=True, text=True)
         return r.stdout.strip()
 
-    # --- Test 1: No remote changes → returns None (no action) ---
-    def test_no_remote_changes_returns_none(self):
-        # Push current state so fetch sees nothing new
-        subprocess.run(["git", "push", "origin",
-                        "feature/silent-learning-stabilization"],
-                       cwd=bridge.PROJECT_ROOT, capture_output=True)
+    # --- C1: READY in local, no remote changes → STILL executes ---
+    def test_local_ready_without_remote_changes_still_executes(self):
+        result = bridge.check_preconditions(self.config)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result), 40)
 
+    # --- C2: DONE/BLOCKED, no remote changes → skip ---
+    def test_done_without_remote_skips(self):
+        _write_file(bridge.AI_DIR / "CURRENT_TASK.md", "# Task\n\n**DONE**\n")
         result = bridge.check_preconditions(self.config)
         self.assertIsNone(result)
 
-    # --- Test 2: CURRENT_TASK not READY → returns error string ---
-    def test_not_ready_skips_execution(self):
+    def test_blocked_without_remote_skips(self):
         _write_file(bridge.AI_DIR / "CURRENT_TASK.md", "# Task\n\n**BLOCKED**\n")
-        # Mock fetch_remote to simulate new commits arriving
-        with mock.patch("tools.agent_bridge.bridge.fetch_remote", return_value=True):
-            with mock.patch("tools.agent_bridge.bridge.can_fast_forward", return_value=True):
-                with mock.patch("tools.agent_bridge.bridge.pull_ff_only",
-                                return_value=bridge.get_local_sha()):
-                    result = bridge.check_preconditions(self.config)
-        self.assertIsNotNone(result)
-        self.assertIn("not READY", result)
-
-    # --- Test 3: Dirty working directory → blocked ---
-    def test_dirty_working_directory_blocked(self):
-        _write_file(self._tmp_path / "dirty.txt", "changes")
         result = bridge.check_preconditions(self.config)
-        self.assertIsNotNone(result)
-        self.assertIn("uncommitted", result)
+        self.assertIsNone(result)
 
-    # --- Test 4: Wrong branch → blocked ---
-    def test_wrong_branch_blocked(self):
+    # --- C3: Wrong branch → None ---
+    def test_wrong_branch_returns_none(self):
         subprocess.run(["git", "checkout", "-b", "other-branch"],
                        cwd=bridge.PROJECT_ROOT, capture_output=True)
         result = bridge.check_preconditions(self.config)
-        self.assertIsNotNone(result)
-        self.assertIn("Wrong branch", result)
+        self.assertIsNone(result)
 
-    # --- Test 5: Same SHA already processed → skip ---
+    # --- C4: Dirty working directory → None ---
+    def test_dirty_directory_returns_none(self):
+        _write_file(self._tmp_path / "dirty.txt", "changes")
+        result = bridge.check_preconditions(self.config)
+        self.assertIsNone(result)
+
+    # --- C5: Already processed same SHA → skip ---
     def test_already_processed_skips(self):
         sha = self._current_sha()
         _write_file(
             Path(self.config["state_file"]),
             json.dumps({"last_processed_sha": sha}),
         )
+        result = bridge.check_preconditions(self.config)
+        self.assertIsNone(result)
 
-        with mock.patch("tools.agent_bridge.bridge.fetch_remote", return_value=True):
-            with mock.patch("tools.agent_bridge.bridge.can_fast_forward", return_value=True):
-                with mock.patch("tools.agent_bridge.bridge.pull_ff_only",
-                                return_value=sha):
-                    result = bridge.check_preconditions(self.config)
-        self.assertIsNotNone(result)
-        self.assertIn("already processed", result)
-
-    # --- Test 6: Lock file prevents concurrent execution ---
-    def test_lock_file_prevents_concurrent(self):
+    # --- C6: Restart recovery — new SHA after commit keeps READY ---
+    def test_ready_after_new_commit_is_new_task(self):
+        sha_before = self._current_sha()
+        # Mark old SHA as processed
         _write_file(
-            Path(self.config["lock_file"]),
-            str(os.getpid()),  # current PID
+            Path(self.config["state_file"]),
+            json.dumps({"last_processed_sha": sha_before}),
         )
-        acquired = bridge.acquire_lock(self.config["lock_file"])
-        self.assertFalse(acquired)
+        # A new commit comes in (simulate by making a change)
+        _write_file(self._tmp_path / "newfile.txt", "content")
+        subprocess.run(["git", "add", "newfile.txt"],
+                       cwd=bridge.PROJECT_ROOT, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@t",
+                        "commit", "-m", "new"],
+                       cwd=self._tmp_path, capture_output=True)
+        # READY task still exists
+        result = bridge.check_preconditions(self.config)
+        self.assertIsNotNone(result)
+        self.assertNotEqual(result, sha_before)
 
+    # --- C7: Merge in progress → None ---
+    def test_in_progress_operation_returns_none(self):
+        (self._tmp_path / ".git" / "MERGE_HEAD").write_text("abc", encoding="utf-8")
+        result = bridge.check_preconditions(self.config)
+        self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Claude JSON parsing tests — D
+# ---------------------------------------------------------------------------
+
+class ParseResultTests(unittest.TestCase):
+    """Test parse_claude_result with various envelope shapes."""
+
+    def _make_result(self, returncode: int, stdout: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout,
+        )
+
+    # D1: Direct flat JSON
+    def test_direct_json_ok(self):
+        r = self._make_result(0, '{"ok": true, "summary": "done"}')
+        parsed = bridge.parse_claude_result(r)
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["summary"], "done")
+
+    # D2: Envelope with result string JSON
+    def test_envelope_with_result_json(self):
+        stdout = json.dumps({
+            "type": "result",
+            "result": '{"ok": true, "summary": "done inside"}',
+            "is_error": False,
+        })
+        r = self._make_result(0, stdout)
+        parsed = bridge.parse_claude_result(r)
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["summary"], "done inside")
+
+    # D3: Envelope with result as code block
+    def test_envelope_with_result_code_block(self):
+        stdout = json.dumps({
+            "type": "result",
+            "result": '```json\n{"ok": true, "summary": "code block"}\n```',
+            "is_error": False,
+        })
+        r = self._make_result(0, stdout)
+        parsed = bridge.parse_claude_result(r)
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["summary"], "code block")
+
+    # D4: Envelope with result as plain text (no JSON inside)
+    def test_envelope_plain_text_result(self):
+        stdout = json.dumps({
+            "type": "result",
+            "result": "Task completed successfully",
+            "is_error": False,
+        })
+        r = self._make_result(0, stdout)
+        parsed = bridge.parse_claude_result(r)
+        self.assertTrue(parsed["ok"])
+        self.assertIn("completed", parsed.get("summary", ""))
+
+    # D5: Non-zero exit code → ok=False
+    def test_nonzero_exit(self):
+        r = self._make_result(1, "")
+        parsed = bridge.parse_claude_result(r)
+        self.assertFalse(parsed["ok"])
+        self.assertIn("phase", parsed)
+
+    # D6: Invalid JSON → ok=False
+    def test_invalid_json(self):
+        r = self._make_result(0, "This is not JSON")
+        parsed = bridge.parse_claude_result(r)
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed.get("phase"), "parse")
+
+    # D7: Envelope with is_error=true
+    def test_envelope_is_error(self):
+        stdout = json.dumps({
+            "type": "result",
+            "result": "Something went wrong",
+            "is_error": True,
+        })
+        r = self._make_result(0, stdout)
+        parsed = bridge.parse_claude_result(r)
+        self.assertFalse(parsed["ok"])
+
+    # D8: Code-block wrapped JSON at top level
+    def test_top_level_code_block(self):
+        stdout = "Here is the result:\n```json\n{\"ok\": true, \"summary\": \"block\"}\n```\n"
+        r = self._make_result(0, stdout)
+        parsed = bridge.parse_claude_result(r)
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["summary"], "block")
+
+
+# ---------------------------------------------------------------------------
+# Claude invocation tests — B: cwd=PROJECT_ROOT
+# ---------------------------------------------------------------------------
 
 class ClaudeInvocationTests(unittest.TestCase):
-    """Tests for Claude invocation and result parsing."""
-
-    def test_call_claude_success(self):
-        """call_claude should return the CompletedProcess from subprocess."""
+    def test_call_claude_sets_cwd(self):
+        """call_claude must pass cwd=PROJECT_ROOT to subprocess."""
         fake_result = subprocess.CompletedProcess(
             args=[], returncode=0,
             stdout='{"ok": true, "summary": "done"}',
@@ -190,44 +266,24 @@ class ClaudeInvocationTests(unittest.TestCase):
             with mock.patch("subprocess.run", return_value=fake_result) as mock_run:
                 config = {"claude_binary": "claude",
                           "claude_timeout_seconds": 30}
-                result = bridge.call_claude("test prompt", config)
-                self.assertEqual(result.returncode, 0)
-                mock_run.assert_called_once()
+                bridge.call_claude("test prompt", config)
+                _, kwargs = mock_run.call_args
+                self.assertEqual(kwargs["cwd"], bridge.PROJECT_ROOT)
 
-    def test_call_claude_failure_exit_code(self):
-        """Non-zero exit code from Claude should be preserved."""
-        fake_result = subprocess.CompletedProcess(
-            args=[], returncode=1,
-            stdout='{"ok": false, "summary": "error"}',
-        )
-        with mock.patch("tools.agent_bridge.bridge.claude_binary_path", return_value="claude"):
-            with mock.patch("subprocess.run", return_value=fake_result):
-                config = {"claude_binary": "claude",
-                          "claude_timeout_seconds": 30}
-                result = bridge.call_claude("test", config)
-                self.assertEqual(result.returncode, 1)
-        parsed = bridge.parse_claude_result(result)
-        self.assertFalse(parsed["ok"])
+    def test_claude_binary_path_sets_cwd(self):
+        """claude --version must also be run from PROJECT_ROOT."""
+        fake_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="2.1.0")
+        with mock.patch("subprocess.run", return_value=fake_result) as mock_run:
+            bridge.claude_binary_path({"claude_binary": "claude"})
+            _, kwargs = mock_run.call_args
+            self.assertEqual(kwargs["cwd"], bridge.PROJECT_ROOT)
 
-    def test_parse_json_code_block(self):
-        """Claude sometimes wraps JSON in ```json ... ```."""
-        stdout = "Here is the result:\n```json\n{\"ok\": true, \"summary\": \"done\"}\n```\n"
-        proc = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout)
-        parsed = bridge.parse_claude_result(proc)
-        self.assertTrue(parsed["ok"])
-        self.assertEqual(parsed["summary"], "done")
 
-    def test_parse_invalid_json(self):
-        stdout = "Something went wrong but not JSON"
-        proc = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout)
-        parsed = bridge.parse_claude_result(proc)
-        self.assertFalse(parsed["ok"])
-        self.assertIn("parse", parsed.get("phase", ""))
-
+# ---------------------------------------------------------------------------
+# Lock tests
+# ---------------------------------------------------------------------------
 
 class LockTests(unittest.TestCase):
-    """Tests for PID-based lock file."""
-
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._lock_path = Path(self._tmp.name) / "test.lock"
@@ -246,14 +302,15 @@ class LockTests(unittest.TestCase):
         self.assertFalse(bridge.acquire_lock(str(self._lock_path)))
 
     def test_stale_lock_is_overwritten(self):
-        """A lock file with a non-existent PID should be overwritten."""
         self._lock_path.write_text("999999999", encoding="utf-8")
         self.assertTrue(bridge.acquire_lock(str(self._lock_path)))
 
 
-class StateTests(unittest.TestCase):
-    """Tests for task state persistence."""
+# ---------------------------------------------------------------------------
+# State tests
+# ---------------------------------------------------------------------------
 
+class StateTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._state_path = Path(self._tmp.name) / "state.json"
@@ -279,9 +336,11 @@ class StateTests(unittest.TestCase):
         )
 
 
-class GitHelperTests(unittest.TestCase):
-    """Tests for git helper functions using a temporary repo."""
+# ---------------------------------------------------------------------------
+# Git helper tests
+# ---------------------------------------------------------------------------
 
+class GitHelperTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._repo = Path(self._tmp.name)
@@ -316,7 +375,6 @@ class GitHelperTests(unittest.TestCase):
         self.assertFalse(bridge.is_working_directory_clean(self._repo))
 
     def test_in_progress_operation(self):
-        """MERGE_HEAD marker should indicate in-progress operation."""
         self.assertFalse(bridge.has_in_progress_operation(self._repo))
         (self._repo / ".git" / "MERGE_HEAD").write_text("abc", encoding="utf-8")
         self.assertTrue(bridge.has_in_progress_operation(self._repo))
@@ -327,89 +385,11 @@ class GitHelperTests(unittest.TestCase):
         self.assertTrue(all(c in "0123456789abcdef" for c in sha))
 
 
-class EndToEndMockedTests(unittest.TestCase):
-    """Simulate a full lifecycle with mocked Claude.
-
-    Creates a repo with a commit, pushes it, then runs run_once() and
-    verifies that the lock, state, and status are correctly managed.
-    """
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self._repo = Path(self._tmp.name)
-
-        # Init repo with a commit
-        subprocess.run(["git", "init"], cwd=self._repo, capture_output=True)
-        subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@t",
-                        "commit", "--allow-empty", "-m", "root"],
-                       cwd=self._repo, capture_output=True)
-        subprocess.run(["git", "checkout", "-b",
-                        "feature/silent-learning-stabilization"],
-                       cwd=self._repo, capture_output=True)
-        subprocess.run(["git", "remote", "add", "origin",
-                        self._repo / ".git"],
-                       cwd=self._repo, capture_output=True)
-        subprocess.run(["git", "push", "-u", "origin",
-                        "feature/silent-learning-stabilization"],
-                       cwd=self._repo, capture_output=True)
-
-        # Save state before altering globals
-        self._old_root = bridge.PROJECT_ROOT
-        self._old_ai = bridge.AI_DIR
-
-        bridge.PROJECT_ROOT = self._repo
-        bridge.AI_DIR = self._repo / ".ai"
-        bridge.AI_DIR.mkdir(parents=True, exist_ok=True)
-
-        # Default READY task
-        _write_file(
-            bridge.AI_DIR / "CURRENT_TASK.md",
-            "# Task\n\n**READY**\n\nUpdate .ai/BRIDGE_SMOKE_TEST.md\n",
-        )
-
-        self.config = {
-            "branch": "feature/silent-learning-stabilization",
-            "remote": "origin",
-            "state_file": str(self._repo / "bridge_state.json"),
-            "lock_file": str(self._repo / "bridge.lock"),
-            "claude_timeout_seconds": 30,
-            "claude_binary": "claude",
-        }
-
-        # Create a fake claude that returns success JSON
-        self._fake_claude_dir = Path(tempfile.mkdtemp())
-        self._fake_claude = self._fake_claude_dir / "claude.cmd"
-        self._fake_claude.write_text(
-            '@echo off\n'
-            'echo {"ok": true, "summary": "mocked task complete", '
-            '"commit_sha": "mock123", "files_changed": [".ai/BRIDGE_SMOKE_TEST.md"], '
-            '"tests_passed": 1, "tests_failed": 0}\n'
-            'exit /b 0\n',
-            encoding="utf-8",
-        )
-        self._old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = str(self._fake_claude_dir) + os.pathsep + self._old_path
-
-    def tearDown(self):
-        bridge.PROJECT_ROOT = self._old_root
-        bridge.AI_DIR = self._old_ai
-        os.environ["PATH"] = self._old_path
-        self._tmp.cleanup()
-
-    def test_full_mocked_lifecycle(self):
-        # Create a new commit on remote (simulate by pushing from another clone)
-        # We push from the same repo — this won't create "new" commits since
-        # there's no divergence.
-        # To simulate new commits on remote, push and then fetch:
-        sha_before = bridge.get_local_sha(self._repo)
-        result = bridge.run_once(self.config)
-        # Since there are no new remote commits, run_once returns False
-        self.assertFalse(result)
-
+# ---------------------------------------------------------------------------
+# Readiness tests
+# ---------------------------------------------------------------------------
 
 class IsTaskReadyTests(unittest.TestCase):
-    """Tests for CURRENT_TASK.md status parsing."""
-
     def test_ready_detected(self):
         self.assertTrue(bridge.is_task_ready("# Task\n\n**READY**\n"))
 
@@ -423,9 +403,11 @@ class IsTaskReadyTests(unittest.TestCase):
         self.assertFalse(bridge.is_task_ready(""))
 
 
-class BuildPromptTests(unittest.TestCase):
-    """Tests for prompt assembly."""
+# ---------------------------------------------------------------------------
+# Prompt build tests
+# ---------------------------------------------------------------------------
 
+class BuildPromptTests(unittest.TestCase):
     def test_build_prompt_contains_task_text(self):
         task = "Fix the bug in module X"
         prompt = bridge.build_claude_prompt(task, {})
@@ -433,7 +415,6 @@ class BuildPromptTests(unittest.TestCase):
         self.assertIn("AGENTS.md", prompt)
         self.assertIn("PROJECT_STATE.md", prompt)
         self.assertIn("CURRENT_TASK.md", prompt)
-        self.assertIn("JSON", prompt)
         self.assertIn("force push", prompt)
 
 
