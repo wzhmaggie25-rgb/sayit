@@ -1,5 +1,26 @@
 # Test Results
-> 最后一次更新：2026-06-26 15:56
+> 最后一次更新：2026-06-26 16:12
+
+## 本轮说明（第五轮）
+
+修复 Agent Bridge 快捷启动：`start_bridge.bat` 闪退修复 + 桌面快捷方式安装脚本。
+**不修改 SayIt 业务代码**。
+
+## 启动器验证
+
+| 验证项 | 结果 |
+|--------|------|
+| `start_bridge.bat --version` 输出横幅 + 版本号 | ✅ |
+| `start_bridge.bat --once` 输出 `Agent Bridge v0.2.0 starting` | ✅ |
+| 自动检测 `py -3` (Python 3.12) | ✅ |
+| `.git` 不存在时错误停留 | ✅ |
+| `bridge.py` 不存在时错误停留 | ✅ |
+| 轮询模式输出 `Waiting 30s...` | ✅ |
+| `install_bridge_shortcut.bat` 安装成功 | ✅ |
+| 桌面快捷方式 `SayIt AI Bridge.lnk` 存在 | ✅ |
+| 快捷方式目标 = `cmd.exe /k start_bridge.bat` | ✅ |
+| 快捷方式起始目录 = 仓库根 | ✅ |
+| `pause` 保持窗口不闪退 | ✅ |
 
 ## 本轮说明（第四轮）
 

@@ -1,9 +1,49 @@
 # ZCode Report
-> 最后一次更新：2026-06-26 15:56
+> 最后一次更新：2026-06-26 16:12
 
-## 接收到的任务（第四轮）
+## 接收到的任务（第五轮）
 
-修复 Agent Bridge v0.1.0 的 9 个关键问题（A–H）并执行真实 Claude Code 冒烟测试。
+修复 SayIt Agent Bridge 的快捷启动问题：`start_bridge.bat` 窗口闪退、添加桌面快捷方式安装。
+
+### 范围
+- 分析闪退根因：UTF-8 编码 + 非 ASCII 字符 + LF 行尾 → CMD 错误解析
+- 重写 `start_bridge.bat` 为纯 ASCII / CRLF，自动检测 Python（`py -3` → `python` → 3.12 路径），错误时 `pause` 停留
+- 新建 `tools/agent_bridge/install_shortcut.ps1` — 桌面快捷方式安装脚本
+- 新建 `install_bridge_shortcut.bat` — 双击安装入口
+- 不修改 SayIt 业务代码
+
+### 闪退根因
+
+| 因素 | 旧版本 | 新版本 |
+|------|--------|--------|
+| 编码 | UTF-8（含特殊字符 `™`） | 纯 ASCII |
+| 行尾 | LF | CRLF |
+| Python 检测 | 固定 `python` | `py -3` → `python` → 3.12 路径 |
+| 窗口保持 | 正常退出时无 `pause` | 总是 `pause` 停留 |
+
+### 快捷方式安装
+
+脚本 `install_bridge_shortcut.bat`（或直接双击）：
+- 调用 `tools/agent_bridge/install_shortcut.ps1`
+- 创建桌面快捷方式 `SayIt AI Bridge.lnk`
+- 目标：`cmd.exe /k "D:\code\sayit_zcode\start_bridge.bat"`
+- 起始目录：仓库根目录
+- 窗口样式：正常（WindowStyle=1）
+- 无需管理员权限
+
+### 实际验证
+
+| 验证项 | 结果 |
+|--------|------|
+| `start_bridge.bat --version` 输出横幅 + 版本 | ✅ |
+| `start_bridge.bat --once` 输出 `Agent Bridge v0.2.0 starting` | ✅ |
+| 自动检测 `py -3` | ✅ |
+| 错误时 `pause` 窗口不闪退 | ✅ |
+| `install_bridge_shortcut.bat` 安装成功 | ✅ |
+| 桌面快捷方式已创建 | ✅ (`SayIt AI Bridge.lnk`) |
+| 快捷方式目标 = `cmd.exe /k` | ✅ |
+| 轮询模式输出 `Waiting 30s...` | ✅ |
+| `Ctrl+C` 安全停止 | ✅ |
 
 ### 范围
 - 重写 `tools/agent_bridge/bridge.py` 为 v0.2.0 — 修复 B/C/D/E/F/H
