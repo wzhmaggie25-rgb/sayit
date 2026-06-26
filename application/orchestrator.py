@@ -199,6 +199,18 @@ class SayitOrchestrator:
             if not self._keyboard_helper.is_available:
                 logger.warning("[orchestrator] keyboard helper DLL not available — RAlt disabled")
                 return
+            # Log runtime identity of the loaded DLL so we can prove which
+            # build is actually in this process. The dict contains only
+            # paths/versions/counters — never user text.
+            try:
+                diag = self._keyboard_helper.diagnostics()
+                logger.info(
+                    "[orchestrator] keyboard helper identity: "
+                    "path=%s version=%s build=%s pid=%s",
+                    diag.get("dll_path"), diag.get("helper_version"),
+                    diag.get("helper_build_id"), diag.get("pid"))
+            except Exception:
+                pass
             ok = self._keyboard_helper.install(self.toggle_recording)
             if ok:
                 logger.info("[orchestrator] RAlt hotkey installed via keyboard helper DLL")
@@ -324,6 +336,15 @@ class SayitOrchestrator:
         # signal would be a no-op anyway.
         if pipeline.state != RecordingState.CAPTURING:
             return False
+        # Emit the visible "stopping" ACK BEFORE we call pipeline.stop().
+        # This is the immediate UI feedback the user expects on the second
+        # RAlt: don't make them stare at the recording indicator while
+        # audio_capture.stop() and ASR drain. The full RECORDING_STOPPED
+        # event still fires later from the pipeline thread.
+        try:
+            self._eb.emit(Events.RECORDING_STOPPING)
+        except Exception:
+            pass
         pipeline.stop()
         # NB: we don't wait_for_stop / clear flags here. The pipeline
         # thread runs through to DONE/ERROR, and only then does its

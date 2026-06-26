@@ -161,8 +161,14 @@ class OrchestratorStateMachineTests(unittest.TestCase):
                 break
             time.sleep(0.01)
 
+        stopping_events = []
+        self.orch.eventbus.on(
+            Events.RECORDING_STOPPING, lambda: stopping_events.append(True))
+
         self.orch.toggle_recording()
         self.assertTrue(p._stop_flag, "stop_flag was not set on second toggle")
+        self.assertEqual(stopping_events, [True],
+                         "RECORDING_STOPPING ACK was not emitted on second toggle")
         # Cleanup
         p.transcribe_done.set(); p.allow_inject.set()
         p.run_returned.wait(timeout=2)

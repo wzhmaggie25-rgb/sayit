@@ -194,6 +194,9 @@ RecordingPipeline.run() Phase 6
 6. **双重 Hook 竞争** — 修复：Typeless 架构迁移
 7. **N-API addon 不兼容 Electron 32** — 修复：迁移到 Typeless DLL
 8. **注入乱码 fevhlbigktcps** — 修复：GetAsyncKeyState 守卫
+9. **Per-toggle daemon thread 乱序风险** — 修复（2026-06-26）：keyboard_helper_dll.py 改单一 `hotkey-consumer` 线程串行 drain queue，不再每个 toggle spawn 新线程；64 槽诊断 ring + `helper_version=2` / `helper_build_id="2026-06-26-v2"` 在启动日志和 `/api/diagnostics/hotkey` 暴露
+10. **静默学习把整句/错误内容自动加入个人词典** — 修复（2026-06-26）：`extract_dictionary_terms` 严格门禁，仅允许单一 1↔1 token replacement、同字符族、形态/长度受控、最多 1 个候选；纠错规则学习独立未受影响
+11. **第二次 RAlt stop ACK 不可见** — 修复（2026-06-26）：`Events.RECORDING_STOPPING` 在 `pipeline.stop()` 之前同步发出
 
 ## 不允许随意修改的模块
 

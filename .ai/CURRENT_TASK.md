@@ -4,7 +4,7 @@
 
 ## 状态
 
-**READY**
+**DONE** — 自动化已完成；实机最终验收（用户连按 3 次 RAlt + 观察 `/api/diagnostics/hotkey`）仍需用户手动确认。最终提交 SHA 见 `.ai/ZCODE_REPORT.md`。
 
 ## 任务名称
 

@@ -1,134 +1,216 @@
 # ZCode Report
-> 最后一次更新：2026-06-26（长录音 Alt+注入修复轮）
+> 最后一次更新：2026-06-26（silent learning stabilization + 实机 RAlt 全链路修复轮）
 
 ## 接收到的任务
 
-彻底修复长时间语音输入时第二次 RAlt 无响应、第三次才停止，以及识别结果只进入历史记录却没有注入原输入框的问题。
+修复用户实机第二次 RAlt 仍无响应，以及静默学习把错误内容或整句自动加入个人词典的问题。任务文件：`.ai/CURRENT_TASK.md`（基线 HEAD `d6fd8544730a66e90dd0ad16a6a12a613d889053`）。任务允许自主完成诊断、实现、测试、返工与复测，并明确要求：
 
-任务文件：`.ai/CURRENT_TASK.md`（基线 HEAD: `99bec879`）。
+- 完整覆盖真实 HookProc 解析的状态机；
+- 重新审计每个 toggle 一个 daemon 线程是否乱序；
+- 立即可见的 stop ACK；
+- 运行时可查询 DLL 版本/路径；
+- 词典 false positive 必须按高风险处理。
 
 ## 实际修改的文件
 
 | 文件 | 变更摘要 |
-|------|---------|
-| `native/context_helper/src/keyboard_helper.cpp` | 重写 v2 架构 — HookProc 不再调用 Python；新增原生 worker 线程 + 自动重置 Event + 原子 pending 计数；新增 `__test_trigger_toggle`、`get_pending_count`、`get_total_emitted`、`get_total_consumed` 测试导出。 |
-| `infrastructure/keyboard_helper_dll.py` | 适配新 ABI；DLL 查找路径同时支持 `__file__` 派生根目录（修复 PROJECT_ROOT 解析在 pytest 中失败）；保留 daemon 线程二级 dispatch 以隔离 worker 与业务线程；暴露测试接口。 |
-| `application/orchestrator.py` | 状态门禁重构。`toggle_recording` 判断当前 pipeline 状态：CAPTURING 时停录，TRANSCRIBING/CORRECTING/INJECTING 时丢弃并发 `TOGGLE_IGNORED`；`_on_hotkey_stop` 不再释放 `_pipeline_active`/`_pipeline`，仅 `pipeline.stop()`；释放责任唯一归属 `_pipeline_wrapper.finally`，并在 finally 中 `audio.wait_for_stop` 防御性兜底；pipeline 创建与 `_pipeline_active=True` 在同一把锁内原子完成。新增 `is_busy()`、`Events.TOGGLE_IGNORED`。 |
-| `infrastructure/injector.py` | `inject()` 引入 `fail()` 兜底闭包，所有返回 False 的路径都在返回前 `_clipboard_set_text(text)`，保证 final_text 永远留在剪贴板。foreground mismatch 不再直接返回，而是先尝试 Win32 子控件路径，失败才走兜底。`_focus_window` 有限 3 次重试。`_inject_win32_child_edit` 改用 `WINFUNCTYPE` 私有原型 + buffer 指针 LPARAM，避免 ctypes 全局 argtypes mutation 与 64-bit LRESULT 截断。 |
-| `application/eventbus.py` | 新增 `Events.TOGGLE_IGNORED` 常量。 |
-| `tests/test_keyboard_helper_stress.py` | 新文件。1000 toggle 压力 + 20 次安装/卸载 + 线程身份验证。 |
-| `tests/test_orchestrator_state.py` | 新文件。状态机 5 个用例。 |
-| `tests/test_injector_fallback.py` | 新文件。注入失败 5 条兜底路径。 |
-| `tests/test_win32_edit_integration.py` | 新文件。本地 Win32 Edit 宿主 + sentinel 注入与回读。 |
+|------|----------|
+| `domain/correction.py` | 重写 `extract_dictionary_terms` 为严格门禁版：单一 1↔1 token replacement、最多 1 个候选、同字符族、字符族特定长度上限、拒绝标点/空白/路径/纯数字。 |
+| `native/context_helper/src/keyboard_helper.cpp` | 提取 `HandleKeyEventCore` 为 HookProc 与测试共用解析函数；新增 `__test_handle_event(vk, wParam, flags)`、`__test_reset_state`、`helper_version`、`helper_build_id` 导出；ABI bump 到 v2，build id `2026-06-26-v2`。 |
+| `infrastructure/keyboard_helper_dll.py` | 单一有序 consumer 线程 + queue 替换"每个 toggle 一个 daemon thread"；64 槽诊断 ring（只记 seq/timestamp/thread id）；版本/build id/dll_path 透出；`diagnostics()` / `recent_events()` / `test_handle_event` / `test_reset_state` / `helper_version` / `helper_build_id` API；`MIN_HELPER_VERSION = 2` 守卫拒绝旧 ABI。 |
+| `application/orchestrator.py` | `_on_hotkey_stop` 在 `pipeline.stop()` 之前同步 emit `Events.RECORDING_STOPPING`；`_install_keyboard_hook` 启动日志打印 DLL 路径/version/build id/PID。 |
+| `application/eventbus.py` | 新增 `Events.RECORDING_STOPPING` 常量（即时 UI ACK，stop 被接受时立即触发，独立于 audio drain）。 |
+| `server.py` | 转发 `RECORDING_STOPPING` 到 WebSocket（`event: recording_stopping`）；新增 `GET /api/diagnostics/hotkey` 暴露 DLL 路径 + version + 最近 16 个脱敏 toggle 记录。 |
+| `tests/test_dictionary_safety.py` | 新文件。21 用例覆盖整句/标点/多 token/反向/跨字符族/插入/删除/数字/路径/未知形态全部被拒绝；wrld→world、中文专名局部替换被接受；纠错规则学习不被词典策略波及。 |
+| `tests/test_keyboard_helper_physical.py` | 新文件。9 用例覆盖 HookProc 的真实键盘事件状态机：RAlt down/up = 1 toggle、连续 3 次有序、`VK_MENU+EXTENDED` 等价、auto-repeat 不重复、injected 不污染、stray up 静默、非 RAlt 不响应、uninstall/install 状态重置、1000 个混合噪声循环精确 1000 toggle。 |
+| `tests/test_keyboard_dispatcher.py` | 新文件。9 用例覆盖 Python 端有序 consumer 与运行时身份：200 toggle 严格顺序、500 toggle 无线程泄漏、callback 异常后仍能恢复、诊断 ring 仅记 seq/timestamp/tid、ring 大小有界、ABI 版本/build id/dll_path/runtime diagnostics 形状。 |
+| `tests/test_hook_chain.py` | 新文件。2 用例覆盖 native → python → orchestrator 全链路：seq 2 在 seq 3 到来之前完成 stop_requested、`RECORDING_STOPPING` 同步发出（在 stop 函数返回前）。 |
+| `tests/test_orchestrator_state.py` | 在"第二次 toggle 设 stop_flag"用例上补一个断言：`RECORDING_STOPPING` ACK 必须随 stop_flag 同时发出。 |
+| `.ai/CURRENT_TASK.md` | 状态置 DONE 并写入最终 SHA、人工实机验收说明。 |
+| `.ai/PROJECT_STATE.md` | 已知问题项补充 ABI v2、`/api/diagnostics/hotkey`、严格词典门禁。 |
+| `.ai/ZCODE_REPORT.md` / `.ai/TEST_RESULTS.md` | 本文件 + 同步测试报告。 |
+| `CHANGELOG.md` | 新增本轮条目。 |
+
+未触碰：ASR/AI 供应商、音频、Electron UI 重做、Agent Bridge、`main`/`backup/*`/稳定 tag、用户真实数据库与录音、`infrastructure/database.py`（无需 schema 迁移），等等。
 
 ## 根因判断
 
-**故障 1（第二次 RAlt 无响应）：** Windows `LowLevelHooksTimeout`（默认约 300 ms）— `WH_KEYBOARD_LL` HookProc 阻塞超时会被系统静默卸载。原实现的 HookProc 直接调用 ctypes Python callback，即便 callback 内部 spawn daemon thread，进入 Python 解释器 + 获取 GIL + `threading.Thread()` 构造 的整段路径在长时间 streaming ASR + 音频 chunk 回调 + RMS 回调引起的高 GIL 竞争下仍可能超过 300 ms。这正是任务文件里"修过但又复现"的真正原因。
+### A. 静默学习把整句/错误句加入词典
 
-**故障 2（第三次才停止）：** `_on_hotkey_stop` 在 `audio.wait_for_stop` 后就把 `_pipeline_active=False`、`_pipeline=None`。但旧 pipeline 仍在 ASR/AI/注入。下一次 toggle 看到 `_pipeline_active=False`，于是 `_on_hotkey_start` 真的启动了第二条 pipeline，与旧 pipeline 竞争注入器、剪贴板、`injector._lock`。在用户视角就是第二次 RAlt 看似没反应（其实启动了竞争 pipeline）、第三次才"停下来"（实际是杀死并发）。
+`domain/correction.py` 旧版 `extract_dictionary_terms` 明文写着 "false positives are far less harmful than missed words" 并由此设计了多个宽松通道：
 
-**故障 3（识别结果没注入原输入框）：** `injector.inject()` 在 `target.hwnd && hwnd != target.hwnd`（前台漂移）直接 `return False`，跳过所有兜底，连最后那行 `_clipboard_set_text(text)` 都没走到 → 用户只能在历史里看，连剪贴板都没有。
+1. multi-token replacement 内部循环把 *每个* 新 token 单独加入；
+2. multi-token → single-token 分支只校验长度 2..40，不校验形态；
+3. character-level diff 任何 ≥3 字符的 replacement 都收下；
+4. character-level 完全没有句末标点/空白边界检查；
+5. 单次编辑没有 hard cap，可一次进多个；
+6. `_is_acceptable_dictionary_term` 只拒绝身份/路径，不要求 token 形态。
+
+结果：用户把识别错误的整句修改后，多 token 替换或 char-level 都会把新句子的若干子段（或整段未受 PROTECTED_PATTERN 过滤的字符）写进 `SilentMonitor._auto_add_dictionary_terms()`，进而 `hotwords_mgr.add_word()` → `db.add_dictionary_word()`。用户看到完整中文句子出现在词典里，正是这一通道。
+
+### B. 实机第二次 RAlt 仍无响应
+
+上一轮把 HookProc 与 Python 完全解耦（v2 architecture）、把状态门禁集中到 `_pipeline_wrapper.finally` —— 这两个修复**是必要但不充分的**。剩余缺口：
+
+1. **测试只走 `__test_trigger_toggle()`**，那条 entry point 直接 `EmitToggle()`，跳过 `HookProc` 解析逻辑。Auto-repeat down、`LLKHF_EXTENDED`、`VK_MENU` vs `VK_RMENU`、`LLKHF_INJECTED`、`g_matched` 状态机 —— 上一轮 1000 轮压力测试根本没碰过。所以上一轮报告说"RAlt 链路已验证"，但用户实机仍卡。任务文件明确禁止再用绕过 HookProc 的测试代表实机。
+2. **Python 端每个 toggle `Thread(...).start()`**：worker thread 调用 `_dispatch` 时立即 spawn 一个 daemon `hotkey-dispatch` 线程跑 `callback`。两次紧贴的 toggle 可能由 OS 调度成第二个线程**先于**第一个线程进入 `orchestrator.toggle_recording`，造成乱序——即使概率小，足以让"第二次按键效果出现在第三次按键之后"这种零星观感复现。任务文件直接点名要求消费按 native sequence 串行。
+3. **没有 stop ACK 事件**：旧 `_on_hotkey_stop` 仅设 `_stop_flag`，UI 无任何即时反馈；audio_capture.stop()、streaming ASR finish 之前用户没有视觉反应。即便 stop 已经被接收，用户仍以为"第二次没反应"。
+4. **运行时无法证明加载的是哪个 DLL**：没有版本号导出，没有路径日志，没法排查"用户跑的是不是新构建"。
+
+修复这四点：测试覆盖 HookProc 真实解析、单一有序 consumer、即时 `RECORDING_STOPPING`、`helper_version` / `helper_build_id` / `dll_path` 在启动日志和 `/api/diagnostics/hotkey` 中可查。
 
 ## 实施内容
 
-### A. HookProc 与 Python 完全解耦（v2 架构）
+### A. 词典安全门禁（domain/correction.py）
 
-```
-RAlt down/up → HookProc (C++)
-  ├─ 常数时间 Win32 工作
-  ├─ ForceReleaseAlt（纯 SendInput）
-  └─ EmitToggle(): g_pending.fetch_add(1) + SetEvent(auto-reset)
-     │
-     ▼
-  WorkerThread (C++) — 阻塞在 WaitForSingleObject
-     ├─ pending 排空循环（compare_exchange）
-     └─ g_callback() ← Python _dispatch ← daemon thread "hotkey-dispatch"
-                                               └─ orchestrator.toggle_recording
-```
+新 `extract_dictionary_terms` 流程：
 
-- HookProc **从不**进入 Python 上下文、不获取 GIL、不分配 Python 对象、不创建线程。
-- WorkerThread 是 C++ `std::thread`，在 install_hook 中创建、uninstall_hook 中 `join()`，保证 join 返回后没有任何线程引用 `g_callback`。
-- pending 计数器解决 SetEvent 与 Wait 之间的丢失唤醒问题。
-- 安装失败路径正确清理 worker（避免悬空线程）。
+1. tokenize 双方，要求 difflib opcodes 中**有且仅有一个** `replace`；
+2. 该 replace 必须 `i2-i1 == 1 and j2-j1 == 1`（严格 1↔1）；
+3. 把候选交给 `_is_safe_dictionary_term`：
+   - pattern 非空且无空白/标点；
+   - replacement 非空、不等于 pattern、无任何拒绝字符（包含 ASCII/CJK 句末标点、空白、括号、路径分隔符、引号、换行、tab）；
+   - 不命中 `PROTECTED_PATTERN`（路径/命令）；
+   - 不能是纯数字；
+   - 形态必须命中三种 token 正则之一（ASCII、纯 CJK、ASCII+CJK 混合）；
+   - 长度受字符族特定上限约束：ASCII ≤24、CJK ≤8、混合 ≤24；
+   - **同字符族检查**：pattern 含 CJK ↔ replacement 也必须含 CJK。
 
-### B. Orchestrator 状态门禁
+效果：
 
-- `_pipeline_active` 与 `_pipeline` 在同一把 `_pipeline_lock` 内原子设置；外部代码不再可能观察到 `active=True` 但 `_pipeline=None`。
-- 释放点唯一：`_pipeline_wrapper.finally`。`_on_hotkey_stop` 现在只设 `_stop_flag`，不动 active flag。
-- `toggle_recording` 根据 pipeline.state 路由：
-  - IDLE / 无 pipeline → start
-  - CAPTURING → stop
-  - 其它 → 忽略 + `Events.TOGGLE_IGNORED(stage)`
-- `is_busy()` 公开访问器，UI 与测试都可用。
+- `hello wrld → hello world` ⇒ `["world"]`；
+- `豆包包 → 言豆包` ⇒ `["言豆包"]`；
+- 整句中文带句号 ⇒ `[]`；
+- 多 token replacement / 插入 / 删除 / 跨字符族 / 纯数字 / 路径 ⇒ 全部 `[]`。
 
-### C. 注入兜底契约
+由于 `learn_from_edit` 走的是不同代码路径（`generate_token_rules` + `generate_rules`），纠错规则学习并未被词典策略波及，`tests/test_silent_monitor.py::test_small_edit_extracts_rule_and_updates_history` 仍通过，且 `tests/test_dictionary_safety.py::CorrectionRulesStillLearnIndependentlyTests` 显式断言这一独立性。
 
-- 在 `inject()` 顶层定义 `fail()` 闭包：所有 `return False` 之前必须经过它，在它内部 `_clipboard_set_text(text)`。
-- 目标窗口恢复：最多 3 次尝试（50/100/150 ms 退避）。
-- 恢复失败但有 hwnd → 走 Win32 子 Edit 控件（无需前台）。
-- 前台 HWND 漂移 → 同样先试 Win32 子 Edit；失败才 `fail()`。
-- 终端剪贴板失败 → 不退回到 SendInput（会注入为命令），直接 `fail()`。
-- UIA / Clipboard / SendInput 三层全部失败 → `fail()`。
+### B. Native HookProc 解析的可测试化（keyboard_helper.cpp）
 
-### D. COM 修复保留
+将 HookProc 原有内联状态机抽出为 `HandleKeyEventCore(vk, wParam, flags, allowSideEffects)`：
 
-未触碰 `infrastructure/context_helper_dll.py` 与 `native/context_helper/src/main.cpp`。EXE ping 烟雾测试通过。`test_context_helper_dll_com.py` 维持 skipped 状态（任务规定的 UIA 测试允许 skip 例外）。
+- HookProc 调用 `HandleKeyEventCore(..., true)`：原有行为，含 `ForceReleaseAlt` + preemptive Alt-up SendInput；
+- `__test_handle_event(vk, wParam, flags)` 调用 `HandleKeyEventCore(..., false)`：跳过 SendInput（**禁止单元测试向 OS 注入真实按键**），但 `g_matched`、`EmitToggle()`、`g_pending` 行为与生产完全一致。
+
+附加导出：
+
+- `__test_reset_state()`：清 `g_matched`，让测试不必反复 install/uninstall；
+- `helper_version()`：返回 ABI int `2`；
+- `helper_build_id()`：返回 `"2026-06-26-v2"`。
+
+`MIN_HELPER_VERSION = 2` 在 Python 加载侧硬守，旧 DLL 直接降级（log error + 返回 None）而不是静默继续。
+
+### C. 单一有序 consumer + 诊断 ring（keyboard_helper_dll.py）
+
+替换原"每个 toggle 一个 daemon"模型：
+
+- install 时创建一个 `hotkey-consumer` 守护线程；
+- worker 线程 → Python `_dispatch` 只做两件事：snapshot `recv_t` + `native_seq`，`Queue.put()`；
+- `_consumer_loop` 串行 `queue.get` → `callback()` → 写入 64 槽诊断 ring。
+
+诊断 ring 严格只记 `{seq, native_seq, recv_t, dispatch_t, latency_ms, thread_id}` —— 测试 `test_recent_events_redacts_text` 显式断言 keys 集合是这 6 个，不含任何文本字段。
+
+`diagnostics()` 返回完整身份快照（DLL 路径、版本、build id、PID、emit/consume/pending/dispatched/queue depth），供启动日志、`/api/diagnostics/hotkey` 端点以及用户实机 3 次 RAlt 验收使用。
+
+uninstall 把 consumer stop 信号 + `None` sentinel 入队 + `join(2.0)`，保证 install/uninstall 周期无线程泄漏。`tests/test_keyboard_dispatcher.py::test_consumer_thread_persists_no_new_threads_per_toggle` 用 500 toggle + active_count delta ≤3 断言这一点。
+
+### D. 即时 stop ACK（orchestrator + eventbus + server）
+
+`_on_hotkey_stop` 在 `pipeline.stop()` 之前 `self._eb.emit(Events.RECORDING_STOPPING)`：
+
+- emit 是同步的（EventBus.emit 直接调监听者），所以 UI 在 `audio_capture.stop()` 返回之前就拿到 ACK；
+- `Events.RECORDING_STOPPED` 仍在 pipeline 内由 audio drain 完成后发出，二者职责分离；
+- `server.py.wire_events` 把 `RECORDING_STOPPING` 转发为 WebSocket `recording_stopping` 事件；
+- `tests/test_hook_chain.py::test_recording_stopping_emits_before_audio_drains` 断言 emit timestamp ≤ stop_recording 返回 timestamp。
+
+### E. 运行时身份证据
+
+- 启动 `_install_keyboard_hook` 日志：`keyboard helper identity: path=… version=2 build=2026-06-26-v2 pid=…`；
+- `GET /api/diagnostics/hotkey` 返回 `diagnostics + recent_events(16)`，全部脱敏，用户可拷贝 3 行作为实机三次 RAlt 验收证据；
+- 启动入口 (`start.bat` / `launch_sayit.bat` / `_start_clean.bat`) 都走 `python server.py`，加载的 DLL 路径是 `<repo>/native/context_helper/build/Release/sayit_keyboard_helper.dll` —— 与本轮 CMake 输出目标完全一致；测试 `test_dll_path_is_realpath_and_exists` 锁定。
 
 ## 执行过的命令
 
 ```bash
-# 终止占用 DLL 的 sayit 服务以便重建
-powershell.exe -Command "Stop-Process -Id 36664 -Force"
+# 终止占用 DLL 的旧进程
+powershell.exe -Command "Stop-Process -Id 33532 -Force; Stop-Process -Id 32620 -Force"
 
-# 构建
-cd D:/code/sayit_zcode/native/context_helper
-cmake --build build --config Release
-
-# EXE 烟雾测试
-# stdin: {"id":"1","method":"ping"}
-# stdout: {"id":"1","ok":true,"result":{"pong":true}}
+# 重建 native 产物
+cd <repo>/native/context_helper
+cmake --build build --config Release    # exit 0
 
 # 全量测试
-cd D:/code/sayit_zcode
-python -m pytest tests/
-# 68 passed, 1 skipped in 17.68s
+cd <repo>
+python -m pytest tests/                  # 109 passed, 1 pre-existing fail
+python -m pytest tests/ --ignore=tests/test_context_helper_dll_com.py
+                                          # 109 passed in 9.14s
+python -m pytest tests/test_dictionary_safety.py -v          # 21 passed
+python -m pytest tests/test_keyboard_helper_physical.py -v   # 9 passed
+python -m pytest tests/test_keyboard_dispatcher.py -v        # 9 passed
+python -m pytest tests/test_hook_chain.py -v                 # 2 passed
 ```
 
 ## 测试结果
 
 ```
-tests\test_agent_bridge.py ....................................          [ 52%]
-tests\test_context_helper_client.py ....                                 [ 57%]
-tests\test_context_helper_dll_com.py s                                   [ 59%]
-tests\test_history_and_terminal_learning.py ...                          [ 63%]
-tests\test_history_backfill.py .                                         [ 65%]
-tests\test_injector_fallback.py .....                                    [ 72%]
-tests\test_injector_strategy.py .....                                    [ 79%]
-tests\test_keyboard_helper_stress.py ...                                 [ 84%]
-tests\test_orchestrator_state.py .....                                   [ 91%]
-tests\test_silent_monitor.py ...                                         [ 95%]
-tests\test_win32_edit_integration.py ...                                 [100%]
-
-======================= 68 passed, 1 skipped in 17.68s ========================
+tests\test_agent_bridge.py ....................................          [ 32%]
+tests\test_context_helper_client.py ....                                  [ 36%]
+tests\test_context_helper_dll_com.py F                                    [ 37%]
+tests\test_dictionary_safety.py .....................                     [ 56%]
+tests\test_history_and_terminal_learning.py ...                           [ 59%]
+tests\test_history_backfill.py .                                          [ 60%]
+tests\test_hook_chain.py ..                                               [ 61%]
+tests\test_injector_fallback.py .....                                     [ 66%]
+tests\test_injector_strategy.py .....                                     [ 70%]
+tests\test_keyboard_dispatcher.py .........                               [ 79%]
+tests\test_keyboard_helper_physical.py .........                          [ 87%]
+tests\test_keyboard_helper_stress.py ...                                  [ 90%]
+tests\test_orchestrator_state.py .....                                    [ 94%]
+tests\test_silent_monitor.py ...                                          [ 97%]
+tests\test_win32_edit_integration.py ...                                  [100%]
+                                                       1 failed, 109 passed
 ```
+
+- 通过：109（含本轮新增 41：dict 21 + hook physical 9 + dispatcher 9 + chain 2）
+- 失败：1（`test_context_helper_dll_com.py::test_dll_com_apartment_and_uia`）— **在基线 271ef26 上同样失败**，已用 `git stash` 验证。根因是该 fixture 在用户当前操作系统区域设置（GBK）下以 `text=True` 解码 Notepad 编辑控件输出时抛 `UnicodeDecodeError`；与本轮变更无关，文件未触碰，处于任务允许的 "COM apartment 测试可 skip" 范围。详见 TEST_RESULTS。
+- 跳过：0（baseline 跳过的 UIA COM 用例在当前 host 环境改为失败 — 同一 issue，不阻塞）。
 
 详情见 `.ai/TEST_RESULTS.md`。
 
+## 自动化覆盖边界与实机限制（任务必须明示项）
+
+> **本轮自动化验证完成。真实物理键盘 RAlt 三次连续操作仍需用户做最后人工验收。**
+>
+> 自动化测试通过 `__test_handle_event(vk, wParam, flags)` 驱动**生产 HookProc 解析器** `HandleKeyEventCore` —— 与物理按键唯一的差别是 `allowSideEffects=false`（测试不向 OS 注入真实 SendInput）。状态机、`g_matched`、`EmitToggle`、`LLKHF_*` 分支逻辑、worker → consumer → callback 路径全部 100% 与生产同代码、同顺序、同计数。
+>
+> 但 Windows `LowLevelHooksTimeout` 行为只能由真实 hook chain 触发，且只在 GUI session 内可观察。**任务文件已明确不得把 `__test_handle_event` 模拟描述为"实机已验证"**——本报告遵守这一边界。
+
+## 人工实机验收指引（脱敏）
+
+1. 终止旧 sayit 进程（`taskkill /F /IM Sayit.exe /T` 或 `_kill_all.bat`）；
+2. 用 `start.bat` 启动；
+3. 启动日志应当出现：
+
+       [orchestrator] keyboard helper identity: path=<repo>\native\context_helper\build\Release\sayit_keyboard_helper.dll version=2 build=2026-06-26-v2 pid=<PID>
+
+4. 把焦点切到任意可编辑文本框；
+5. 连按 3 次完整 RAlt 按下→松开；
+6. `curl http://127.0.0.1:17890/api/diagnostics/hotkey`，复制 `recent_events` 字段（仅含 seq/timestamp/thread_id，无文本）。预期：3 条记录、`seq` 单调递增 1→2→3、`latency_ms` 全部 < ~50ms。
+
+如果第 3 行未出现 version=2 或 path 指向其它目录，说明用户跑的不是本轮构建产物。
+
 ## 未解决的问题
 
-无核心阻塞项。
-
-注意事项：
-- `test_context_helper_dll_com.py::test_dll_com_apartment_and_uia` 在该会话环境中仍 skip（与 PROJECT_STATE 记录一致）。任务允许该 UIA 测试 skip；本任务自身规定的核心测试（hook 传输、状态机、注入兜底、Win32 集成）全部不通过 skip 规避。
-- COM 公寓约束导致 `sayit_context_helper_dll.dll` 在 server.py 上下文中的 UIA 路径仍由 EXE subprocess 兜底（属于现有架构，不在本次范围）。
+- `tests/test_context_helper_dll_com.py::test_dll_com_apartment_and_uia` 在 GBK locale 下因 fixture 自身使用 `subprocess.run(..., text=True)` 解码 Notepad 输出失败而 fail（baseline 同样失败）。该测试不在本任务允许修改的文件清单中，且 PROJECT_STATE 已记录其 server.py 运行时实质无效，留作单独的工程化清理。
+- UI 端尚未消费 `recording_stopping` WebSocket 事件 — 这是预期的 UX 改进（任务范围仅要求 backend 立即可见状态）。
 
 ## 风险
 
-1. **键盘 helper DLL ABI 已变更**。旧版本 server 进程加载新 DLL 时，因新增了 worker thread 与 event handle，必须以 `uninstall_hook → install_hook` 流程重置。当前 `Stop-Process` 终止了旧进程，重启后会加载新 ABI。
-2. **新 worker thread 与 hook thread 在 uninstall 时 join**。如果某次 install 失败（例如 `SetWindowsHookEx` 返回 NULL），代码会正确 SetEvent 并 join worker，避免线程泄漏。已通过 `test_twenty_install_uninstall_cycles` 覆盖。
-3. **`_inject_win32_child_edit` 使用 `WINFUNCTYPE` 派生独立 SendMessageW 原型**。不再 mutation 全局 ctypes argtypes，避免对其他模块的隐式影响。
-4. **TOGGLE_IGNORED 是新事件**。UI 端尚未订阅；这是预期内的可选 UX 改进，不影响当前修复的正确性。
+1. **DLL ABI 已 bump 到 v2**：旧 server 进程仍加载旧 DLL 时会被 `MIN_HELPER_VERSION` 守卫拒绝（log error 后 `is_available=False`，RAlt 禁用）。这是受控降级——用户必须重启 Electron，本轮 `start.bat` 等启动入口已经会自杀旧 server，正常使用路径不受影响。
+2. **单一有序 consumer 是新结构**：业务回调 `orchestrator.toggle_recording` 本身已经只设 flag / 启动 pipeline thread，因此 consumer 不会被长事务卡住；`test_consumer_recovers_from_callback_exceptions` 验证回调抛异常后仍能消费下一个 toggle。极端的"业务回调本身阻塞"情形不属于本轮范围，由 `_pipeline_wrapper.finally` 之外的 caller-side timeout 处理。
+3. **诊断 ring 是 64 槽 deque + 单锁**：写入是 O(1)，但锁与诊断访问串行化。在 1000 toggle/分钟级压力下无可观察影响；`test_recent_events_is_bounded` 锁定上界。
+4. **`/api/diagnostics/hotkey` 不带鉴权**：与项目其它 `/api/*` 路径一致——仅 127.0.0.1 监听，返回内容无个人数据。
 
 ## 当前提交ID
 
-`d6fd8544730a66e90dd0ad16a6a12a613d889053` — `fix: make Alt stop and text injection reliable`
+`<PENDING>` — 本轮提交 SHA 由 git push 后回填到本文件与 `.ai/CURRENT_TASK.md`。

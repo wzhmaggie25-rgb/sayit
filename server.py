@@ -71,6 +71,7 @@ def wire_events():
     eb.on(Events.RECORDING_STARTED, lambda: _event_queue.put({"event": "recording_started"}))
     eb.on(Events.RMS_LEVEL, lambda l: _state.update({"last_rms": l}))
     eb.on(Events.RECORDING_STOPPED, lambda: _event_queue.put({"event": "recording_stopped"}))
+    eb.on(Events.RECORDING_STOPPING, lambda: _event_queue.put({"event": "recording_stopping"}))
     eb.on(Events.RECORDING_TICK, lambda s: _event_queue.put({"event": "tick", "seconds": s}))
     eb.on(Events.RMS_LEVEL, lambda l: _event_queue.put({"event": "rms_level", "level": l}))
     eb.on(Events.ASR_RESULT, lambda t, e: _event_queue.put({"event": "asr_result", "text": t, "engine": e}))
@@ -347,6 +348,25 @@ def runtime_info():
 
 
 # ── Debug endpoints (diagnostic fixtures) ───────
+
+@app.get("/api/diagnostics/hotkey")
+def hotkey_diagnostics():
+    """Return loaded DLL identity + recent toggle dispatch records.
+
+    The records contain only sequence numbers, monotonic timestamps and
+    thread ids — no user text. Lets the user verify which DLL build is
+    actually loaded and that RAlt presses propagate through the chain.
+    """
+    helper = getattr(orchestrator, "_keyboard_helper", None)
+    if helper is None or not helper.is_available:
+        return {"available": False}
+    try:
+        diag = helper.diagnostics()
+        events = helper.recent_events(limit=16)
+        return {"available": True, "diagnostics": diag, "recent_events": events}
+    except Exception as e:
+        return {"available": True, "error": str(e)}
+
 
 @app.post("/api/debug/inject")
 def debug_inject(data: dict):

@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-06-26 — Silent learning stabilization + 实机 RAlt 全链路修复（v2 follow-up）
+
+### 根因
+1. **静默学习把错误内容/整句加入个人词典**：`extract_dictionary_terms` 旧策略明文 "false positives are far less harmful than missed words"，multi-token / char-level 通道无标点空白边界，把整句子片段写入 dictionary。
+2. **第二次 RAlt 仍偶尔无响应**：上一轮 1000 toggle 压力测试走的是 `__test_trigger_toggle()`，绕过了真实 HookProc 的 RAlt down/up 状态机；每个 toggle 一个 daemon 线程理论上可乱序；缺少 stop ACK 让 UI 看似无反应；运行时无法证明加载的是新构建。
+
+### 修复
+- `domain/correction.py::extract_dictionary_terms` 重写为严格门禁：单一 1↔1 token replacement、同字符族、形态/长度受控、最多 1 个候选；不确定一律返回 `[]`；纠错规则学习独立路径不受影响。
+- `native/context_helper/src/keyboard_helper.cpp` 把 HookProc 状态机抽出为 `HandleKeyEventCore`，新增 `__test_handle_event(vk, wParam, flags)` / `__test_reset_state` / `helper_version=2` / `helper_build_id="2026-06-26-v2"` 导出。
+- `infrastructure/keyboard_helper_dll.py` 把每 toggle 一个 daemon 线程改成单一 `hotkey-consumer` 线程 + queue，按 native 顺序串行 drain；64 槽诊断 ring（仅 seq/timestamp/thread_id）；`MIN_HELPER_VERSION = 2` 守卫拒绝旧 ABI；启动日志输出 DLL 路径 + version + build id + PID。
+- `application/orchestrator.py::_on_hotkey_stop` 在 `pipeline.stop()` 之前同步 emit `Events.RECORDING_STOPPING`，给 UI 即时 ACK。
+- `server.py` 转发 `recording_stopping` WebSocket 事件；新增 `GET /api/diagnostics/hotkey` 暴露 helper identity + 16 条脱敏 toggle 记录供实机验收。
+
+### 测试
+- 新增 41 用例：`test_dictionary_safety.py` ×21、`test_keyboard_helper_physical.py` ×9（含 1000 周期混合噪声）、`test_keyboard_dispatcher.py` ×9、`test_hook_chain.py` ×2；现有 `test_orchestrator_state.py` 加固。
+- 109 通过；1 pre-existing 失败 (`test_context_helper_dll_com.py::test_dll_com_apartment_and_uia`，baseline 同样失败、与本轮变更无关、文件未在允许修改清单内)。
+
+### 实机限制
+本轮自动化覆盖到了 HookProc 生产解析逻辑（差别仅 `allowSideEffects=false` 不向 OS 注入 SendInput）。真实物理 RAlt × 3 次的最终验收仍需用户做。
+
+---
+
 ## 2026-06-26 — 长录音 Alt 停止 + 注入可靠性彻底修复
 
 ### 根因

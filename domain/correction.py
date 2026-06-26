@@ -126,90 +126,132 @@ def apply_rules_with_stats(text: str, rules: list[dict]) -> tuple[str, list[str]
     return result, applied
 
 
+# ── Strict dictionary auto-learn gating ─────────────────────────────
+#
+# Policy (2026-06-26 hardening): the personal dictionary feeds ASR hotwords
+# and AI bodyguard prompts. A polluted dictionary persistently degrades
+# future recognition — false positives are HIGH risk, not low. This rewrites
+# the previous "broad" extractor with hard rules:
+#
+#   1. At most ONE candidate per edit.
+#   2. Replacement must come from a SINGLE 1↔1 token replacement segment.
+#      Anything looser (multi-token, insert, char-level diff) is rejected.
+#   3. The replacement, on its own, must look like a single proper-noun /
+#      product / tech-term token: no whitespace, no sentence punctuation
+#      (Chinese or English), no control characters, length-bounded by
+#      script, and matching one of three shape regexes.
+#   4. The pattern (the ASR error side) must itself be a single shaped
+#      token. Empty / whitespace-only / punctuation patterns are rejected
+#      so we cannot accidentally promote "" → "整句".
+#   5. Pattern and replacement must be in the same script family (both
+#      contain CJK, or neither does) — this prevents direction reversal
+#      where e.g. the ASR-correct CJK word is "replaced" by an unrelated
+#      English fragment.
+#
+# This is the only public surface SilentMonitor calls. Correction rule
+# learning (learn_from_edit) is a separate, looser system.
+_DICT_REJECT_CHARS_RE = re.compile(
+    r"["
+    r"\s　"                      # whitespace incl. ideographic space
+    r"，。！？；：、…—–·"            # Chinese punctuation
+    r",\.!?;:'\"`~@#\$%\^&\*"        # ASCII punctuation
+    r"\(\)\{\}\[\]<>\|\\/"
+    r"\n\r\t"
+    r"]"
+)
+_DICT_ASCII_TERM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_+\-]*$")
+_DICT_CJK_TERM_RE   = re.compile(r"^[一-鿿]+$")
+_DICT_MIXED_TERM_RE = re.compile(r"^[A-Za-z0-9_+\-一-鿿]+$")
+
+DICT_MAX_ASCII_LEN = 24    # CamelCase product names, e.g. "DashScope"
+DICT_MAX_CJK_LEN   = 8     # ~2–8 CJK chars; longer is almost certainly a phrase
+DICT_MAX_MIXED_LEN = 24
+
+
 def extract_dictionary_terms(original_text: str, edited_text: str) -> list[str]:
-    """Identify terms from user edits for automatic dictionary sync.
+    """Conservative auto-dictionary extraction (replacement-side only).
 
-    Extracts all learnable edit segments (both token-level and char-level)
-    for addition to the hotword dictionary. Unlike the guard in _looks_like_dictionary_term,
-    this is intentionally broad — the dictionary feeds ASR context and LLM prompts,
-    and false positives are far less harmful than missed words.
+    Returns at most one term that satisfies every rule in the policy above.
+    If the edit is anything other than a SINGLE clean 1↔1 token replacement
+    where the replacement looks like a proper-noun-class token, returns [].
 
-    Uses its own token-level matching rather than generate_token_rules, because
-    the correction rule engine has strict filters (min 2‑char pattern, no digit-only)
-    that reject valid dictionary candidates like single-letter → multi-letter edits.
+    This is the canonical safety entry point used by SilentMonitor; the
+    correction rule engine (learn_from_edit) is intentionally not touched
+    so user-edit rules can still be learned by a different code path.
     """
-    terms: list[str] = []
-    seen: set[str] = set()
+    if not original_text or not edited_text or original_text == edited_text:
+        return []
 
-    # ── Token-level matching (looser than generate_token_rules) ──
     original_tokens = _tokenize_for_learning(original_text)
     edited_tokens = _tokenize_for_learning(edited_text)
-    matcher = difflib.SequenceMatcher(None, original_tokens, edited_tokens, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag != "replace":
-            continue
-        # Single-token ↔ single-token replacements
-        if (i2 - i1) == 1 and (j2 - j1) == 1:
-            replacement = edited_tokens[j1].strip()
-            pattern = original_tokens[i1].strip()
-            if _is_acceptable_dictionary_term(replacement, pattern) and replacement not in seen:
-                seen.add(replacement)
-                terms.append(replacement)
-            continue
-        # Multi-token → single-token (e.g. "一些词" → "CodeX")
-        if (j2 - j1) == 1:
-            replacement = edited_tokens[j1].strip()
-            if replacement and replacement not in seen and len(replacement) >= 2 and len(replacement) <= 40:
-                seen.add(replacement)
-                terms.append(replacement)
-            continue
-        # Multi-token replacements — extract each new token individually
-        for j in range(j1, j2):
-            replacement = edited_tokens[j].strip()
-            if not replacement or replacement in seen:
-                continue
-            if len(replacement) < 2 or len(replacement) > 40:
-                continue
-            # Skip if the replacement is embedded in any original token — this
-            # catches CJK fragments carved out of a larger original string
-            # (e.g. "我用" extracted from "我用口袋写了个软件").
-            if any(replacement in o for o in original_tokens):
-                continue
-            seen.add(replacement)
-            terms.append(replacement)
+    if not original_tokens or not edited_tokens:
+        return []
 
-    # ── Character-level diff (catch what tokenizer missed) ──
-    for diff in extract_diffs(original_text, edited_text):
-        if diff.get("op") not in ("replace", "insert"):
-            continue
-        replacement = (diff.get("edited_segment") or "").strip()
-        original = (diff.get("original_segment") or "").strip()
-        if not replacement or len(replacement) < 3 or replacement in seen:
-            continue
-        if replacement == original:
-            continue
-        # Skip fragments that are substrings of already-captured terms
-        if any(replacement in t for t in seen):
-            continue
-        seen.add(replacement)
-        terms.append(replacement)
+    matcher = difflib.SequenceMatcher(
+        None, original_tokens, edited_tokens, autojunk=False)
+    opcodes = [op for op in matcher.get_opcodes() if op[0] != "equal"]
 
-    return terms
+    # Rule 1+2: exactly one diff segment, must be 1↔1 replace.
+    if len(opcodes) != 1:
+        return []
+    tag, i1, i2, j1, j2 = opcodes[0]
+    if tag != "replace":
+        return []
+    if (i2 - i1) != 1 or (j2 - j1) != 1:
+        return []
+
+    pattern = original_tokens[i1]
+    replacement = edited_tokens[j1]
+    if not _is_safe_dictionary_term(replacement, pattern):
+        return []
+    return [replacement]
 
 
-def _is_acceptable_dictionary_term(replacement: str, pattern: str) -> bool:
-    """Check if a single-token replacement is dictionary-worthy.
+def _is_safe_dictionary_term(replacement: str, pattern: str) -> bool:
+    """Hard gate for an auto-learned personal-dictionary candidate.
 
-    More permissive than _is_learnable_token_pair: allows single-char patterns
-    (e.g. 'C' → 'CodeX'), and only rejects trivial identity/whitespace/path items.
+    Both sides must be clean single-token strings; replacement must look
+    like a proper-noun-class term; both must share the same script family.
+    Any uncertainty returns False — the policy is "skip if unsure".
     """
-    if not replacement or not replacement.strip():
+    if not replacement or not pattern:
         return False
-    if len(replacement) > 40:
+    # Pattern must be a real non-empty token, not whitespace/punctuation —
+    # otherwise we could "learn" anything as a brand-new dictionary entry.
+    if not pattern.strip() or _DICT_REJECT_CHARS_RE.search(pattern):
+        return False
+    if not replacement.strip():
         return False
     if replacement == pattern:
         return False
-    if PROTECTED_PATTERN.search(replacement):
+    # Hard reject: any disallowed character (whitespace, punctuation, ...)
+    if _DICT_REJECT_CHARS_RE.search(replacement):
+        return False
+    if PROTECTED_PATTERN.search(replacement) or PROTECTED_PATTERN.search(pattern):
+        return False
+    if replacement.isdigit() or pattern.isdigit():
+        return False
+
+    # Shape check — must match ONE of the recognized term forms and obey
+    # the script-specific length cap.
+    if _DICT_ASCII_TERM_RE.fullmatch(replacement):
+        if not (2 <= len(replacement) <= DICT_MAX_ASCII_LEN):
+            return False
+    elif _DICT_CJK_TERM_RE.fullmatch(replacement):
+        if not (2 <= len(replacement) <= DICT_MAX_CJK_LEN):
+            return False
+    elif _DICT_MIXED_TERM_RE.fullmatch(replacement):
+        if not (2 <= len(replacement) <= DICT_MAX_MIXED_LEN):
+            return False
+    else:
+        return False
+
+    # Direction sanity: same script family. Prevents "我们" → "WeChat" type
+    # cross-script swaps which usually indicate an unrelated paste, not a
+    # correction of the same mis-recognized word.
+    pat_cjk = bool(re.search(r"[一-鿿]", pattern))
+    rep_cjk = bool(re.search(r"[一-鿿]", replacement))
+    if pat_cjk != rep_cjk:
         return False
     return True
 

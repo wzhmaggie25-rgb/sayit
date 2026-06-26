@@ -89,3 +89,11 @@ class Events:
     # because the previous pipeline is still working through ASR / AI / inject.
     # Payload: stage name (e.g. "transcribing", "injecting") for UI hint.
     TOGGLE_IGNORED = "toggle:ignored"            # stage: str
+
+    # Stop ACK — fired by orchestrator the moment a second RAlt press is
+    # accepted as a stop request, BEFORE audio_capture.stop() returns or the
+    # downstream ASR/AI/inject phases complete. UI subscribers should treat
+    # this as "user wants to stop; show processing state immediately". No
+    # payload — RECORDING_STOPPED still fires later once audio actually
+    # finalizes.
+    RECORDING_STOPPING = "recording:stopping"

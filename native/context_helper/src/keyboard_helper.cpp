@@ -113,27 +113,22 @@ static void EmitToggle() {
     }
 }
 
-// ── Hook procedure (called on the hook thread) ──────────────────────
+// ── Core keyboard-event parser (shared by HookProc and the test entry) ──
 //
-// MUST be constant-time, MUST NOT acquire the Python GIL, MUST NOT call
-// any Python/ctypes callback. The only work permitted here:
-//   - read kbd struct fields
-//   - update g_matched
-//   - call SendInput (pure Win32) for stuck-Alt cleanup
-//   - call EmitToggle (atomic + SetEvent)
-//   - return CallNextHookEx or 1 to swallow the event
+// Returns true if the event was consumed (would swallow / "eat the key"),
+// false if the caller should pass through (CallNextHookEx).
 //
-static LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode < 0)
-        return CallNextHookEx(nullptr, nCode, wParam, lParam);
-
-    KBDLLHOOKSTRUCT& kbd = *reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
-    UINT vk = static_cast<UINT>(kbd.vkCode);
-    DWORD flags = kbd.flags;
-
+// `allowSideEffects`: when false (test path) we skip SendInput-based stuck-
+// Alt cleanup so unit tests do not inject real keystrokes into the OS. The
+// state-machine transitions (g_matched, EmitToggle) are unchanged.
+//
+// MUST be constant-time, MUST NOT acquire the GIL, MUST NOT call back into
+// Python — only the worker thread does that.
+static bool HandleKeyEventCore(UINT vk, WPARAM wParam, DWORD flags,
+                               bool allowSideEffects) {
     // Drop synthetic input (our own SendInput must not re-enter the hook).
     if (flags & LLKHF_INJECTED)
-        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+        return false;
 
     bool isDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
     bool isUp   = (wParam == WM_KEYUP   || wParam == WM_SYSKEYUP);
@@ -147,23 +142,25 @@ static LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (!g_matched) {
         if (isMain && isDown) {
             g_matched = true;
-            // Preemptive release: when the hook eats RAlt, the driver may have
-            // already armed VK_MENU / VK_LMENU async state. Release them so
-            // they don't get stuck for the entire recording session.
-            if (GetAsyncKeyState(VK_MENU) & 0x8000) {
-                INPUT inp = {}; inp.type = INPUT_KEYBOARD;
-                inp.ki.wVk = VK_MENU; inp.ki.dwFlags = KEYEVENTF_KEYUP;
-                SendInput(1, &inp, sizeof(INPUT));
+            if (allowSideEffects) {
+                // Preemptive release: when the hook eats RAlt, the driver may
+                // have already armed VK_MENU / VK_LMENU async state. Release
+                // them so they don't stay stuck for the whole session.
+                if (GetAsyncKeyState(VK_MENU) & 0x8000) {
+                    INPUT inp = {}; inp.type = INPUT_KEYBOARD;
+                    inp.ki.wVk = VK_MENU; inp.ki.dwFlags = KEYEVENTF_KEYUP;
+                    SendInput(1, &inp, sizeof(INPUT));
+                }
+                if (GetAsyncKeyState(VK_LMENU) & 0x8000) {
+                    INPUT inp = {}; inp.type = INPUT_KEYBOARD;
+                    inp.ki.wVk = VK_LMENU; inp.ki.dwFlags = KEYEVENTF_KEYUP;
+                    SendInput(1, &inp, sizeof(INPUT));
+                }
             }
-            if (GetAsyncKeyState(VK_LMENU) & 0x8000) {
-                INPUT inp = {}; inp.type = INPUT_KEYBOARD;
-                inp.ki.wVk = VK_LMENU; inp.ki.dwFlags = KEYEVENTF_KEYUP;
-                SendInput(1, &inp, sizeof(INPUT));
-            }
-            return 1; // eat the key
+            return true; // eat the key
         }
         if (isMain && isUp) {
-            return 1; // eat stray RAlt up
+            return true; // eat stray RAlt up
         }
     } else {
         if (isMain && isUp) {
@@ -171,15 +168,30 @@ static LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam) {
             // Emit toggle on the rising edge of release. The HookProc returns
             // immediately; the worker thread will run the Python callback.
             EmitToggle();
-            ForceReleaseAlt();
-            return 1;
+            if (allowSideEffects) {
+                ForceReleaseAlt();
+            }
+            return true;
         }
         if (isMain && isDown) {
             // Auto-repeat keydown while held: swallow but never duplicate.
-            return 1;
+            return true;
         }
     }
 
+    return false;
+}
+
+// ── Hook procedure (called on the hook thread) ──────────────────────
+//
+// Thin wrapper over HandleKeyEventCore.
+//
+static LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode < 0)
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    KBDLLHOOKSTRUCT& kbd = *reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+    if (HandleKeyEventCore(static_cast<UINT>(kbd.vkCode), wParam, kbd.flags, true))
+        return 1;
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
@@ -366,6 +378,64 @@ __declspec(dllexport) int __test_trigger_toggle(void) {
     }
     EmitToggle();
     return 1;
+}
+
+// ── Test-only HookProc-equivalent event injector ────────────────────
+//
+// Drives the EXACT parsing path used in production (HandleKeyEventCore)
+// with arbitrary (vkCode, message, flags) tuples — i.e. the same data
+// fields Windows fills into KBDLLHOOKSTRUCT for a real physical key.
+// Returns 1 if the parser would have eaten the key, 0 if it would have
+// passed through. Used by tests/test_keyboard_helper_physical.py to
+// cover the real RAlt down→up state machine that the existing transport
+// stress test bypasses.
+//
+// `allowSideEffects` is forced to false: we MUST NOT inject real keys
+// into the OS from inside a unit test. Everything else (g_matched,
+// EmitToggle, g_pending) behaves identically to HookProc.
+//
+__declspec(dllexport) int __test_handle_event(
+        unsigned int vkCode, unsigned int wParam, unsigned int flags) {
+    if (!g_running.load()) {
+        return -1;
+    }
+    bool eaten = HandleKeyEventCore(
+        static_cast<UINT>(vkCode),
+        static_cast<WPARAM>(wParam),
+        static_cast<DWORD>(flags),
+        false);
+    return eaten ? 1 : 0;
+}
+
+// ── Test-only state reset for the HookProc parser ───────────────────
+//
+// Lets a test reset `g_matched` between scenarios without uninstalling /
+// reinstalling the hook (which is expensive and changes thread identity).
+__declspec(dllexport) void __test_reset_state(void) {
+    g_matched = false;
+}
+
+// ── ABI version / build identity ────────────────────────────────────
+//
+// Exposes the build identity of THIS DLL so the Python host can log it
+// at startup. The version integer is a monotonically increasing tag
+// bumped whenever the DLL's ABI changes (new exports, new behavior).
+// Older builds that lack this export are detected by getattr() failing
+// on the Python side.
+//
+// Version log:
+//   1  initial v2 transport (worker thread + event)
+//   2  + __test_handle_event / __test_reset_state, RAlt state machine
+//        coverage hooks (2026-06-26)
+#define SAYIT_KEYBOARD_HELPER_VERSION 2
+#define SAYIT_KEYBOARD_HELPER_BUILD   "2026-06-26-v2"
+
+__declspec(dllexport) unsigned int helper_version(void) {
+    return SAYIT_KEYBOARD_HELPER_VERSION;
+}
+
+__declspec(dllexport) const char* helper_build_id(void) {
+    return SAYIT_KEYBOARD_HELPER_BUILD;
 }
 
 #ifdef __cplusplus
