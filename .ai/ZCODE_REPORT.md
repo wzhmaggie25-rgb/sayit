@@ -213,4 +213,4 @@ tests\test_win32_edit_integration.py ...                                  [100%]
 
 ## 当前提交ID
 
-`<PENDING>` — 本轮提交 SHA 由 git push 后回填到本文件与 `.ai/CURRENT_TASK.md`。
+`5084f7d1ecca6cda2f858b1006fb15ae059007f6` — `fix: make RAlt delivery observable and silent learning conservative`

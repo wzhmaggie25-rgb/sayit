@@ -4,7 +4,11 @@
 
 ## 状态
 
-**DONE** — 自动化已完成；实机最终验收（用户连按 3 次 RAlt + 观察 `/api/diagnostics/hotkey`）仍需用户手动确认。最终提交 SHA 见 `.ai/ZCODE_REPORT.md`。
+**DONE** — 自动化已完成；实机最终验收（用户连按 3 次 RAlt + 观察 `/api/diagnostics/hotkey`）仍需用户手动确认。
+
+**最终提交 SHA：** `5084f7d1ecca6cda2f858b1006fb15ae059007f6`
+
+**待用户真实物理 RAlt 三次验收。** 验收流程见 `.ai/ZCODE_REPORT.md` 的"人工实机验收指引"。
 
 ## 任务名称
 
