@@ -1,5 +1,23 @@
 # Test Results
-> 最后一次更新：2026-06-26 14:45
+> 最后一次更新：2026-06-26 14:54
+
+## 本轮说明
+
+本轮为 ZCode 自动化能力评估（只读探查），**未运行业务代码测试**。
+所有调查结果见 `.ai/ZCODE_AUTOMATION_CAPABILITY.md`。
+
+## 环境能力扫描
+
+| 项目 | 结果 | 方法 |
+|------|------|------|
+| `zcode` CLI on PATH | ❌ 不存在 | `where zcode` |
+| `ZCode.exe` CLI 子命令 | ❌ 无 | `--help` / `--version`（仅启动 Electron） |
+| ZCode MCP 服务端 | ❌ 不暴露 | 配置检查（仅客户端） |
+| `zcode://` URI scheme | ⚠️ 已注册 | `reg query HKCR\zcode` → `ZCode.exe "%1"` |
+| `codex://` URI scheme | ⚠️ 已注册（无 command） | `reg query HKCR\codex` |
+| Claude Code 可用 | ✅ 2.1.185，支持 `-p` 非交互 | `where claude` + `--version` |
+| Cursor CLI 非交互 | ❌ 仅 IDE 启动器 | `where cursor` + `--help` |
+| aider / gh / ollama / gemini / continue | ❌ 均不在 PATH | `where` 各工具 |
 
 ## 单元测试
 

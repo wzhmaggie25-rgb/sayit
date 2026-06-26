@@ -1,7 +1,16 @@
 # ZCode Report
-> 最后一次更新：2026-06-26 14:45
+> 最后一次更新：2026-06-26 14:54
 
-## 接收到的任务
+## 接收到的任务（第二轮）
+
+只读检查 ZCode 的 CLI/Headless/MCP/URI Scheme 自动化能力，写入 `.ai/ZCODE_AUTOMATION_CAPABILITY.md`。
+
+重点：
+1. 是否有 `zcode` CLI 或 headless 模式
+2. ZCode 是否暴露 MCP 服务端
+3. Windows 注册表是否有 `zcode://` 协议处理器
+4. 本机有哪些可命令行调用的代码代理候选
+5. 不得读取/输出任何密钥和聊天内容
 
 执行 `.ai/CURRENT_TASK.md` 中的"只读审计静默学习"任务。
 
@@ -36,7 +45,25 @@ Windows COM 不允许在同一线程上混合公寓模型，第二次 CoInitiali
 `_get_focus_context_python()` 依赖 `comtypes` 创建 `CUIAutomation` 对象。在 VS Code / ZCode 等非标准编辑器中，
 `GetFocusedElement()` 可能返回 None，导致 `is_editable=False`，`_start_track()` 无法绑定。
 
-## 实施内容
+## 实施内容（第二轮：ZCode 自动化能力评估）
+
+### 探查范围
+- `zcode` CLI 在 PATH 上：不存在
+- `ZCode.exe --help / --version`：无 CLI 接口（Electron 应用），版本 3.1.7
+- ZCode 作为 MCP 服务端：否（仅客户端）
+- `zcode://` URI scheme：已注册，指向 `ZCode.exe "%1"`
+- `codex://` URI scheme：已注册，无 open command
+- 本机代码代理候选：`claude`（2.1.185，支持 `-p` 非交互模式）、`cursor`（3.8.11，仅 IDE 启动器）
+- 不可用：`aider`、`gh`、`ollama`、`gemini`、`continue`、`codex`
+
+### 创建的文件
+- `.ai/ZCODE_AUTOMATION_CAPABILITY.md` — 完整评估报告
+
+### 更新的文件
+- `.ai/ZCODE_REPORT.md` — 新增本轮内容
+- `.ai/TEST_RESULTS.md` — 新增环境能力扫描记录
+
+## 实施内容（第一轮：静默学习审计）
 
 ### 代码阅读
 - 读取 `silent_monitor.py`（379 行全读）
@@ -127,5 +154,5 @@ python -c "..."  # PROJECT_ROOT 验证、server.py vs 独立脚本
 ## 当前提交ID
 
 ```
-1077cb7
+f6ae3e7
 ```
