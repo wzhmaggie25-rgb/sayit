@@ -5,7 +5,7 @@
 
 **DONE**
 
-完成 SHA：`480f06b8347353844de73c56a9a0eac4178f5ea0`
+完成 SHA：`d6fd8544730a66e90dd0ad16a6a12a613d889053`
 
 68 个用例通过，1 个允许跳过（COM/UIA 在无交互 CI 中 skip）。新增核心断言（hook 传输、状态机、注入兜底、Win32 集成）均未通过 skip 规避。
 

@@ -131,4 +131,4 @@ tests\test_win32_edit_integration.py ...                                 [100%]
 
 ## 当前提交ID
 
-`480f06b8347353844de73c56a9a0eac4178f5ea0` — `fix: make Alt stop and text injection reliable`
+`d6fd8544730a66e90dd0ad16a6a12a613d889053` — `fix: make Alt stop and text injection reliable`
