@@ -106,6 +106,7 @@ class InjectResultClipboardRestoreIntegration(unittest.TestCase):
             patch.object(self.inj, "_focus_window", return_value=True),
             patch.object(self.inj, "_assess_target_editability",
                          return_value="editable"),
+            patch.object(self.inj, "_get_focused_edit_hwnd", return_value=0),
             patch.object(self.inj, "_foreground_info",
                          return_value=(4242, "Edit", 1, "notepad.exe")),
             patch.object(self.inj, "_get_context_for_strategy", return_value={}),
@@ -131,6 +132,38 @@ class InjectResultClipboardRestoreIntegration(unittest.TestCase):
             patch("infrastructure.clipboard_snapshot.restore_snapshot",
                   return_value=False),
         ]
+        self.assertEqual(len(patches), 16)
+        with patches[0]:
+            with patches[1]:
+                with patches[2]:
+                    with patches[3]:
+                        with patches[4]:
+                            with patches[5]:
+                                with patches[6]:
+                                    with patches[7]:
+                                        with patches[8]:
+                                            with patches[9]:
+                                                with patches[10]:
+                                                    with patches[11]:
+                                                        with patches[12]:
+                                                            with patches[13]:
+                                                                with patches[14]:
+                                                                    with patches[15]:
+                                                                        result = self.inj.inject(
+                                                                        "bar", target=self.target)
+        self.assertEqual(result.state, "verified_success")
+        self.assertFalse(result.clipboard_preserved,
+                         "restore failure must set clipboard_preserved=False")
+        self.assertFalse(result.clipboard_restored,
+                         "restore failure must set clipboard_restored=False")
+
+    def test_verified_success_with_restore_ok(self):
+        """Clipboard success with restore ok → clipboard_preserved=True."""
+        patches = self._common_patches() + [
+            patch.object(self.inj, "_snapshot_target_text",
+                         side_effect=[(True, "foo"), (True, "foobar")]),
+            patch.object(self.inj, "_direct_input", return_value=False),
+        ]
         self.assertEqual(len(patches), 15)
         with patches[0]:
             with patches[1]:
@@ -150,36 +183,6 @@ class InjectResultClipboardRestoreIntegration(unittest.TestCase):
                                                                     result = self.inj.inject(
                                                                         "bar", target=self.target)
         self.assertEqual(result.state, "verified_success")
-        self.assertFalse(result.clipboard_preserved,
-                         "restore failure must set clipboard_preserved=False")
-        self.assertFalse(result.clipboard_restored,
-                         "restore failure must set clipboard_restored=False")
-
-    def test_verified_success_with_restore_ok(self):
-        """Clipboard success with restore ok → clipboard_preserved=True."""
-        patches = self._common_patches() + [
-            patch.object(self.inj, "_snapshot_target_text",
-                         side_effect=[(True, "foo"), (True, "foobar")]),
-            patch.object(self.inj, "_direct_input", return_value=False),
-        ]
-        self.assertEqual(len(patches), 14)
-        with patches[0]:
-            with patches[1]:
-                with patches[2]:
-                    with patches[3]:
-                        with patches[4]:
-                            with patches[5]:
-                                with patches[6]:
-                                    with patches[7]:
-                                        with patches[8]:
-                                            with patches[9]:
-                                                with patches[10]:
-                                                    with patches[11]:
-                                                        with patches[12]:
-                                                            with patches[13]:
-                                                                result = self.inj.inject(
-                                                                    "bar", target=self.target)
-        self.assertEqual(result.state, "verified_success")
         self.assertTrue(result.clipboard_preserved)
         self.assertTrue(result.clipboard_restored)
 
@@ -192,7 +195,7 @@ class InjectResultClipboardRestoreIntegration(unittest.TestCase):
             patch("infrastructure.clipboard_snapshot.restore_snapshot",
                   return_value=False),
         ]
-        self.assertEqual(len(patches), 14)
+        self.assertEqual(len(patches), 15)
         with patches[0]:
             with patches[1]:
                 with patches[2]:
@@ -207,8 +210,9 @@ class InjectResultClipboardRestoreIntegration(unittest.TestCase):
                                                     with patches[11]:
                                                         with patches[12]:
                                                             with patches[13]:
-                                                                result = self.inj.inject(
-                                                                    "xyz", target=self.target)
+                                                                with patches[14]:
+                                                                    result = self.inj.inject(
+                                                                        "xyz", target=self.target)
         self.assertEqual(result.state, "attempted_unverified")
         self.assertFalse(result.clipboard_preserved,
                          "restore failure must set clipboard_preserved=False")

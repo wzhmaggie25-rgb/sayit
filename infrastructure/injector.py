@@ -77,6 +77,8 @@ PUL = ctypes.POINTER(ctypes.c_ulong)
 
 GMEM_MOVEABLE = 0x0002
 CF_UNICODETEXT = 13
+EM_GETSEL = 0x00B0
+EM_REPLACESEL = 0x00C2
 
 
 class GUITHREADINFO(ctypes.Structure):
@@ -433,6 +435,120 @@ class Injector:
         except Exception as e:
             logger.debug("[INJECT-EDITABILITY] assessment error: %s", e)
             return "unknown"
+
+    def _get_focused_edit_hwnd(self) -> int:
+        """Re-query GetGUIThreadInfo to find the real focused Edit/RichEdit hwnd.
+
+        Returns the hwnd of the focused Edit/RichEdit control, or 0 if none
+        found. This is the proper target for selection-aware EM_REPLACESEL.
+        """
+        try:
+            fg = ctypes.windll.user32.GetForegroundWindow()
+            if not fg:
+                return 0
+            tid = ctypes.windll.user32.GetWindowThreadProcessId(fg, None)
+            gui = GUITHREADINFO()
+            gui.cbSize = ctypes.sizeof(GUITHREADINFO)
+            if not ctypes.windll.user32.GetGUIThreadInfo(tid, ctypes.byref(gui)):
+                return 0
+            focus_hwnd = int(gui.hwndFocus) if gui.hwndFocus else 0
+            if not focus_hwnd:
+                return 0
+            class_buf = ctypes.create_unicode_buffer(256)
+            ctypes.windll.user32.GetClassNameW(focus_hwnd, class_buf, 256)
+            cls = (class_buf.value or "").lower()
+            if "edit" in cls or "richedit" in cls:
+                return focus_hwnd
+            return 0
+        except Exception:
+            return 0
+
+    def _inject_win32_selection_aware(self, text: str,
+                                      focus_hwnd: int) -> bool | None:
+        """Selection-aware Win32 EM_REPLACESEL insertion for focused Edit/RichEdit.
+
+        Preserves existing text by reading the full content and selection,
+        computing the expected post-text, and verifying after insertion.
+
+        Args:
+            text: The text to insert at the caret/selection.
+            focus_hwnd: The real focused Edit/RichEdit hwnd.
+
+        Returns:
+            True — sent and post-readback matches expected.
+            False — sent but readback unavailable or post != expected.
+            None — cannot read pre-text (no action taken, fall through).
+        """
+        user32 = ctypes.windll.user32
+        send_proto = ctypes.WINFUNCTYPE(
+            ctypes.c_ssize_t,
+            wintypes.HWND, wintypes.UINT,
+            wintypes.WPARAM, wintypes.LPARAM,
+        )
+        send = send_proto(("SendMessageW", user32))
+
+        # ── Read pre-text ──
+        WM_GETTEXTLENGTH = 0x000E
+        WM_GETTEXT = 0x000D
+        try:
+            length = int(send(focus_hwnd, WM_GETTEXTLENGTH, 0, 0))
+            if length < 0:
+                return None
+            pre_buf = ctypes.create_unicode_buffer(length + 1)
+            send(focus_hwnd, WM_GETTEXT, length + 1,
+                 ctypes.cast(pre_buf, ctypes.c_void_p).value or 0)
+            pre_text = pre_buf.value or ""
+        except Exception:
+            return None
+
+        # ── Read selection ──
+        try:
+            sel_result = int(send(focus_hwnd, EM_GETSEL, 0, 0))
+        except Exception:
+            return None
+
+        sel_start = sel_result & 0xFFFF
+        sel_end = (sel_result >> 16) & 0xFFFF
+        # If no selection (cursor only), start == end
+        # EM_REPLACESEL at cursor inserts and replaces selection if any
+
+        # Compute expected post-text
+        expected = pre_text[:sel_start] + text + pre_text[sel_end:]
+
+        # ── Perform selection-aware insertion ──
+        try:
+            text_buf = ctypes.create_unicode_buffer(text)
+            send(focus_hwnd, EM_REPLACESEL, 1,  # wparam=1 for undo
+                 ctypes.cast(text_buf, ctypes.c_void_p).value or 0)
+        except Exception:
+            return None
+
+        # ── Post readback verification ──
+        try:
+            post_len = int(send(focus_hwnd, WM_GETTEXTLENGTH, 0, 0))
+            if post_len < 0:
+                return False
+            post_buf = ctypes.create_unicode_buffer(post_len + 1)
+            send(focus_hwnd, WM_GETTEXT, post_len + 1,
+                 ctypes.cast(post_buf, ctypes.c_void_p).value or 0)
+            post_text = post_buf.value or ""
+        except Exception:
+            return False
+
+        if post_text == expected:
+            logger.info(
+                "[INJECT-WIN32-SEL] verified: pre=%r sel=(%d,%d) "
+                "expected=%r post=%r",
+                pre_text[:60], sel_start, sel_end,
+                expected[:60], post_text[:60])
+            return True
+
+        logger.info(
+            "[INJECT-WIN32-SEL] mismatch: pre=%r sel=(%d,%d) "
+            "expected=%r post=%r",
+            pre_text[:60], sel_start, sel_end,
+            expected[:60], post_text[:60])
+        return False
 
     def _proc_name(self, pid: int) -> str:
         try:
@@ -857,6 +973,31 @@ class Injector:
             self.last_target_title = title_buf.value or ""
         except Exception:
             self.last_target_title = ""
+
+        # ── Layer 0: Selection-aware Win32 insertion ──
+        # When the foreground has a real focused Edit/RichEdit, use
+        # EM_GETSEL + EM_REPLACESEL to insert text at the caret/selection
+        # without destroying existing content (unlike SetValue / literal SendMessage).
+        # If this succeeds (verified), return immediately; if it attempts
+        # but can't verify, return attempted_unverified; if it can't read
+        # the target, fall through to clipboard/SendInput.
+        if editability == "editable":
+            focus_hwnd = self._get_focused_edit_hwnd()
+            if focus_hwnd:
+                win32_result = self._inject_win32_selection_aware(
+                    text, focus_hwnd)
+                if win32_result is True:
+                    logger.info(
+                        "[INJECT-POST] ok via=Win32-selection-aware")
+                    return _ok("win32_selection", verified=True)
+                elif win32_result is False:
+                    logger.info(
+                        "[INJECT-POST] Win32 selection-aware sent but "
+                        "unverified — returning attempted_unverified")
+                    return _attempted_unverified(
+                        "win32_selection",
+                        reason="win32_selection_unverified")
+                # None → fall through
 
         context = self._get_context_for_strategy()
         strategy = self._strategy_for_context(proc, cls, context)
