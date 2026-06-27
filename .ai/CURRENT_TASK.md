@@ -4,56 +4,78 @@
 
 ## 状态
 
-**BLOCKED_USER_VALIDATION**
+**ZCODE_READY**
 
 ## 结论
 
-Round 7 全部 P0/P1 通过自主代码审查，全部 302 测试通过，前端静态检查 + smoke 已通过。
+Round 7 长任务有明显进展，但未通过 ChatGPT 代码审查，暂时不得进入用户实机验收。
 
-不要直接写 DONE，因为仍需用户在真实 Windows 应用中验证。
+当前实现 HEAD：
+
+```text
+a0e5ae667a23ecd3336c48637d42f7aad8e76254
+```
 
 ## 执行器
 
+本轮继续使用：
+
 ```text
-ZCode GUI → Claude Code (glm-latest)
+ZCode GUI → Claude Code
 ```
 
-## 唯一目标（已达成）
+原因：Bridge v0.2.1 仍未把 `BLOCKED_USER_VALIDATION` 识别为成功终态，且未实际校验 task start 后有新 commit。修复到 v0.2.2 后，后续长任务再恢复优先使用 Bridge。
 
-> 将输入行为改为当前焦点、非破坏性、真实 readback；确保剪贴板恢复状态与事实一致；确保自动个人热词只在两个不同 history 后提升；修复 Bridge 完成判定；通过全量测试后交给用户实机验收。
+运行时 Agent Bridge 必须保持关闭，不同时启动其他执行器。
 
-## Round 7 Checkpoint Commits
+## 唯一目标
 
-| Phase | SHA | 说明 |
-|-------|-----|------|
-| Phase 0 | `bdb0e1b` | Bridge v0.2.1：utf-8-sig 配置、robust JSON parser、DONE 不被覆盖 |
-| Phase 1 | `3f28cf5` | 当前焦点注入，不恢复 stale target (P0-1) |
-| Phase 2 | `d216e65` | 非破坏性插入 (P0-2/P0-3) |
-| Phase 3 | `8295eb6` | 真实 readback pre/post diff (P0-4/P0-5) |
-| Phase 4 | `ec485e4` | 剪贴板恢复事实一致 (P0-6) |
-| Phase 5 | `736b6fe` | 结果卡片 state+message (P0-7) |
-| Phase 6 | `5f1009d` | 真正的两次 history 热词门禁 (P0-8/P0-9/P1-2/P1-3) |
-| Phase 7 | `50dea04` | 结构化 INJECTION_DONE payload (P1-4) |
-| Phase 8 | *(待提交)* | docs: Round 7 self-review + BLOCKED_USER_VALIDATION |
+完成 Round 8 最终安全收口：
 
-最终 HEAD：`50dea046af9cab4a4cff7a4dd9708dbd74900bda`
+> 完全移除破坏性 SetValue/WM_SETTEXT 通用路径，实现真实 focused control + selection-aware insertion；统一 pre/selection/post readback；修复 clipboard 事实传播、同 history 幂等、promotion sync 语义、IPC sender 校验和 Bridge 成功终态。
 
-## 测试结果
+## 最高优先级文件
 
-```
-python -m pytest tests/ --timeout=30 -v
-→ 302 passed, 1 skipped, 6 subtests passed in 22.08s
+必须依次读取：
 
-node --check frontend/main.js → OK
-node --check frontend/preload.js → OK
-node frontend/_smoke_result_card.js → SMOKE TEST PASSED (34 assertions)
+```text
+.ai/ROUND7_CODE_REVIEW.md
+.ai/ROUND8_LONG_TASK.md
+.ai/TYPELESS_RUNTIME_VALIDATION.md
+.ai/ROUND6_CODE_REVIEW.md
+.ai/ROUND7_SELF_REVIEW.md
 ```
 
-## 安全边界
+其中 ROUND7_CODE_REVIEW 和 ROUND8_LONG_TASK 覆盖此前自审 PASS 结论。
 
-- ✅ 未修改 main、backup/*、稳定 tag
-- ✅ 未 force push、reset --hard、git clean
-- ✅ 未读取/修改真实用户数据库、词典、历史、录音、日志正文或凭据
-- ✅ 未删除或弱化测试
-- ✅ 每 Phase 测试通过后 checkpoint commit + push
-- ✅ 最终报告填写真实完整 SHA
+## 必须修复
+
+1. 删除通用 UIA ValuePattern.SetValue；
+2. 删除通用 WM_SETTEXT；
+3. Win32 只对真实 focused control 使用 selection-aware insertion；
+4. UIA/Win32 verified 都必须有 pre + selection/caret + post 证据；
+5. pre 不可读时不得 substring verified；
+6. GetGUIThreadInfo + read-only/keyboard-focusable 可编辑判断；
+7. unknown/0 hwnd 不得盲目注入；
+8. clipboard restore 事实贯穿所有 failure 退出路径；
+9. 同 history 重放不得增加 confidence/match_count；
+10. promotion 不得绕过 HotwordsManager/ASR sync；
+11. result-card IPC 校验 sender；
+12. Bridge v0.2.2 支持 DONE 与 BLOCKED_USER_VALIDATION 两个成功终态，并实际验证新 commit。
+
+## 完成条件
+
+- ROUND7_CODE_REVIEW 所有 P0/P1 均真实修复；
+- 通用 injector 代码搜索不存在 SetValue、WM_SETTEXT、DocumentRange.Select 和 substring verified；
+- 全量 Python 测试、Node check、result-card smoke 全通过；
+- 创建 `.ai/ROUND8_SELF_REVIEW.md`；
+- 每 Phase checkpoint commit + push；
+- 最终真实完整 SHA 写入报告。
+
+成功终态：
+
+```text
+BLOCKED_USER_VALIDATION
+```
+
+不要直接写 DONE。
