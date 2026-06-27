@@ -786,7 +786,11 @@ class Injector:
         }
 
     def _snapshot_target_text(self, hwnd: int) -> tuple[bool, str]:
-        """Capture the current text from a Win32 child Edit control.
+        """Capture the current text from the focused Edit/RichEdit control.
+
+        Uses _get_focused_edit_hwnd() to bind readback to the same focused
+        control identity that Layer 0 uses, rather than enumerating children
+        of the top-level window.
 
         Returns ``(ok, text)``. ``ok=False`` means readback is not possible
         for this target — caller should treat the injection as
@@ -795,7 +799,7 @@ class Injector:
         if not hwnd:
             return False, ""
         try:
-            child = self._find_child_edit(hwnd) or hwnd
+            child = self._get_focused_edit_hwnd() or self._find_child_edit(hwnd) or hwnd
         except Exception:
             child = hwnd
         try:
@@ -824,8 +828,8 @@ class Injector:
                              pre_text: str | None) -> str:
         """Decide post-paste readback outcome via pre/post diff.
 
-        Phase 3 fix: reject substring false positives by requiring a
-        provable pre→post insertion.
+        Phase 4: no substring fallback — pre must be available for a diff.
+        Without a pre snapshot, readback is ambiguous → no_readback.
 
         Returns one of:
           "verified"     — post content PROVES expected was inserted.
@@ -839,9 +843,9 @@ class Injector:
         if not ok:
             return "no_readback"
 
-        # Without a pre snapshot, fall back to weak substring check.
+        # pre_text is required for a reliable diff
         if pre_text is None:
-            return "verified" if expected and expected in post else "no_readback"
+            return "no_readback"
 
         if post == pre_text:
             return "unchanged"

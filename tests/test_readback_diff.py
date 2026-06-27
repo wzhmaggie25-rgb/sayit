@@ -124,14 +124,14 @@ class VerifyTargetTextDiffTests(unittest.TestCase):
             verdict = self.inj._verify_target_text(42, "hello", "pre")
         self.assertEqual(verdict, "no_readback")
 
-    # ── no pre_text (weak match) ──
+    # ── no pre_text (no fallback) ──
 
-    def test_no_pre_text_with_match_verified(self):
-        """No pre snapshot, expected in post → weak verified."""
+    def test_no_pre_text_with_match_returns_no_readback(self):
+        """No pre snapshot, expected in post → no_readback (no substring fallback)."""
         with patch.object(self.inj, "_snapshot_target_text",
                           return_value=(True, "hello world")):
             verdict = self.inj._verify_target_text(42, "hello", None)
-        self.assertEqual(verdict, "verified")
+        self.assertEqual(verdict, "no_readback")
 
     def test_no_pre_text_no_match_no_readback(self):
         """No pre snapshot, expected NOT in post → no_readback."""
