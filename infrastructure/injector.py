@@ -875,30 +875,49 @@ class Injector:
             return self._inject_locked(text, target)
 
     def _inject_locked(self, text: str, target: InjectionTarget | None) -> InjectionResult:
-        def _fail(reason: str = "") -> InjectionResult:
+        def _fail(reason: str = "", restore_ok: bool | None = None,
+                  clipboard_preserved: bool | None = None) -> InjectionResult:
             # On failure: do NOT auto-copy text to clipboard unless
             # copy_result_to_clipboard is explicitly enabled.
             # Per spec: verified_success/no_editable_target must preserve clipboard;
             # injection_failed also preserves clipboard by default.
+            # Clipboard state from caller (e.g. paste restore failure) is
+            # propagated faithfully.
             try:
                 cfg_copy = ConfigStore().get("copy_result_to_clipboard", False)
             except Exception:
                 cfg_copy = False
+            final_preserved = (
+                clipboard_preserved if clipboard_preserved is not None
+                else (not cfg_copy))
+            final_restored = (
+                restore_ok if restore_ok is not None
+                else (not cfg_copy))
             if cfg_copy:
-                try:
-                    _clipboard_set_text(text)
+                if clipboard_preserved is None and restore_ok is None:
+                    try:
+                        _clipboard_set_text(text)
+                        logger.warning(
+                            "[INJECT-FALLBACK] copy_result_to_clipboard=True — "
+                            "final text written to clipboard (len=%d) reason=%s",
+                            len(text), reason)
+                    except Exception:
+                        pass
+                else:
                     logger.warning(
-                        "[INJECT-FALLBACK] copy_result_to_clipboard=True — "
-                        "final text written to clipboard (len=%d) reason=%s",
+                        "[INJECT-FALLBACK] copy_result_to_clipboard=True but "
+                        "clipboard state was explicitly provided — "
+                        "respecting caller state (len=%d) reason=%s",
                         len(text), reason)
-                except Exception:
-                    pass
             else:
                 logger.warning(
                     "[INJECT-FALLBACK] all injection paths failed — "
-                    "clipboard preserved (untouched) reason=%s", reason)
+                    "clipboard %s reason=%s",
+                    "preserved (untouched)" if final_preserved else "NOT preserved",
+                    reason)
             return InjectionResult(ok=False, state="injection_failed",
-                                    clipboard_preserved=(not cfg_copy),
+                                    clipboard_preserved=final_preserved,
+                                    clipboard_restored=final_restored,
                                     reason=reason or "all_injection_paths_failed")
 
         def _ok(method: str, verified: bool = False, target_restored: bool = False,
@@ -1073,7 +1092,9 @@ class Injector:
                     # DO NOT try SendInput on top: we have no proof the paste
                     # was truly rejected vs rendered elsewhere; chase will
                     # risk duplicate text.
-                    return _fail("paste_target_unchanged")
+                    return _fail("paste_target_unchanged",
+                                   restore_ok=restore_ok,
+                                   clipboard_preserved=restore_ok)
                 # no_readback — cannot prove anything either way.
                 return _attempted_unverified(
                     "clipboard", reason="paste_no_readback", restore_ok=restore_ok)
