@@ -39,10 +39,11 @@ from typing import Iterable, Optional
 logger = logging.getLogger(__name__)
 
 # Conservative thresholds — favor missed promotions over wrong ones.
-MIN_DISTINCT_HISTORIES = 2          # at least N distinct history_ids
+MIN_DISTINCT_HISTORIES = 2          # at least N distinct history_ids (no competition)
 HOTWORD_MAX_LEN = 12                # CJK characters / token chars
 HOTWORD_MIN_LEN = 2                 # at least 2 chars (no single-char promotions)
-MIN_WINNER_MARGIN = 1               # winner must lead runners-up by ≥ N histories
+MIN_WINNER_MARGIN = 1               # winner must lead runners-up by ≥ N (no competition)
+MIN_WINNER_MARGIN_WITH_COMPETITION = 2  # when competition exists, margin must be ≥ this
 
 # CJK or alnum-with-CJK only — pure ASCII numbers / punctuation are not
 # personal hotwords.
@@ -123,42 +124,75 @@ def decide_promotion(rules: list[dict]) -> PromotionDecision:
 
     Returns a ``PromotionDecision``; ``promoted_word`` is the replacement
     to add to the dictionary, or ``None`` to skip.
+
+    Algorithm (Phase 6 — conservative conflict detection):
+
+      1. Build candidates from ALL rules (no pre-filtering). Group by pattern.
+      2. For each pattern:
+         a. **Lock**: if ANY candidate is already promoted, skip the
+            entire pattern — no second auto-promotion.
+         b. **Competition**: if multiple candidates exist for the same
+            pattern (including those with evidence < 2), competition
+            exists. The winner must lead the runner-up by ≥
+            ``MIN_WINNER_MARGIN_WITH_COMPETITION`` distinct histories.
+         c. **No competition**: a single candidate with ≥
+            ``MIN_DISTINCT_HISTORIES`` may be promoted.
+         d. The candidate must also pass ``_is_eligible_term``.
+      3. Among surviving pattern winners, pick the one with the
+         highest evidence count.
     """
-    # Build candidates filtered by eligibility and not-yet-promoted.
-    candidates: list[PromotionCandidate] = []
+    # Build all candidates — no pre-filtering needed; lock detection
+    # requires seeing even already-promoted and low-evidence entries.
+    all_candidates: list[PromotionCandidate] = []
     for r in rules:
         cand = _normalize_candidate(r)
-        if cand.already_promoted:
-            continue
-        if not _is_eligible_term(cand.replacement, cand.pattern):
-            continue
-        if cand.evidence_count < MIN_DISTINCT_HISTORIES:
-            continue
-        candidates.append(cand)
+        all_candidates.append(cand)
 
-    if not candidates:
+    if not all_candidates:
         return PromotionDecision(reason="no_eligible_candidates")
 
-    # Group by pattern to detect contested patterns. A pattern with multiple
-    # surviving replacements is ambiguous — skip the whole pattern unless
-    # there is a unique winner with a margin.
+    # Group by pattern.
     by_pattern: dict[str, list[PromotionCandidate]] = {}
-    for c in candidates:
+    for c in all_candidates:
         by_pattern.setdefault(c.pattern, []).append(c)
 
     best: PromotionCandidate | None = None
     best_score = -1
+
     for pat, group in by_pattern.items():
-        group.sort(key=lambda c: c.evidence_count, reverse=True)
-        winner = group[0]
-        runner_up = group[1].evidence_count if len(group) > 1 else 0
-        margin = winner.evidence_count - runner_up
-        if margin < MIN_WINNER_MARGIN:
-            logger.info(
-                "[HOTWORD-PROMOTION] pattern=%r contested winner=%d runner=%d — skipping",
-                pat, winner.evidence_count, runner_up)
+        # ── Lock: already-promoted pattern ─────────────────────
+        # Once a pattern has a promoted replacement, no other
+        # replacement auto-promotes for the same pattern.
+        if any(c.already_promoted for c in group):
             continue
-        # Pick the global best across patterns by evidence count.
+
+        # ── Competition detection ──────────────────────────────
+        # Competition exists if more than one candidate exists for
+        # this pattern (regardless of their evidence count).
+        is_contested = len(group) > 1
+
+        # Candidates must be eligible and meet minimum evidence.
+        eligible = [
+            c for c in group
+            if _is_eligible_term(c.replacement, c.pattern)
+            and c.evidence_count >= MIN_DISTINCT_HISTORIES
+        ]
+        if not eligible:
+            continue
+
+        eligible.sort(key=lambda c: c.evidence_count, reverse=True)
+        winner = eligible[0]
+
+        if is_contested:
+            # The runner-up is always the second-best among ALL
+            # candidates (including those with evidence < 2).
+            sorted_all = sorted(group, key=lambda c: c.evidence_count, reverse=True)
+            runner_up = sorted_all[1].evidence_count if len(sorted_all) > 1 else 0
+            margin = winner.evidence_count - runner_up
+            if margin < MIN_WINNER_MARGIN_WITH_COMPETITION:
+                continue
+
+        # Track the global best across patterns.
         if winner.evidence_count > best_score:
             best = winner
             best_score = winner.evidence_count
@@ -166,10 +200,6 @@ def decide_promotion(rules: list[dict]) -> PromotionDecision:
     if best is None:
         return PromotionDecision(reason="all_contested_or_below_threshold")
 
-    logger.info(
-        "[HOTWORD-PROMOTION] promoting replacement=%r (pattern=%r) "
-        "evidence=%d distinct histories",
-        best.replacement, best.pattern, best.evidence_count)
     return PromotionDecision(
         promoted_word=best.replacement,
         promoted_rule_keys=(best.pattern, best.replacement),

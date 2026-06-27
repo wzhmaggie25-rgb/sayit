@@ -122,6 +122,39 @@ class DecidePromotionTests(unittest.TestCase):
         d = decide_promotion(rules)
         self.assertIsNone(d.promoted_word)
 
+    # ── Phase 6: competition awareness ──────────────────────────────
+
+    def test_contest_2v1_not_promoted(self):
+        """Same pattern, winner=2 histories vs runner=1: margin 1 < 2 → skip."""
+        rules = [
+            _rule("叫一下", "焦虑", ["h1", "h2"]),
+            _rule("叫一下", "教育", ["h3"]),
+        ]
+        d = decide_promotion(rules)
+        self.assertIsNone(d.promoted_word,
+                          "2v1 competition with margin=1 must not promote")
+
+    def test_contest_3v1_promotes(self):
+        """Same pattern, winner=3 histories vs runner=1: margin 2 ≥ 2 → promote."""
+        rules = [
+            _rule("叫一下", "焦虑", ["h1", "h2", "h3"]),
+            _rule("叫一下", "教育", ["h4"]),
+        ]
+        d = decide_promotion(rules)
+        self.assertEqual(d.promoted_word, "焦虑",
+                         "3v1 with margin 2 should promote the winner")
+
+    def test_already_promoted_blocks_second_candidate(self):
+        """A pattern with an already-promoted replacement must NOT auto-promote
+        a second replacement for the same pattern."""
+        rules = [
+            _rule("叫一下", "焦虑", ["h1", "h2"], promoted=True),
+            _rule("叫一下", "教育", ["h3", "h4"]),
+        ]
+        d = decide_promotion(rules)
+        self.assertIsNone(d.promoted_word,
+                          "already-promoted pattern must block new auto-promotions")
+
 
 class DatabaseDistinctHistoryAccumulationTests(unittest.TestCase):
     """Verify the DB merge_rules grows the source_history_ids set

@@ -9,7 +9,6 @@ import time
 from typing import Optional
 
 from domain.correction import (
-    extract_dictionary_terms,
     learn_from_edit,
 )
 from infrastructure.context_helper_client import ContextHelperClient
@@ -265,27 +264,22 @@ class SilentMonitor:
             if count > 0:
                 db.merge_rules(merged)
 
-            added_terms = self._auto_add_dictionary_terms(original_text, edited_text)
-
-            # ── Phase 5: hotword promotion ─────────────────────────
-            # After merging, see whether any rule now has evidence from
-            # ≥ 2 distinct history sessions and is the unique winner among
-            # competing replacements for its pattern. If so, promote the
-            # replacement (NOT the pattern) into the personal dictionary
-            # and mark the rule so the next scan does not re-promote.
+            # ── Phase 6: hotword promotion only (no auto-add bypass) ─
+            # Dictionary entries must come ONLY from the promotion engine,
+            # which requires ≥ 2 distinct history sessions. Single-edit
+            # auto-add (removed _auto_add_dictionary_terms) would bypass
+            # the two-history gate.
             promoted_word = self._maybe_promote_hotword(db)
-            if promoted_word:
-                added_terms = list(added_terms) + [promoted_word]
 
-            status = "EXTRACTED" if count or added_terms else "NO_RULE"
+            status = "EXTRACTED" if count or promoted_word else "NO_RULE"
             self._mark_history(edited_text, status)
             logger.info(
-                "SilentMonitor: learned rules=%d dict_terms=%d trigger=%s stats=%s",
-                count, len(added_terms), trigger_type, stats)
+                "SilentMonitor: learned rules=%d promoted=%s trigger=%s stats=%s",
+                count, promoted_word or "none", trigger_type, stats)
 
-            if self._on_learned and (count or added_terms):
+            if self._on_learned and (count or promoted_word):
                 try:
-                    self._on_learned(count + len(added_terms))
+                    self._on_learned(count + (1 if promoted_word else 0))
                 except Exception as e:
                     logger.warning("SilentMonitor: callback error: %s", e)
         except Exception as e:
@@ -295,9 +289,12 @@ class SilentMonitor:
     def _maybe_promote_hotword(self, db) -> Optional[str]:
         """Run the hotword promotion decision against current rules.
 
-        Returns the promoted word (replacement string) if one was added,
-        else None. At most one promotion per call. Marks the source rule
-        as promoted so re-scans are idempotent.
+        Returns the promoted word (replacement string) if one was added
+        to the dictionary, else None. At most one promotion per call.
+
+        Only marks the rule as promoted AFTER the word has been
+        successfully added to the dictionary (HotwordsManager + DB),
+        so temporary failures keep the candidate eligible for retry.
         """
         try:
             from domain.hotword_promotion import decide_promotion
@@ -319,13 +316,12 @@ class SilentMonitor:
                     added = bool(db.add_dictionary_word(word))
                 except Exception as e:
                     logger.warning("SilentMonitor: db.add_dictionary_word failed: %s", e)
-            # Mark the rule as promoted regardless — even if the dictionary
-            # already contained the word, we never want to re-evaluate.
-            try:
-                db.mark_rule_promoted(pat, repl)
-            except Exception as e:
-                logger.warning("SilentMonitor: mark_rule_promoted failed: %s", e)
             if added:
+                # Only mark promoted after successful dictionary add.
+                try:
+                    db.mark_rule_promoted(pat, repl)
+                except Exception as e:
+                    logger.warning("SilentMonitor: mark_rule_promoted failed: %s", e)
                 logger.info(
                     "[HOTWORD-PROMOTION] promoted replacement=%r (from pattern=%r) "
                     "to personal dictionary", word, pat)
@@ -342,20 +338,6 @@ class SilentMonitor:
             if context is not None:
                 return context
         return get_focus_context(inserted_text)
-
-    def _auto_add_dictionary_terms(self, original_text: str, edited_text: str) -> list[str]:
-        terms = extract_dictionary_terms(original_text, edited_text)
-        added: list[str] = []
-        for term in terms:
-            try:
-                if self._hotwords_mgr is not None:
-                    if self._hotwords_mgr.add_word(term):
-                        added.append(term)
-                elif Database().add_dictionary_word(term):
-                    added.append(term)
-            except Exception as e:
-                logger.warning("SilentMonitor: auto dictionary add failed term=%r err=%s", term, e)
-        return added
 
     def _mark_history(self, edited_text: Optional[str], status: str, attempts_delta: int = 1):
         if not self._history_id:

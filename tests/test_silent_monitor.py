@@ -47,6 +47,7 @@ def make_context(full_text: str, inserted_text: str = "hello wrld") -> FocusCont
 class FakeDatabase:
     updates: list[dict] = []
     merged_rules: list[dict] = []
+    added_words: list[str] = []
 
     def __init__(self):
         pass
@@ -55,6 +56,7 @@ class FakeDatabase:
     def reset(cls):
         cls.updates = []
         cls.merged_rules = []
+        cls.added_words = []
 
     def update_history_edit(self, entry_id, edited_text, status, attempts_delta=1):
         self.updates.append({
@@ -72,6 +74,7 @@ class FakeDatabase:
         return len(rules)
 
     def add_dictionary_word(self, word):
+        self.added_words.append(word)
         return False
 
 
@@ -98,6 +101,9 @@ class SilentMonitorTests(unittest.TestCase):
         self.assertEqual(FakeDatabase.merged_rules[0]["replacement"], "world")
         self.assertEqual(FakeDatabase.updates[-1]["status"], "EXTRACTED")
         self.assertEqual(FakeDatabase.updates[-1]["edited_text"], "hello world")
+        # Phase 6: auto dictionary terms must NOT be added on single edit
+        self.assertEqual(FakeDatabase.added_words, [],
+                         "single edit must NOT auto-add dictionary terms")
 
     def test_large_full_field_edit_is_not_learned(self):
         monitor = silent_monitor.SilentMonitor()
@@ -126,6 +132,26 @@ class SilentMonitorTests(unittest.TestCase):
             ["A", "Enter"],
         )
         self.assertTrue(monitor._recent_enter_pressed())
+
+    def test_learn_does_not_auto_add_dictionary_terms(self):
+        """Phase 6: _learn must NOT call _auto_add_dictionary_terms.
+        Dictionary entries come ONLY from the promotion engine."""
+        monitor = silent_monitor.SilentMonitor()
+        monitor._history_id = "99"
+        monitor._refined_text = "hello wrld"
+        monitor._track_context = make_context("prefix hello wrld suffix")
+        monitor._last_context = make_context("prefix hello world suffix")
+
+        monitor._check_edited_text("track_timeout")
+
+        # Rules are still learned (correction rules untouched)
+        self.assertTrue(FakeDatabase.merged_rules,
+                        "correction rules should still be learned")
+        # But no dictionary words added
+        self.assertEqual(FakeDatabase.added_words, [],
+                         "no dictionary words should be added by _learn alone")
+        self.assertNotEqual(FakeDatabase.updates[-1]["status"], "LEARN_FAILED",
+                            "learn should succeed even without auto-add")
 
 
 if __name__ == "__main__":
