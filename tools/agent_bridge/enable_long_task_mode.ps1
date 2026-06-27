@@ -47,11 +47,14 @@ $config = [ordered]@{
     )
 }
 
-$config | ConvertTo-Json -Depth 5 | Set-Content -Path $configPath -Encoding UTF8
+$json = $config | ConvertTo-Json -Depth 5
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($configPath, $json, $utf8NoBom)
 
 Write-Host ''
 Write-Host 'SayIt Bridge long-task mode enabled.' -ForegroundColor Green
 Write-Host "Config: $configPath"
+Write-Host 'Encoding: UTF-8 without BOM'
 Write-Host 'Claude timeout: 10800 seconds (3 hours)'
 Write-Host 'Additional tools: node, npm, npx, PowerShell'
 Write-Host ''
