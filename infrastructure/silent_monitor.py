@@ -304,18 +304,17 @@ class SilentMonitor:
                 return None
             word = decision.promoted_word
             pat, repl = decision.promoted_rule_keys
-            # Add to dictionary. Prefer HotwordsManager so ASR sync happens.
+            # Phase 7: promotion requires HotwordsManager for ASR sync.
+            # No DB-only fallback — without HotwordsManager, promotion
+            # silently fails and the rule stays eligible for retry when
+            # a HotwordsManager becomes available.
             added = False
             if self._hotwords_mgr is not None:
                 try:
                     added = bool(self._hotwords_mgr.add_word(word))
                 except Exception as e:
-                    logger.warning("SilentMonitor: hotwords_mgr.add_word failed: %s", e)
-            if not added:
-                try:
-                    added = bool(db.add_dictionary_word(word))
-                except Exception as e:
-                    logger.warning("SilentMonitor: db.add_dictionary_word failed: %s", e)
+                    logger.warning(
+                        "SilentMonitor: hotwords_mgr.add_word failed: %s", e)
             if added:
                 # Only mark promoted after successful dictionary add.
                 try:
