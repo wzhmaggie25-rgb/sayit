@@ -95,7 +95,7 @@ class InjectorFallbackTests(unittest.TestCase):
                           return_value=(42, "Edit", 99, "notepad.exe")), \
              patch.object(inj, "_get_context_for_strategy", return_value={}), \
              patch.object(inj, "_inject_uia", return_value=False), \
-             patch.object(inj, "paste", return_value=False), \
+             patch.object(inj, "paste", return_value=(False, "EMPTY")), \
              patch.object(inj, "_direct_input", return_value=False), \
              self._mock_config_copy_false(), \
              cp_patch:
@@ -115,7 +115,7 @@ class InjectorFallbackTests(unittest.TestCase):
              patch.object(inj, "_foreground_info",
                           return_value=(42, "ConsoleWindowClass", 99, "cmd.exe")), \
              patch.object(inj, "_get_context_for_strategy", return_value={}), \
-             patch.object(inj, "paste", return_value=False), \
+             patch.object(inj, "paste", return_value=(False, "EMPTY")), \
              self._mock_config_copy_false(), \
              cp_patch:
             ok = inj.inject(self.SENTINEL)

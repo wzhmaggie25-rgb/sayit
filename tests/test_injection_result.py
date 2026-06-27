@@ -103,7 +103,14 @@ class InjectorPasteTests(unittest.TestCase):
         self.inj = Injector(injection_mode="auto")
 
     def _patch_clipboard(self, initial=None):
-        """Patch clipboard read/write with a simple dict store."""
+        """Patch clipboard read/write with a simple dict store.
+
+        Also patches the snapshot module so paste() sees a TEXT or EMPTY
+        snapshot mirroring the dict store, and `restore_snapshot` updates
+        the same store. This lets the test inspect "the clipboard" via
+        store['text'] after the call.
+        """
+        from infrastructure import clipboard_snapshot as snapmod
         store = {"text": initial}
 
         def fake_get():
@@ -113,57 +120,105 @@ class InjectorPasteTests(unittest.TestCase):
             store["text"] = text
             return True
 
+        def fake_read_snapshot():
+            t = store.get("text")
+            if t is None:
+                return snapmod.ClipboardSnapshot(kind="EMPTY")
+            return snapmod.ClipboardSnapshot(kind="TEXT", text=t)
+
+        def fake_restore_snapshot(snap):
+            if snap.kind == "EMPTY":
+                store["text"] = None
+                return True
+            if snap.kind == "TEXT":
+                store["text"] = snap.text
+                return True
+            return False
+
         return (
             patch("infrastructure.injector._clipboard_get_text",
                   side_effect=fake_get),
             patch("infrastructure.injector._clipboard_set_text",
                   side_effect=fake_set),
+            patch("infrastructure.clipboard_snapshot.read_snapshot",
+                  side_effect=fake_read_snapshot),
+            patch("infrastructure.clipboard_snapshot.restore_snapshot",
+                  side_effect=fake_restore_snapshot),
             store,
         )
 
     def test_paste_always_restores_backup(self):
         """paste() always restores original clipboard after sending shortcut."""
-        get_patch, set_patch, store = self._patch_clipboard("original-text")
-        with get_patch, set_patch, \
+        gp, sp, rsp, rrp, store = self._patch_clipboard("original-text")
+        with gp, sp, rsp, rrp, \
              patch.object(self.inj, "_lock", MagicMock()), \
              patch("time.sleep"):
-            ok = self.inj.paste("new text")
+            ok, kind = self.inj.paste("new text")
         self.assertTrue(ok, "paste() should return True once shortcut sent")
+        self.assertEqual(kind, "TEXT")
         # After paste, clipboard should be restored to original
         self.assertEqual(store["text"], "original-text",
                          "clipboard must be restored after paste")
 
-    def test_paste_empty_backup(self):
-        """paste() works when there's no clipboard backup (None)."""
-        get_patch, set_patch, store = self._patch_clipboard(None)
-        with get_patch, set_patch, \
+    def test_paste_empty_backup_restored_empty(self):
+        """When the snapshot is EMPTY, paste must restore it to None (empty)."""
+        gp, sp, rsp, rrp, store = self._patch_clipboard(None)
+        with gp, sp, rsp, rrp, \
              patch.object(self.inj, "_lock", MagicMock()), \
              patch("time.sleep"):
-            ok = self.inj.paste("new text")
+            ok, kind = self.inj.paste("new text")
         self.assertTrue(ok)
-        # When backup is None, there's nothing to restore — clipboard state
-        # is whatever remains after paste. The caller is responsible for
-        # clipboard management when target is verified via readback.
+        self.assertEqual(kind, "EMPTY")
+        # The new contract: EMPTY snapshot must be restored to EMPTY — final
+        # text must NOT linger on the clipboard.
+        self.assertIsNone(store["text"],
+                          "EMPTY snapshot must restore clipboard to empty, "
+                          "not leave the final text behind")
+
+    def test_paste_refuses_unsupported_format(self):
+        """paste() refuses to run when clipboard holds non-text/multi-format."""
+        from infrastructure import clipboard_snapshot as snapmod
+        with patch("infrastructure.clipboard_snapshot.read_snapshot",
+                   return_value=snapmod.ClipboardSnapshot(
+                       kind="UNSUPPORTED_OR_MULTIFORMAT",
+                       formats=[2, 8], detail="CF_BITMAP,CF_DIB")), \
+             patch.object(self.inj, "_lock", MagicMock()):
+            ok, kind = self.inj.paste("would-clobber-image")
+        self.assertFalse(ok,
+                         "paste must refuse when image/file content present")
+        self.assertEqual(kind, "UNSUPPORTED_OR_MULTIFORMAT")
+
+    def test_paste_refuses_read_failed(self):
+        """paste() refuses when clipboard read fails (would risk data loss)."""
+        from infrastructure import clipboard_snapshot as snapmod
+        with patch("infrastructure.clipboard_snapshot.read_snapshot",
+                   return_value=snapmod.ClipboardSnapshot(kind="READ_FAILED")), \
+             patch.object(self.inj, "_lock", MagicMock()):
+            ok, kind = self.inj.paste("text")
+        self.assertFalse(ok)
+        self.assertEqual(kind, "READ_FAILED")
 
     def test_paste_set_text_failure_returns_false(self):
         """If _clipboard_set_text fails, paste returns False immediately."""
-        get_patch, set_patch, store = self._patch_clipboard(None)
-        with get_patch, \
-             patch("infrastructure.injector._clipboard_set_text",
+        from infrastructure import clipboard_snapshot as snapmod
+        with patch("infrastructure.injector._clipboard_set_text",
                    return_value=False), \
+             patch("infrastructure.clipboard_snapshot.read_snapshot",
+                   return_value=snapmod.ClipboardSnapshot(kind="EMPTY")), \
              patch.object(self.inj, "_lock", MagicMock()):
-            ok = self.inj.paste("hello")
+            ok, kind = self.inj.paste("hello")
         self.assertFalse(ok)
+        self.assertEqual(kind, "set_failed")
 
     def test_paste_backup_restored_on_keybd_failure(self):
         """If keybd_event fails, backup is still restored."""
-        get_patch, set_patch, store = self._patch_clipboard("backup")
-        with get_patch, set_patch, \
+        gp, sp, rsp, rrp, store = self._patch_clipboard("backup")
+        with gp, sp, rsp, rrp, \
              patch.object(self.inj, "_lock", MagicMock()), \
              patch("ctypes.windll.user32.keybd_event",
                    side_effect=Exception("keybd failed")), \
              patch("time.sleep"):
-            ok = self.inj.paste("hello")
+            ok, kind = self.inj.paste("hello")
         self.assertFalse(ok)
         self.assertEqual(store["text"], "backup",
                          "backup must be restored on keybd failure")
@@ -177,7 +232,12 @@ class InjectorResultTests(unittest.TestCase):
 
     def test_inject_returns_injection_result(self):
         """inject() returns InjectionResult, not bool."""
-        with patch.object(self.inj, "_lock", MagicMock()):
+        from infrastructure import clipboard_snapshot as snapmod
+        with patch.object(self.inj, "_lock", MagicMock()), \
+             patch("infrastructure.clipboard_snapshot.read_snapshot",
+                   return_value=snapmod.ClipboardSnapshot(kind="EMPTY")), \
+             patch("infrastructure.clipboard_snapshot.restore_snapshot",
+                   return_value=True):
             result = self.inj.inject("test text")
         self.assertIsInstance(result, InjectionResult)
         self.assertIn(result.state,
@@ -186,8 +246,13 @@ class InjectorResultTests(unittest.TestCase):
 
     def test_inject_ok_truthy_with_state(self):
         """When injection succeeds via clipboard, result has verified_success state."""
+        from infrastructure import clipboard_snapshot as snapmod
         with patch.object(self.inj, "_direct_input", return_value=True), \
              patch.object(self.inj, "_lock", MagicMock()), \
+             patch("infrastructure.clipboard_snapshot.read_snapshot",
+                   return_value=snapmod.ClipboardSnapshot(kind="EMPTY")), \
+             patch("infrastructure.clipboard_snapshot.restore_snapshot",
+                   return_value=True), \
              patch("time.sleep"):
             result = self.inj.inject("hello")
         self.assertTrue(result)
