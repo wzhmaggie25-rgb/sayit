@@ -2,7 +2,7 @@
 // Architecture: events drive everything — no polling (like Typeless IPC)
 // Backend events via WebSocket → main.js forwards to float.html
 // Hotkey: WH_KEYBOARD_LL hook lives in Python backend via keyboard_helper DLL
-const { app, BrowserWindow, screen, ipcMain } = require('electron');
+const { app, BrowserWindow, screen, ipcMain, clipboard } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -11,6 +11,8 @@ const WebSocket = require('ws');
 let mainWin = null, floatWin = null, resultCardWin = null, backendProcess = null;
 let floatReady = false;
 let resultCardReady = false;
+let pendingResultCardPayload = null;  // {finalText, lastTranscription} — replayed on did-finish-load
+let pendingResultText = '';           // main-process source-of-truth for clipboard write
 let ws = null;
 
 // ── Single instance lock: prevent multiple Sayit windows ──
@@ -226,10 +228,17 @@ function createResultCardWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
   resultCardWin.loadFile(path.join(__dirname, 'ui', 'result-card.html'));
-  resultCardWin.webContents.on('did-finish-load', () => { resultCardReady = true; });
+  resultCardWin.webContents.on('did-finish-load', () => {
+    resultCardReady = true;
+    // Replay the latest pending payload — covers the first-open race
+    // where show was requested before the renderer was ready.
+    flushPendingResultCardPayload();
+  });
   resultCardWin.on('closed', () => {
     resultCardWin = null;
     resultCardReady = false;
+    pendingResultCardPayload = null;
+    pendingResultText = '';
   });
   resultCardWin.setAlwaysOnTop(true, 'screen-saver', 1);
   resultCardWin.setVisibleOnAllWorkspaces(true);
@@ -242,9 +251,40 @@ function destroyResultCard() {
   if (isUsableWindow(resultCardWin)) resultCardWin.destroy();
   resultCardWin = null;
   resultCardReady = false;
+  pendingResultCardPayload = null;
+  pendingResultText = '';
+}
+
+function flushPendingResultCardPayload() {
+  if (!isUsableWindow(resultCardWin) || !resultCardReady) return;
+  if (!pendingResultCardPayload) return;
+  try {
+    resultCardWin.webContents.send('result-card:show', pendingResultCardPayload);
+  } catch (e) { /* ignore */ }
+}
+
+function showResultCard(finalText, lastTranscription) {
+  const payload = {
+    finalText: String(finalText || ''),
+    lastTranscription: String(lastTranscription || ''),
+  };
+  // Always capture as the source of truth — newer payloads win if multiple
+  // results arrive while the renderer is still mounting.
+  pendingResultCardPayload = payload;
+  pendingResultText = payload.finalText;
+  if (!isUsableWindow(resultCardWin)) {
+    createResultCardWindow();
+  }
+  if (resultCardReady && isUsableWindow(resultCardWin)) {
+    try {
+      resultCardWin.webContents.send('result-card:show', payload);
+    } catch (e) { /* ignore */ }
+  }
+  // If not ready yet, did-finish-load will replay via flushPendingResultCardPayload.
 }
 
 function pushToResultCard(js) {
+  // Legacy helper kept for any caller that still wants to executeJavaScript.
   if (!isUsableWindow(resultCardWin) || !resultCardReady) return;
   try { resultCardWin.webContents.executeJavaScript(js); } catch(e) {}
 }
@@ -336,16 +376,20 @@ function connectWS() {
           // Show/hide float as needed — this shouldn't show the small bubble
           // Keep float hidden; show result card instead
           hideFloat();
-          createResultCardWindow();
-          pushToResultCard('if(window.__resultCardShow)__resultCardShow(' +
-            JSON.stringify(evt.text) + ',' + JSON.stringify(evt.last_transcription || '') + ')');
+          showResultCard(evt.text, evt.last_transcription || '');
           break;
         case 'result_card_close':
-          pushToResultCard('if(window.__resultCardClose)__resultCardClose()');
+          if (isUsableWindow(resultCardWin)) {
+            try { resultCardWin.webContents.send('result-card:reset'); } catch(e) {}
+          }
           destroyResultCard();
           break;
         case 'result_card_copy_done':
-          pushToResultCard('if(window.__resultCardCopyDone)__resultCardCopyDone()');
+          if (isUsableWindow(resultCardWin)) {
+            try { resultCardWin.webContents.send('result-card:copy-done'); } catch(e) {}
+          }
+          // Auto-close shortly after — give renderer time to show ✓.
+          setTimeout(() => { destroyResultCard(); }, 700);
           break;
         case 'injection_done':
         case 'silent_learned':
@@ -425,6 +469,39 @@ ipcMain.handle('minimize-main', () => { if (mainWin) mainWin.minimize(); });
 ipcMain.handle('close-main', () => { if (mainWin) mainWin.close(); });
 ipcMain.on('float-element-positions', (_e, positions) => { elementPositions = sanitizeElementPositions(positions); });
 ipcMain.on('float-element-positions-clear', () => { elementPositions = []; });
+
+// Result-card trusted IPC — renderer never supplies arbitrary text. The
+// only writable channel is the user clicking "copy" on the card currently
+// shown, and main writes `pendingResultText` (which only this process set).
+ipcMain.handle('result-card:copy-pending', async () => {
+  const text = pendingResultText || '';
+  if (!text) return { ok: false, error: 'no_pending_text' };
+  try {
+    clipboard.writeText(text);
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  }
+  // Tell backend so it can fire RESULT_CARD_COPY for history/observability.
+  // Backend's /api/result-card/copy endpoint still exists but is being
+  // deprecated; we no longer pass the text through it.
+  try { await api('POST', '/api/result-card/copy-confirmed', {}); } catch(e) {}
+  // Notify renderer to show the green check.
+  if (isUsableWindow(resultCardWin)) {
+    try { resultCardWin.webContents.send('result-card:copy-done'); } catch(e) {}
+  }
+  // Auto-close after a short feedback delay.
+  setTimeout(() => { destroyResultCard(); }, 700);
+  return { ok: true };
+});
+
+ipcMain.handle('result-card:close', () => {
+  // User cancelled — DO NOT touch clipboard.
+  try { if (isUsableWindow(resultCardWin)) resultCardWin.webContents.send('result-card:reset'); } catch(e) {}
+  // Tell backend to emit RESULT_CARD_CLOSE event for history.
+  try { api('POST', '/api/result-card/close', {}); } catch(e) {}
+  destroyResultCard();
+  return { ok: true };
+});
 
 async function waitForServer(retries=20) {
   for (let i=0; i<retries; i++) {

@@ -283,26 +283,46 @@ def stop_recording():
     return {"ok": bool(ok)}
 
 # ── Result card endpoints ──────────────────────────────
+# Renderer must NOT supply arbitrary text — clipboard is written by Electron
+# main process via the trusted preload IPC. This endpoint exists only so the
+# main process can notify the backend that a user-confirmed copy happened
+# (for history/observability). The old /api/result-card/copy that accepted
+# arbitrary `{text}` is retained for backwards-compatibility but is
+# defanged — it no longer writes the clipboard.
+
+@app.post("/api/result-card/copy-confirmed")
+def result_card_copy_confirmed():
+    """Notify backend that Electron main wrote the pending text to clipboard.
+    Backend does NOT write the clipboard itself; this is purely observational."""
+    try:
+        from application.eventbus import Events as _E
+        orchestrator.eventbus.emit(_E.RESULT_CARD_COPY, "")
+    except Exception:
+        pass
+    _event_queue.put({"event": "result_card_copy_done"})
+    return {"ok": True}
+
 
 @app.post("/api/result-card/copy")
-def result_card_copy(data: dict):
-    """Copy result card final text to clipboard on user click."""
-    text = data.get("text", "")
-    if not text:
-        return {"ok": False, "error": "empty text"}
-    try:
-        import pyperclip
-        pyperclip.copy(text)
-        # Emit copy done event (frontend will show green check, then close)
-        _event_queue.put({"event": "result_card_copy_done"})
-        return {"ok": True}
-    except Exception as e:
-        logger.warning("Result card copy failed: %s", e)
-        return {"ok": False, "error": str(e)}
+def result_card_copy(data: dict | None = None):
+    """DEPRECATED — kept for backwards compatibility only.
+    Accepts a `{text}` body for legacy callers; the renderer must use the
+    trusted IPC path via Electron main instead. To prevent any local-origin
+    page from silently overwriting the user's clipboard, this endpoint
+    refuses to write unless the request comes with a sentinel marker.
+    """
+    # Refuse to write clipboard from this endpoint — the trusted path is
+    # Electron main + clipboard.writeText. Return 410 Gone semantics.
+    return {"ok": False, "error": "deprecated_use_electron_ipc"}
 
 @app.post("/api/result-card/close")
 def result_card_close():
     """Close the result card."""
+    try:
+        from application.eventbus import Events as _E
+        orchestrator.eventbus.emit(_E.RESULT_CARD_CLOSE)
+    except Exception:
+        pass
     _event_queue.put({"event": "result_card_close"})
     return {"ok": True}
 

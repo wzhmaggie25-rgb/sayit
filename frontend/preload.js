@@ -29,3 +29,36 @@ contextBridge.exposeInMainWorld('sayit', {
     return () => ipcRenderer.removeListener('backend-event', listener);
   },
 });
+
+// ── Result-card trusted IPC ────────────────────────────────────
+// The renderer never holds the final text on its own — main process
+// keeps `pendingResultText` and writes it via Electron's clipboard
+// module when the user clicks copy. This prevents any local-origin
+// page (or stray fetch) from overwriting the user's clipboard via
+// an open REST endpoint.
+contextBridge.exposeInMainWorld('sayitResultCard', {
+  // Renderer subscribes to "show" pushes — payload {finalText, lastTranscription}
+  onShow: (handler) => {
+    if (typeof handler !== 'function') return () => {};
+    const listener = (_e, payload) => handler(payload || {});
+    ipcRenderer.on('result-card:show', listener);
+    return () => ipcRenderer.removeListener('result-card:show', listener);
+  },
+  // Renderer subscribes to "copy done" — main confirms write succeeded
+  onCopyDone: (handler) => {
+    if (typeof handler !== 'function') return () => {};
+    const listener = () => handler();
+    ipcRenderer.on('result-card:copy-done', listener);
+    return () => ipcRenderer.removeListener('result-card:copy-done', listener);
+  },
+  // Renderer subscribes to "reset" — clears local state on close
+  onReset: (handler) => {
+    if (typeof handler !== 'function') return () => {};
+    const listener = () => handler();
+    ipcRenderer.on('result-card:reset', listener);
+    return () => ipcRenderer.removeListener('result-card:reset', listener);
+  },
+  // Trusted user-action signals — renderer cannot supply arbitrary text.
+  copyPending: () => ipcRenderer.invoke('result-card:copy-pending'),
+  close: () => ipcRenderer.invoke('result-card:close'),
+});

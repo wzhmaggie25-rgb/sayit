@@ -2,94 +2,228 @@
 <html data-theme="dark">
 <head>
 <meta charset="utf-8">
+<title>SayIt — 识别结果</title>
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-  html,body{height:100%;overflow:hidden;background:transparent;font-family:system-ui;user-select:none}
+  html,body{height:100%;overflow:hidden;background:transparent;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;user-select:none}
   body{display:flex;align-items:center;justify-content:center;padding:12px}
-  .card{background:rgba(20,20,24,.96);border:1px solid rgba(255,255,255,.08);
-    border-radius:16px;padding:20px;width:100%;max-width:400px;
-    box-shadow:0 12px 40px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:12px}
-  .header{font-size:13px;font-weight:600;color:rgba(255,255,255,.5);letter-spacing:.3px}
-  .text-box{background:rgba(255,255,255,.04);border-radius:10px;padding:14px 16px;
-    max-height:180px;overflow-y:auto;font-size:14px;line-height:1.5;color:rgba(255,255,255,.9);
-    word-break:break-word}
+  .card{
+    background:rgba(20,20,24,.96);
+    border:1px solid rgba(255,255,255,.08);
+    border-radius:16px;
+    padding:18px 18px 16px;
+    width:100%;
+    max-width:400px;
+    box-shadow:0 12px 40px rgba(0,0,0,.35);
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+    position:relative;
+  }
+  .close-x{
+    position:absolute;
+    top:10px;
+    right:10px;
+    width:24px;
+    height:24px;
+    border:none;
+    border-radius:6px;
+    background:transparent;
+    color:rgba(255,255,255,.55);
+    font-size:16px;
+    line-height:1;
+    cursor:pointer;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    transition:background .12s ease,color .12s ease;
+  }
+  .close-x:hover{background:rgba(255,255,255,.08);color:rgba(255,255,255,.92)}
+  .close-x:focus{outline:none}
+  .label{
+    font-size:12px;
+    font-weight:600;
+    color:rgba(255,255,255,.48);
+    letter-spacing:.3px;
+    padding-right:24px;
+  }
+  .last-tx{
+    font-size:12px;
+    color:rgba(255,255,255,.55);
+    line-height:1.4;
+    max-height:34px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    display:-webkit-box;
+    -webkit-line-clamp:2;
+    -webkit-box-orient:vertical;
+    word-break:break-word;
+  }
+  .last-tx.empty{display:none}
+  .text-box{
+    background:rgba(255,255,255,.04);
+    border-radius:10px;
+    padding:12px 14px;
+    max-height:160px;
+    overflow-y:auto;
+    font-size:14px;
+    line-height:1.5;
+    color:rgba(255,255,255,.92);
+    word-break:break-word;
+    white-space:pre-wrap;
+  }
   .text-box::-webkit-scrollbar{width:4px}
   .text-box::-webkit-scrollbar-track{background:transparent}
-  .text-box::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:2px}
-  .actions{display:flex;gap:10px;justify-content:flex-end}
-  .btn{padding:8px 20px;border-radius:10px;border:none;font-size:13px;font-weight:600;
-    cursor:pointer;transition:all .15s ease;display:flex;align-items:center;gap:6px}
-  .btn-copy{background:rgba(255,255,255,.1);color:rgba(255,255,255,.85)}
-  .btn-copy:hover{background:rgba(255,255,255,.18)}
-  .btn-close{background:transparent;color:rgba(255,255,255,.5);border:1px solid rgba(255,255,255,.1)}
-  .btn-close:hover{background:rgba(255,255,255,.06);color:rgba(255,255,255,.75)}
-  .checkmark{color:#4caf50;font-size:16px;font-weight:700}
-  .copied-msg{font-size:12px;color:rgba(255,255,255,.5);text-align:right}
-  @keyframes fadeOut{from{opacity:1}to{opacity:0}}
+  .text-box::-webkit-scrollbar-thumb{background:rgba(255,255,255,.18);border-radius:2px}
+  .actions{
+    display:flex;
+    align-items:center;
+    justify-content:flex-end;
+    gap:8px;
+    min-height:32px;
+  }
+  .check{
+    color:#4caf50;
+    font-size:14px;
+    font-weight:600;
+    display:none;
+    align-items:center;
+    gap:4px;
+  }
+  .check.visible{display:inline-flex}
+  .btn{
+    padding:7px 18px;
+    border-radius:10px;
+    border:none;
+    font-size:13px;
+    font-weight:600;
+    cursor:pointer;
+    transition:background .12s ease;
+    font-family:inherit;
+  }
+  .btn-copy{
+    background:rgba(255,255,255,.12);
+    color:rgba(255,255,255,.92);
+  }
+  .btn-copy:hover{background:rgba(255,255,255,.20)}
+  .btn-copy:active{background:rgba(255,255,255,.08)}
+  .btn-copy:disabled{opacity:.5;cursor:default}
+  .btn-copy:focus{outline:none}
 </style>
-</head><body>
-<div id="root"></div>
+</head>
+<body>
+<div id="root" class="card" role="dialog" aria-label="语音识别结果">
+  <button id="close-btn" class="close-x" aria-label="关闭" title="关闭">✕</button>
+  <div class="label">最后转录的文字</div>
+  <div id="last-tx" class="last-tx empty"></div>
+  <div id="final-text" class="text-box"></div>
+  <div class="actions">
+    <span id="check" class="check"><span aria-hidden="true">✓</span><span>已复制</span></span>
+    <button id="copy-btn" class="btn btn-copy">复制</button>
+  </div>
+</div>
 <script>
-const {useState,useEffect,useCallback,createElement:h}=React;
-
-function ResultCard(){
-  const [text,setText]=useState('');
-  const [lastTranscription,setLastTranscription]=useState('');
-  const [copied,setCopied]=useState(false);
-  const [visible,setVisible]=useState(false);
-
-  useEffect(()=>{
-    window.__resultCardShow=(finalText,lastTx)=>{
-      setText(finalText||'');
-      setLastTranscription(lastTx||'');
-      setCopied(false);
-      setVisible(true);
+  (function(){
+    'use strict';
+    var els = {
+      lastTx: document.getElementById('last-tx'),
+      finalText: document.getElementById('final-text'),
+      copyBtn: document.getElementById('copy-btn'),
+      closeBtn: document.getElementById('close-btn'),
+      check: document.getElementById('check'),
     };
-    window.__resultCardClose=()=>{
-      setVisible(false);
-      setText('');
+
+    var state = { finalText: '', lastTranscription: '', copied: false };
+
+    function truncate(s, max){
+      if (typeof s !== 'string') return '';
+      if (s.length <= max) return s;
+      return s.slice(0, max) + '…';
+    }
+
+    function render(){
+      // Last transcription line (shown only if non-empty and different)
+      var lt = (state.lastTranscription || '').trim();
+      if (lt && lt !== state.finalText) {
+        els.lastTx.textContent = truncate(lt, 200);
+        els.lastTx.classList.remove('empty');
+      } else {
+        els.lastTx.textContent = '';
+        els.lastTx.classList.add('empty');
+      }
+      // Final text — long content is scrollable via overflow-y; truncate at 2000 just in case
+      els.finalText.textContent = truncate(state.finalText || '', 2000);
+      // Copy state
+      if (state.copied) {
+        els.check.classList.add('visible');
+        els.copyBtn.style.display = 'none';
+      } else {
+        els.check.classList.remove('visible');
+        els.copyBtn.style.display = '';
+        els.copyBtn.disabled = !state.finalText;
+      }
+    }
+
+    function show(payload){
+      payload = payload || {};
+      state.finalText = String(payload.finalText || payload.text || '');
+      state.lastTranscription = String(payload.lastTranscription || payload.last_transcription || '');
+      state.copied = false;
+      render();
+    }
+
+    function copyDone(){
+      state.copied = true;
+      render();
+    }
+
+    function resetState(){
+      state.finalText = '';
+      state.lastTranscription = '';
+      state.copied = false;
+      render();
+    }
+
+    function onCopyClick(){
+      if (!state.finalText) return;
+      // Trusted IPC — main process holds the pending text and writes via
+      // Electron clipboard. Renderer does NOT round-trip the text.
+      if (window.sayitResultCard && typeof window.sayitResultCard.copyPending === 'function') {
+        window.sayitResultCard.copyPending();
+      }
+    }
+
+    function onCloseClick(){
+      if (window.sayitResultCard && typeof window.sayitResultCard.close === 'function') {
+        window.sayitResultCard.close();
+      }
+    }
+
+    els.copyBtn.addEventListener('click', onCopyClick);
+    els.closeBtn.addEventListener('click', onCloseClick);
+
+    // Subscribe to main-process pushes via the preload-exposed event API.
+    if (window.sayitResultCard && typeof window.sayitResultCard.onShow === 'function') {
+      window.sayitResultCard.onShow(show);
+    }
+    if (window.sayitResultCard && typeof window.sayitResultCard.onCopyDone === 'function') {
+      window.sayitResultCard.onCopyDone(copyDone);
+    }
+    if (window.sayitResultCard && typeof window.sayitResultCard.onReset === 'function') {
+      window.sayitResultCard.onReset(resetState);
+    }
+
+    // Legacy globals for backwards compat with older main.js code paths and
+    // for the offline smoke test.
+    window.__resultCardShow = function(finalText, lastTx){
+      show({ finalText: finalText, lastTranscription: lastTx });
     };
-    window.__resultCardCopyDone=()=>{
-      setCopied(true);
-      setTimeout(()=>{setVisible(false);setText('');setCopied(false);},800);
-    };
-  },[]);
+    window.__resultCardCopyDone = copyDone;
+    window.__resultCardClose = resetState;
 
-  const handleCopy=useCallback(()=>{
-    if(!text)return;
-    // Call backend API to write clipboard
-    fetch('http://127.0.0.1:17890/api/result-card/copy',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:text}),
-    }).then(r=>r.json()).then(d=>{
-      if(d.ok)setCopied(true);
-    }).catch(()=>{});
-  },[text]);
-
-  const handleClose=useCallback(()=>{
-    fetch('http://127.0.0.1:17890/api/result-card/close',{method:'POST'}).catch(()=>{});
-    setVisible(false);
-  },[]);
-
-  if(!visible)return null;
-
-  const truncated=text.length>500 ? text.slice(0,500)+'…' : text;
-
-  return h('div',{style:{width:'100%',maxWidth:400}},
-    h('div',{className:'card'},
-      h('div',{className:'header'},'最后一次识别'),
-      h('div',{className:'text-box'},truncated),
-      h('div',{className:'actions'},
-        copied
-          ? h('span',{className:'checkmark'},'✓ 已复制')
-          : h('button',{className:'btn btn-copy',onClick:handleCopy},'复制'),
-        h('button',{className:'btn btn-close',onClick:handleClose},'关闭')
-      )
-    )
-  );
-}
-
-ReactDOM.createRoot(document.getElementById('root')).render(h(ResultCard));
+    // Render once on load so the empty state is consistent.
+    render();
+  })();
 </script>
-</body></html>
+</body>
+</html>
