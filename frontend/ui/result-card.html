@@ -1,0 +1,95 @@
+<!doctype html>
+<html data-theme="dark">
+<head>
+<meta charset="utf-8">
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:transparent;font-family:system-ui;user-select:none}
+  body{display:flex;align-items:center;justify-content:center;padding:12px}
+  .card{background:rgba(20,20,24,.96);border:1px solid rgba(255,255,255,.08);
+    border-radius:16px;padding:20px;width:100%;max-width:400px;
+    box-shadow:0 12px 40px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:12px}
+  .header{font-size:13px;font-weight:600;color:rgba(255,255,255,.5);letter-spacing:.3px}
+  .text-box{background:rgba(255,255,255,.04);border-radius:10px;padding:14px 16px;
+    max-height:180px;overflow-y:auto;font-size:14px;line-height:1.5;color:rgba(255,255,255,.9);
+    word-break:break-word}
+  .text-box::-webkit-scrollbar{width:4px}
+  .text-box::-webkit-scrollbar-track{background:transparent}
+  .text-box::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:2px}
+  .actions{display:flex;gap:10px;justify-content:flex-end}
+  .btn{padding:8px 20px;border-radius:10px;border:none;font-size:13px;font-weight:600;
+    cursor:pointer;transition:all .15s ease;display:flex;align-items:center;gap:6px}
+  .btn-copy{background:rgba(255,255,255,.1);color:rgba(255,255,255,.85)}
+  .btn-copy:hover{background:rgba(255,255,255,.18)}
+  .btn-close{background:transparent;color:rgba(255,255,255,.5);border:1px solid rgba(255,255,255,.1)}
+  .btn-close:hover{background:rgba(255,255,255,.06);color:rgba(255,255,255,.75)}
+  .checkmark{color:#4caf50;font-size:16px;font-weight:700}
+  .copied-msg{font-size:12px;color:rgba(255,255,255,.5);text-align:right}
+  @keyframes fadeOut{from{opacity:1}to{opacity:0}}
+</style>
+</head><body>
+<div id="root"></div>
+<script>
+const {useState,useEffect,useCallback,createElement:h}=React;
+
+function ResultCard(){
+  const [text,setText]=useState('');
+  const [lastTranscription,setLastTranscription]=useState('');
+  const [copied,setCopied]=useState(false);
+  const [visible,setVisible]=useState(false);
+
+  useEffect(()=>{
+    window.__resultCardShow=(finalText,lastTx)=>{
+      setText(finalText||'');
+      setLastTranscription(lastTx||'');
+      setCopied(false);
+      setVisible(true);
+    };
+    window.__resultCardClose=()=>{
+      setVisible(false);
+      setText('');
+    };
+    window.__resultCardCopyDone=()=>{
+      setCopied(true);
+      setTimeout(()=>{setVisible(false);setText('');setCopied(false);},800);
+    };
+  },[]);
+
+  const handleCopy=useCallback(()=>{
+    if(!text)return;
+    // Call backend API to write clipboard
+    fetch('http://127.0.0.1:17890/api/result-card/copy',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:text}),
+    }).then(r=>r.json()).then(d=>{
+      if(d.ok)setCopied(true);
+    }).catch(()=>{});
+  },[text]);
+
+  const handleClose=useCallback(()=>{
+    fetch('http://127.0.0.1:17890/api/result-card/close',{method:'POST'}).catch(()=>{});
+    setVisible(false);
+  },[]);
+
+  if(!visible)return null;
+
+  const truncated=text.length>500 ? text.slice(0,500)+'…' : text;
+
+  return h('div',{style:{width:'100%',maxWidth:400}},
+    h('div',{className:'card'},
+      h('div',{className:'header'},'最后一次识别'),
+      h('div',{className:'text-box'},truncated),
+      h('div',{className:'actions'},
+        copied
+          ? h('span',{className:'checkmark'},'✓ 已复制')
+          : h('button',{className:'btn btn-copy',onClick:handleCopy},'复制'),
+        h('button',{className:'btn btn-close',onClick:handleClose},'关闭')
+      )
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(h(ResultCard));
+</script>
+</body></html>

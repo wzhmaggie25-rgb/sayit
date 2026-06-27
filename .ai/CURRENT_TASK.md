@@ -4,9 +4,9 @@
 
 ## 状态
 
-**ZCODE_READY**
+**BLOCKED_USER_VALIDATION**
 
-> 本轮继续由 ZCode GUI 可视化执行。不要由 Agent Bridge / Claude Code 后台接管。
+> 代码、测试、报告已完成。等待用户人工验收后关闭本轮。
 
 ## 任务名称
 

@@ -71,7 +71,13 @@ class Events:
     PIPELINE_ERROR = "pipeline:error"            # error_msg: str
 
     # Injection
-    INJECTION_DONE = "injection:done"            # success: bool
+    INJECTION_DONE = "injection:done"            # result: InjectionResult (structured)
+
+    # Result card (no editable target)
+    NO_EDITABLE_TARGET = "pipeline:no-editable-target"  # final_text: str
+    RESULT_CARD_SHOW = "result_card:show"               # final_text: str, last_transcription: str
+    RESULT_CARD_COPY = "result_card:copy"               # final_text: str
+    RESULT_CARD_CLOSE = "result_card:close"             # no payload
 
     # Silent learning
     SILENT_LEARNED = "silent:learned"            # rule_count: int (0 = none learned)

@@ -90,6 +90,11 @@ def wire_events():
     eb.on(Events.RECORDING_ERROR, lambda m: _event_queue.put({"event": "error", "message": str(m)}))
     eb.on(Events.ASR_ERROR, lambda m: _event_queue.put({"event": "error", "message": str(m)}))
     eb.on(Events.INJECTION_DONE, lambda ok: _event_queue.put({"event": "injection_done", "ok": ok}))
+    eb.on(Events.NO_EDITABLE_TARGET, lambda t: _event_queue.put({"event": "no_editable_target", "text": t}))
+    eb.on(Events.RESULT_CARD_SHOW, lambda t, lt: _event_queue.put({
+        "event": "result_card_show", "text": t, "last_transcription": lt,
+    }))
+    eb.on(Events.RESULT_CARD_CLOSE, lambda: _event_queue.put({"event": "result_card_close"}))
     eb.on(Events.SILENT_LEARNED, lambda c: _event_queue.put({"event": "silent_learned", "count": c}))
     eb.on(Events.AI_ERROR, lambda m: _event_queue.put({"event": "ai_error", "message": str(m)}))
     eb.on(Events.UIPI_WARNING, lambda: _event_queue.put({"event": "uipi_warning"}))
@@ -276,6 +281,30 @@ def start_recording():
 def stop_recording():
     ok = orchestrator.stop_recording()
     return {"ok": bool(ok)}
+
+# ── Result card endpoints ──────────────────────────────
+
+@app.post("/api/result-card/copy")
+def result_card_copy(data: dict):
+    """Copy result card final text to clipboard on user click."""
+    text = data.get("text", "")
+    if not text:
+        return {"ok": False, "error": "empty text"}
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        # Emit copy done event (frontend will show green check, then close)
+        _event_queue.put({"event": "result_card_copy_done"})
+        return {"ok": True}
+    except Exception as e:
+        logger.warning("Result card copy failed: %s", e)
+        return {"ok": False, "error": str(e)}
+
+@app.post("/api/result-card/close")
+def result_card_close():
+    """Close the result card."""
+    _event_queue.put({"event": "result_card_close"})
+    return {"ok": True}
 
 @app.get("/api/version")
 def version():

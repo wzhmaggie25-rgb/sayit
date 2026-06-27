@@ -68,6 +68,7 @@ DEFAULT_CONFIG = {
     "system_prompt": "",
     "text_postprocess": {"punctuation": True, "formatting": False, "style": "light"},
     "silent_learning": True,
+    "copy_result_to_clipboard": False,
     "ai_providers": [],
     "onboarding": {"version": 1, "completed": False},
 }

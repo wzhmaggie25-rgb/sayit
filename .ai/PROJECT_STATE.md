@@ -1,5 +1,5 @@
 # Project State
-> 最后一次更新：2026-06-26 14:45
+> 最后一次更新：2026-06-27 11:00
 
 ## Overview
 
@@ -203,6 +203,7 @@ RecordingPipeline.run() Phase 6
 15. **中文局部纠错无法学习** — 修复（2026-06-26 Round 4）：`_extract_chinese_local_replacement(original, edited)` 字符级 SequenceMatcher diff，single replace opcode，≤6 字 CJK，≥2 anchor；`merge_rules` 按 `(pattern, replacement)` 对匹配；ABI v3
 16. **Clipboard 注入假成功** — 修复（2026-06-26 Round 4）：`paste()` 在 Ctrl+V 后读剪贴板验证文本是否被消费；未消费时返回 `InjectionResult(ok=False, reason='text_not_consumed', clipboard_preserved=True)`
 17. **注入返回无结构** — 修复（2026-06-26 Round 4）：`InjectionResult` dataclass（ok/verified/method/reason/clipboard_preserved/target_restored + `__bool__` 向后兼容），`inject()` 返回 `List[InjectionResult]`
+18. **剪贴板污染 + 虚假注入验证** — 修复（2026-06-27 Round 5）：删除 paste() 中 `post_clip == text` clipboard-consumed heuristic；`paste()` 始终恢复备份；`InjectionResult.state` 新增四个值（`verified_success`/`no_editable_target`/`injection_failed`/`recognition_failed`）；新增 `_assess_target_editability()` 在无目标时直接返回 `no_editable_target`；`_fail()` 不再默认 auto-copy（检查 `copy_result_to_clipboard` 配置，默认 false）；结果卡片 UI（420×320 非阻塞窗口）在无编辑目标/注入失败时展示；事件新增 `NO_EDITABLE_TARGET`/`RESULT_CARD_SHOW`/`RESULT_CARD_COPY`/`RESULT_CARD_CLOSE`
 
 ## 不允许随意修改的模块
 

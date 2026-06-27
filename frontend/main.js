@@ -8,8 +8,9 @@ const path = require('path');
 const fs = require('fs');
 const WebSocket = require('ws');
 
-let mainWin = null, floatWin = null, backendProcess = null;
+let mainWin = null, floatWin = null, resultCardWin = null, backendProcess = null;
 let floatReady = false;
+let resultCardReady = false;
 let ws = null;
 
 // ── Single instance lock: prevent multiple Sayit windows ──
@@ -208,6 +209,46 @@ function destroyFloat() {
   floatReady = false;
 }
 
+// ── Result card window ──────────────────────────
+
+function createResultCardWindow() {
+  if (isUsableWindow(resultCardWin)) return;
+  const d = screen.getPrimaryDisplay();
+  const { x, y, width, height } = d.workArea;
+  const cw = 420, ch = 320;
+  const cx = Math.floor(x + (width - cw) / 2);
+  const cy = Math.floor(y + (height - ch) / 2);
+  resultCardWin = new BrowserWindow({
+    x: cx, y: cy, width: cw, height: ch,
+    type: 'panel', transparent: true, frame: false, hasShadow: true,
+    maximizable: false, resizable: false, minimizable: false,
+    focusable: false, skipTaskbar: true,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
+  });
+  resultCardWin.loadFile(path.join(__dirname, 'ui', 'result-card.html'));
+  resultCardWin.webContents.on('did-finish-load', () => { resultCardReady = true; });
+  resultCardWin.on('closed', () => {
+    resultCardWin = null;
+    resultCardReady = false;
+  });
+  resultCardWin.setAlwaysOnTop(true, 'screen-saver', 1);
+  resultCardWin.setVisibleOnAllWorkspaces(true);
+  resultCardWin.setIgnoreMouseEvents(false);
+  if (typeof resultCardWin.showInactive === 'function') resultCardWin.showInactive();
+  else resultCardWin.show();
+}
+
+function destroyResultCard() {
+  if (isUsableWindow(resultCardWin)) resultCardWin.destroy();
+  resultCardWin = null;
+  resultCardReady = false;
+}
+
+function pushToResultCard(js) {
+  if (!isUsableWindow(resultCardWin) || !resultCardReady) return;
+  try { resultCardWin.webContents.executeJavaScript(js); } catch(e) {}
+}
+
 function sanitizeElementPositions(positions) {
   if (!Array.isArray(positions)) return [];
   return positions
@@ -286,6 +327,25 @@ function connectWS() {
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnPipelineDone)sayitOnPipelineDone(' + JSON.stringify(evt.text) + ')');
           pushToMain('backend-event', evt);
+          break;
+        case 'no_editable_target':
+          // Result card will be shown via result_card_show event
+          pushToMain('backend-event', evt);
+          break;
+        case 'result_card_show':
+          // Show/hide float as needed — this shouldn't show the small bubble
+          // Keep float hidden; show result card instead
+          hideFloat();
+          createResultCardWindow();
+          pushToResultCard('if(window.__resultCardShow)__resultCardShow(' +
+            JSON.stringify(evt.text) + ',' + JSON.stringify(evt.last_transcription || '') + ')');
+          break;
+        case 'result_card_close':
+          pushToResultCard('if(window.__resultCardClose)__resultCardClose()');
+          destroyResultCard();
+          break;
+        case 'result_card_copy_done':
+          pushToResultCard('if(window.__resultCardCopyDone)__resultCardCopyDone()');
           break;
         case 'injection_done':
         case 'silent_learned':

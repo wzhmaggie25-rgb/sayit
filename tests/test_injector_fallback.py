@@ -1,15 +1,17 @@
 """Injector fallback tests.
 
-Verifies the contract in CURRENT_TASK.md §C:
+Verifies the contract per CURRENT_TASK_OVERRIDE.md:
 
-  Any return path that yields False MUST guarantee the final text is on
-  the clipboard so the user can paste manually. UIA failure, clipboard
-  shortcut failure, SendInput failure, foreground HWND mismatch, target
-  restore failure — all routes must end with the clipboard populated.
+  On injection failure, clipboard_preserved is True by default — the final
+  text is NOT auto-copied to clipboard. Only when copy_result_to_clipboard
+  is explicitly enabled does _fail() write text to clipboard.
+
+  UIA failure, clipboard shortcut failure, SendInput failure, foreground
+  HWND mismatch, target restore failure — all routes must end with the
+  clipboard preserved (untouched by default).
 
 The tests stub out the OS-level helpers so we exercise the waterfall
-ordering and the clipboard-fallback contract without driving real
-windows.
+ordering without driving real windows.
 """
 from __future__ import annotations
 import unittest
@@ -38,27 +40,34 @@ class InjectorFallbackTests(unittest.TestCase):
     def _make_injector(self):
         return Injector(injection_mode="auto")
 
+    def _mock_config_copy_false(self):
+        """By default copy_result_to_clipboard is False — no auto-copy."""
+        return patch("infrastructure.injector.ConfigStore.get",
+                     return_value=False)
+
     # ── 1: target restore failure ───────────────────────────────
 
-    def test_target_restore_failure_leaves_text_on_clipboard(self):
+    def test_target_restore_failure_preserves_clipboard(self):
         """When the original window cannot be focused AND no child Edit
-        control exists, inject() returns False but final_text MUST be on
-        the clipboard."""
+        control exists, inject() returns False but clipboard is preserved
+        (NOT auto-copied)."""
         inj = self._make_injector()
         target = InjectionTarget(hwnd=123, pid=1, proc="fake.exe",
                                  cls="FakeClass", title="Fake")
         cp_patch, cp_captured = _patch_clipboard()
         with patch.object(inj, "_focus_window", return_value=False), \
              patch.object(inj, "_inject_win32_child_edit", return_value=False), \
+             self._mock_config_copy_false(), \
              cp_patch:
             ok = inj.inject(self.SENTINEL, target=target)
         self.assertFalse(ok, "inject reported success on restore failure")
-        self.assertIn(self.SENTINEL, cp_captured,
-                      "final_text was not preserved on clipboard")
+        # Text should NOT be on clipboard by default
+        self.assertNotIn(self.SENTINEL, cp_captured,
+                         "final_text must NOT be auto-copied on failure")
 
     # ── 2: foreground mismatch ─────────────────────────────────
 
-    def test_foreground_mismatch_leaves_text_on_clipboard(self):
+    def test_foreground_mismatch_preserves_clipboard(self):
         inj = self._make_injector()
         target = InjectionTarget(hwnd=123, pid=1, proc="fake.exe",
                                  cls="FakeClass", title="Fake")
@@ -68,14 +77,16 @@ class InjectorFallbackTests(unittest.TestCase):
              patch.object(inj, "_foreground_info",
                           return_value=(999, "OtherClass", 2, "other.exe")), \
              patch.object(inj, "_inject_win32_child_edit", return_value=False), \
+             self._mock_config_copy_false(), \
              cp_patch:
             ok = inj.inject(self.SENTINEL, target=target)
         self.assertFalse(ok)
-        self.assertIn(self.SENTINEL, cp_captured)
+        self.assertNotIn(self.SENTINEL, cp_captured,
+                         "clipboard must NOT be auto-copied on mismatch")
 
     # ── 3: UIA failure → clipboard paste failure → SendInput failure ──
 
-    def test_all_three_layers_fail_leaves_text_on_clipboard(self):
+    def test_all_three_layers_fail_preserves_clipboard(self):
         inj = self._make_injector()
         cp_patch, cp_captured = _patch_clipboard()
         # No target — go straight into the normal waterfall.
@@ -86,17 +97,18 @@ class InjectorFallbackTests(unittest.TestCase):
              patch.object(inj, "_inject_uia", return_value=False), \
              patch.object(inj, "paste", return_value=False), \
              patch.object(inj, "_direct_input", return_value=False), \
+             self._mock_config_copy_false(), \
              cp_patch:
             ok = inj.inject(self.SENTINEL)
         self.assertFalse(ok)
-        self.assertIn(self.SENTINEL, cp_captured,
-                      "final_text was not preserved on clipboard after triple failure")
+        self.assertNotIn(self.SENTINEL, cp_captured,
+                         "clipboard must NOT be auto-copied on triple failure")
 
     # ── 4: terminal clipboard failure ──────────────────────────
 
-    def test_terminal_clipboard_failure_leaves_text_on_clipboard(self):
+    def test_terminal_clipboard_failure_preserves_clipboard(self):
         """Terminals skip the SendInput fallback (would inject as commands).
-        That early-return path must still leave the clipboard populated."""
+        That early-return path must still preserve clipboard (no auto-copy)."""
         inj = self._make_injector()
         cp_patch, cp_captured = _patch_clipboard()
         with patch.object(inj, "_focus_window", return_value=True), \
@@ -104,10 +116,12 @@ class InjectorFallbackTests(unittest.TestCase):
                           return_value=(42, "ConsoleWindowClass", 99, "cmd.exe")), \
              patch.object(inj, "_get_context_for_strategy", return_value={}), \
              patch.object(inj, "paste", return_value=False), \
+             self._mock_config_copy_false(), \
              cp_patch:
             ok = inj.inject(self.SENTINEL)
         self.assertFalse(ok)
-        self.assertIn(self.SENTINEL, cp_captured)
+        self.assertNotIn(self.SENTINEL, cp_captured,
+                         "clipboard must NOT be auto-copied on terminal failure")
 
     # ── 5: success path does NOT add a fallback clipboard copy ──
 

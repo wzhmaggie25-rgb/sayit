@@ -18,6 +18,7 @@ except Exception:
     pyperclip = None
 
 from infrastructure.context_helper_client import ContextHelperClient
+from infrastructure.config_store import ConfigStore
 
 logger = logging.getLogger(__name__)
 
@@ -37,21 +38,29 @@ class InjectionResult:
 
     Fields:
         ok: Whether the injection was reported successful.
+        state: One of "verified_success", "no_editable_target",
+               "injection_failed", "recognition_failed".
         verified: Whether we confirmed the text actually appeared in the
-                  target (e.g. clipboard content changed after paste).
+                  target via readback (WM_GETTEXT or UIA ValuePattern).
         method: Which injection layer succeeded ("uia", "clipboard",
                 "sendinput", "win32_child", or "" on total failure).
         reason: Human-readable explanation string.
-        clipboard_preserved: Whether the final text was left on the
-                             clipboard as a fallback (always True on failure).
+        clipboard_preserved: Whether the original clipboard was preserved
+                             (i.e. final_text NOT left on clipboard).
+        clipboard_restored: Whether we explicitly restored original clipboard
+                            after a paste operation.
+        target_verified: Whether readback confirmed text in target.
         target_restored: Whether the original target window was restored
                          to foreground (may be False for child-edit injection).
     """
     ok: bool = False
+    state: str = "recognition_failed"
     verified: bool = False
     method: str = ""
     reason: str = ""
     clipboard_preserved: bool = False
+    clipboard_restored: bool = False
+    target_verified: bool = False
     target_restored: bool = False
 
     def __bool__(self) -> bool:
@@ -287,6 +296,85 @@ class Injector:
         proc = self._proc_name(pid.value)
         return hwnd, cls, pid.value, proc
 
+    def _assess_target_editability(self, target: InjectionTarget | None) -> str:
+        """Assess whether the foreground/focused element is an editable text target.
+
+        Returns one of:
+          "editable" — focused UIA element with ValuePattern/TextPattern,
+                       or foreground hwnd has Win32 Edit/RichEdit child, or
+                       known app strategy exists.
+          "no_editable" — no focused element, foreground hwnd missing,
+                          or UIA reports no editable capabilities.
+          "unknown" — cannot determine (should fall through to injection attempt).
+        """
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                logger.info("[INJECT-EDITABILITY] no foreground window → no_editable")
+                return "no_editable"
+
+            # Quick Win32 check: does foreground hwnd or its focused child have Edit class?
+            focus_hwnd = ctypes.windll.user32.GetFocus()
+            if focus_hwnd:
+                class_buf = ctypes.create_unicode_buffer(256)
+                ctypes.windll.user32.GetClassNameW(focus_hwnd, class_buf, 256)
+                cls = (class_buf.value or "").lower()
+                if "edit" in cls or "richedit" in cls:
+                    logger.info("[INJECT-EDITABILITY] focused Win32 edit control → editable")
+                    return "editable"
+
+            # Try UIA focused element
+            try:
+                import comtypes
+                comtypes.CoInitialize()
+                try:
+                    from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation
+                    uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
+                    elem = uia.GetFocusedElement()
+                    if elem is None:
+                        logger.info("[INJECT-EDITABILITY] no UIA focused element → no_editable")
+                        return "no_editable"
+                    # Check for ValuePattern or TextPattern
+                    try:
+                        vp = elem.GetCurrentPattern(10002)
+                        if vp is not None:
+                            logger.info("[INJECT-EDITABILITY] UIA ValuePattern available → editable")
+                            return "editable"
+                    except Exception:
+                        pass
+                    try:
+                        tp = elem.GetCurrentPattern(10014)
+                        if tp is not None:
+                            logger.info("[INJECT-EDITABILITY] UIA TextPattern available → editable")
+                            return "editable"
+                    except Exception:
+                        pass
+                    # No editable pattern found
+                    logger.info("[INJECT-EDITABILITY] UIA element has no editable pattern → no_editable")
+                    return "no_editable"
+                finally:
+                    comtypes.CoUninitialize()
+            except Exception as e:
+                logger.debug("[INJECT-EDITABILITY] UIA check failed: %s", e)
+
+            # Fallback: if we have a strategy table match, assume editable
+            if target and target.proc:
+                proc_lower = target.proc.lower()
+                if proc_lower in APP_STRATEGIES:
+                    logger.info("[INJECT-EDITABILITY] known app strategy → editable")
+                    return "editable"
+
+            # Fallback: check for child edit under foreground
+            if hwnd and self._find_child_edit(hwnd):
+                logger.info("[INJECT-EDITABILITY] child edit found → editable")
+                return "editable"
+
+            logger.info("[INJECT-EDITABILITY] cannot determine editability → unknown")
+            return "unknown"
+        except Exception as e:
+            logger.debug("[INJECT-EDITABILITY] assessment error: %s", e)
+            return "unknown"
+
     def _proc_name(self, pid: int) -> str:
         try:
             h = ctypes.windll.kernel32.OpenProcess(0x0400 | 0x0010, False, pid)
@@ -303,12 +391,13 @@ class Injector:
     def paste(self, text: str, terminal: bool = False) -> bool:
         """Clipboard paste via ctypes keybd_event (bypasses UIPI for admin windows).
 
-        Returns True if the clipboard shortcut was sent and verification
-        suggests the text was consumed (clipboard no longer holds our text).
+        Saves clipboard, sets text, sends Ctrl+V/Ctrl+Shift+V, waits, then
+        ALWAYS restores original clipboard. Returns True once paste shortcut
+        was sent (verification via target readback happens in caller).
 
-        Verification heuristic: after restoring the backup, check whether
-        the clipboard still contains our text. If not, the paste target
-        likely consumed it.
+        The old heuristic that checked whether clipboard still held our text
+        after paste is removed — normal Windows paste does NOT clear/change
+        the clipboard, so that check gives false negatives.
         """
         with self._lock:
             backup = _clipboard_get_text()
@@ -325,13 +414,11 @@ class Injector:
                 logger.info(
                     "[INJECT-CLIPBOARD] paste shortcut=%s text_len=%d post_delay=%.2f",
                     "Ctrl+Shift+V" if terminal else "Ctrl+V", text_len, post)
-                # Use ctypes keybd_event instead of pynput SendInput for UIPI bypass
                 VK_CONTROL = 0x11
                 VK_RSHIFT = 0xA1
                 VK_V = 0x56
                 ctypes.windll.user32.keybd_event(VK_CONTROL, 0, 0, 0)
                 if terminal:
-                    # Typeless uses Ctrl+Shift+V for terminal paste shortcuts.
                     ctypes.windll.user32.keybd_event(VK_RSHIFT, 0, 0, 0)
                 ctypes.windll.user32.keybd_event(VK_V, 0, 0, 0)
                 ctypes.windll.user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
@@ -345,31 +432,16 @@ class Injector:
                 return False
             time.sleep(post)
 
-            # ── Paste verification ───────────────────────────────────
-            # After the wait, the clipboard should hold the backup (if we
-            # restored it) or be empty. If our text is still there, the
-            # paste likely didn't reach its target — return False.
-            verified = True
-            try:
-                post_clip = _clipboard_get_text()
-                if post_clip == text:
-                    verified = False
-                    logger.warning(
-                        "[INJECT-CLIPBOARD] paste NOT verified — our text still on clipboard "
-                        "after %s delay (backup_restored=%s)",
-                        post, backup is not None)
-                else:
-                    logger.info(
-                        "[INJECT-CLIPBOARD] paste verified — clipboard no longer holds our text "
-                        "clip_was_backup=%s",
-                        post_clip == backup if backup is not None else "(empty)")
-            except Exception as e:
-                logger.debug("[INJECT-CLIPBOARD] verification read failed: %s", e)
-
+            # Always restore original clipboard — regardless of verification.
+            # The caller will use target readback to confirm delivery.
+            restored_ok = False
             if backup is not None:
                 _clipboard_set_text(backup)
+                restored_ok = True
                 logger.info("[INJECT-CLIPBOARD] restored previous clipboard terminal=%s", terminal)
-            return verified
+            else:
+                logger.info("[INJECT-CLIPBOARD] no backup to restore (clipboard was empty)")
+            return True
 
     def _direct_input(self, text: str) -> bool:
         try:
@@ -507,20 +579,37 @@ class Injector:
 
     def _inject_locked(self, text: str, target: InjectionTarget | None) -> InjectionResult:
         def _fail(reason: str = "") -> InjectionResult:
+            # On failure: do NOT auto-copy text to clipboard unless
+            # copy_result_to_clipboard is explicitly enabled.
+            # Per spec: verified_success/no_editable_target must preserve clipboard;
+            # injection_failed also preserves clipboard by default.
             try:
-                _clipboard_set_text(text)
+                cfg_copy = ConfigStore().get("copy_result_to_clipboard", False)
+            except Exception:
+                cfg_copy = False
+            if cfg_copy:
+                try:
+                    _clipboard_set_text(text)
+                    logger.warning(
+                        "[INJECT-FALLBACK] copy_result_to_clipboard=True — "
+                        "final text written to clipboard (len=%d) reason=%s",
+                        len(text), reason)
+                except Exception:
+                    pass
+            else:
                 logger.warning(
                     "[INJECT-FALLBACK] all injection paths failed — "
-                    "final text preserved on clipboard (len=%d) reason=%s",
-                    len(text), reason)
-            except Exception:
-                logger.warning(
-                    "[INJECT-FALLBACK] clipboard preservation ALSO failed", exc_info=True)
-            return InjectionResult(ok=False, reason=reason or "all_injection_paths_failed",
-                                    clipboard_preserved=True)
+                    "clipboard preserved (untouched) reason=%s", reason)
+            return InjectionResult(ok=False, state="injection_failed",
+                                    clipboard_preserved=(not cfg_copy),
+                                    reason=reason or "all_injection_paths_failed")
 
         def _ok(method: str, verified: bool = False, target_restored: bool = False) -> InjectionResult:
-            return InjectionResult(ok=True, verified=verified, method=method,
+            return InjectionResult(ok=True, state="verified_success",
+                                    verified=verified, method=method,
+                                    clipboard_preserved=True,  # always restored
+                                    clipboard_restored=True,
+                                    target_verified=verified,
                                     target_restored=target_restored)
 
         self._release_modifiers(reason="inject_start")
@@ -528,6 +617,20 @@ class Injector:
             "[INJECT-PRE] text=%r len=%d vk_list=%s modifiers=%s",
             text[:20], len(text), self._MODIFIER_RELEASE_ORDER,
             self._get_modifier_states())
+
+        # ── Stage 0: Assess target editability ──
+        # If no target hwnd was captured AND the current foreground has no
+        # editable element, return no_editable_target immediately (never
+        # touches clipboard).
+        if target is None or not target.hwnd:
+            editability = self._assess_target_editability(target)
+            if editability == "no_editable":
+                logger.info(
+                    "[INJECT-POST] no editable target (no hwnd) — "
+                    "returning no_editable_target state")
+                return InjectionResult(ok=False, state="no_editable_target",
+                                        clipboard_preserved=True,
+                                        reason="no_editable_target")
 
         # ── Stage A: try to restore the original target window ──
         target_restored = False
@@ -553,7 +656,14 @@ class Injector:
                     self.last_target_title = target.title
                     logger.info("[INJECT-POST] ok via=Win32ChildEdit (no foreground)")
                     return _ok("win32_child", verified=True)
-                # Otherwise: text MUST still be on clipboard for manual paste.
+                # No foreground access and no child edit → check editability
+                editability = self._assess_target_editability(target)
+                if editability == "no_editable":
+                    logger.info(
+                        "[INJECT-POST] target exists but not editable → no_editable_target")
+                    return InjectionResult(ok=False, state="no_editable_target",
+                                            clipboard_preserved=True,
+                                            reason="target_not_editable")
                 return _fail("target_restore_failed")
 
         hwnd, cls, pid, proc = self._foreground_info()

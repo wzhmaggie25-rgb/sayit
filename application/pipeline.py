@@ -256,15 +256,48 @@ class RecordingPipeline:
             # ── Phase 4: Injection ───────────────────────────────────
             self.state = RecordingState.INJECTING
             self._eb.emit(Events.ASR_PROGRESS, "injecting", "注入中", engine)
+            inject_result = None
             try:
                 inject_result = injector.inject(final_text, target=injection_target)
-                ok = bool(inject_result)
-                self._eb.emit(Events.INJECTION_DONE, ok)
             except Exception as e:
-                logger.warning("Injection failed: %s", e)
+                logger.warning("Injection threw exception: %s", e)
+
+            # Determine state and emit appropriate events
+            if inject_result is None:
+                # Exception before InjectionResult was returned
                 self._eb.emit(Events.INJECTION_DONE, False)
+                self._eb.emit(Events.PIPELINE_ERROR, "文本已保存到历史，但未能注入目标输入窗口")
+                self.state = RecordingState.ERROR
+                history_pasted = False
+                history_status = "error"
+                history_error = "injection_exception"
                 ok = False
-                inject_result = None
+            elif inject_result.state == "verified_success":
+                ok = True
+                self._eb.emit(Events.INJECTION_DONE, True)
+                history_pasted = True
+                history_status = "completed"
+                history_error = ""
+            elif inject_result.state == "no_editable_target":
+                ok = True  # Not a failure — user needs result card
+                self._eb.emit(Events.INJECTION_DONE, False)  # False means "not in target"
+                self._eb.emit(Events.NO_EDITABLE_TARGET, final_text)
+                self._eb.emit(Events.RESULT_CARD_SHOW, final_text, locally_refined_text)
+                history_pasted = False
+                history_status = "completed_no_target"
+                history_error = ""
+            else:
+                # injection_failed or recognition_failed
+                # Per override: also show result card for failed injection so
+                # user can copy manually — but still emit error event for float
+                ok = False
+                self._eb.emit(Events.INJECTION_DONE, False)
+                self._eb.emit(Events.PIPELINE_ERROR, "文本已保存到历史，但未能注入目标输入窗口")
+                # Show result card for user to copy final text manually
+                self._eb.emit(Events.RESULT_CARD_SHOW, final_text, locally_refined_text)
+                history_pasted = False
+                history_status = "error"
+                history_error = inject_result.reason or "injection_failed"
 
             # ── Phase 5: Save to history ─────────────────────────────
             history_id = db.add_history(
@@ -277,16 +310,18 @@ class RecordingPipeline:
                 window_title=injector.last_target_title,
                 window_class=injector.last_target_class,
                 duration=seconds,
-                pasted=ok,
-                error_msg="" if ok else "injection failed",
-                status="completed" if ok else "error",
+                pasted=history_pasted,
+                error_msg=history_error,
+                status=history_status,
                 debug_info=f"asr_engine={engine};streaming={'1' if engine == 'aliyun_streaming' else '0'}",
             )
 
-            if not ok:
-                self._eb.emit(Events.PIPELINE_ERROR, "文本已保存到历史，但未能注入目标输入窗口")
-                self.state = RecordingState.ERROR
-                return
+            if not ok or inject_result is None:
+                if inject_result is not None and inject_result.state == "no_editable_target":
+                    # no_editable_target: save history but skip error + done via fallthrough
+                    pass
+                else:
+                    return  # already emitted PIPELINE_ERROR
 
             # ── Phase 6: Silent monitor ─────────────────────────────
             silent_learning_enabled = True
