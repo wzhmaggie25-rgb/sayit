@@ -773,12 +773,21 @@ class Injector:
             (context.get("active_application") or {}).get("app_type") if context else "")
 
         # Layer 1: UIA
+        # _inject_uia returns tri-state:
+        #   True  → verified, return _ok
+        #   False → SetValue attempted but unverified → return attempted_unverified
+        #   None  → no action taken → fall through to clipboard paste
         if strategy == "uia" and cls not in UIA_UNRELIABLE_CLASSES:
-            if self._inject_uia(text):
+            uia_result = self._inject_uia(text)
+            if uia_result is True:
                 logger.info("[INJECT-POST] ok via=UIA")
-                # UIA path already does its own readback in _verify_uia_readback;
-                # if _inject_uia returned True we trust it as verified.
                 return _ok("uia", verified=True)
+            elif uia_result is False:
+                logger.info(
+                    "[INJECT-POST] UIA SetValue attempted but unverified — "
+                    "returning attempted_unverified (no clipboard fallthrough)")
+                return _attempted_unverified("uia", reason="uia_setvalue_unverified")
+            # uia_result is None → no action, fall through
 
         # Pre-paste target snapshot — used to differentiate
         # verified / unchanged / no_readback after a paste shortcut.
@@ -860,6 +869,10 @@ class Injector:
         Uses SendMessage(WM_SETTEXT) + WM_GETTEXT readback so the path is
         deterministic and does not depend on the target being foreground.
         Returns True only if the readback matches `text` exactly.
+
+        **Guard:** refuses WM_SETTEXT when the control already has content,
+        because WM_SETTEXT replaces the entire field (non-destructive). For
+        non-empty controls, use the clipboard or SendInput path instead.
         """
         child = self._find_child_edit(hwnd)
         if not child:
@@ -878,6 +891,15 @@ class Injector:
                 wintypes.WPARAM, wintypes.LPARAM,
             )
             send = send_proto(("SendMessageW", user32))
+
+            # ── Guard: refuse if control already has content ──
+            length = int(send(child, WM_GETTEXTLENGTH, 0, 0))
+            if length > 0:
+                logger.info(
+                    "[INJECT-WIN32] refusing WM_SETTEXT — control has %d chars "
+                    "(non-destructive guard)", length)
+                return False
+
             # Pass `text` as a buffer pointer cast to LPARAM — equivalent
             # to MSDN's "(LPARAM)lpString" convention.
             text_buf = ctypes.create_unicode_buffer(text)
@@ -988,21 +1010,29 @@ class Injector:
         import re
         return any(re.search(pattern, page_url) for pattern in rule.get("regex", []))
 
-    def _inject_uia(self, text: str) -> bool:
+    def _inject_uia(self, text: str) -> bool | None:
         """Try UIA ValuePattern injection with read-back verification.
 
-        Returns True only if SetValue succeeds AND read-back confirms the text
-        appeared in the target element (with 0.1s timeout guard against deadlocks).
+        Returns tri-state:
+          True   — SetValue succeeded AND read-back confirmed.
+          False  — SetValue was attempted but read-back failed — the
+                   element may have been modified. **Must NOT** fall
+                   through to clipboard paste (would duplicate text).
+          None   — No action taken (no focused element, no ValuePattern).
+                   Caller may proceed to clipboard paste.
+
+        Does NOT call TextPattern.Select() — that would select all content
+        and destroy the user's cursor position. Does NOT interact with the
+        clipboard. Does NOT fall through to additional injection after the
+        element may have been modified.
         """
         try:
             import comtypes
             import comtypes.client
         except Exception as e:
             logger.info("[INJECT-UIA] comtypes unavailable → fallback: %s", e)
-            return False
+            return None
 
-        success = False
-        readback_ok = False
         com_initialized = False
 
         try:
@@ -1020,49 +1050,40 @@ class Injector:
             except Exception:
                 # Typelib not generated yet — CreateObject returns IUnknown,
                 # which will raise AttributeError on GetFocusedElement.
-                # That's caught by outer except and falls through to clipboard.
+                # That's caught by outer except and falls through.
                 uia = comtypes.client.CreateObject(
                     "{ff48dba4-60ef-4201-aa87-54103eef594e}")
 
             elem = uia.GetFocusedElement()
             if elem is None:
                 logger.info("[INJECT-UIA] no focused element → fallback")
-                return False
+                return None
 
             # ── Try ValuePattern SetValue ──
             try:
                 vp = elem.GetCurrentPattern(10002).QueryInterface(
                     "{EA3A3B8A-4B6E-4B9E-9F6A-6F6B5B2F9B8B}")
                 vp.SetValue(text)
-                success = True
                 logger.info("[INJECT-UIA] SetValue called — verifying read-back")
             except Exception:
-                logger.info("[INJECT-UIA] ValuePattern not available → fallback")
+                logger.info("[INJECT-UIA] ValuePattern not available → no action")
+                return None
 
             # ── Read-back verification (with timeout) ──
-            if success:
-                readback_ok = self._verify_uia_readback(text, elem)
-                if readback_ok:
-                    logger.info("[INJECT-UIA] read-back verified → OK")
-                    return True
-                else:
-                    logger.info("[INJECT-UIA] read-back failed/mismatch → fallback to clipboard")
-
-            # ── TextPattern fallback (copy to clipboard, then paste) ──
-            try:
-                tp = elem.GetCurrentPattern(10014)
-                if tp is not None:
-                    doc_range = tp.DocumentRange
-                    doc_range.Select()
-                    logger.info("[INJECT-UIA] TextPattern Select() succeeded")
-            except Exception:
-                pass
-
-            return False
+            readback_ok = self._verify_uia_readback(text, elem)
+            if readback_ok:
+                logger.info("[INJECT-UIA] read-back verified → OK")
+                return True
+            else:
+                logger.info(
+                    "[INJECT-UIA] read-back failed/mismatch → "
+                    "SetValue may have modified target, returning False "
+                    "(no clipboard fallthrough)")
+                return False
 
         except Exception:
             logger.info("[INJECT-UIA] exception: %s", traceback.format_exc())
-            return False
+            return None
         finally:
             if com_initialized:
                 try:
