@@ -104,7 +104,6 @@ class InjectResultClipboardRestoreIntegration(unittest.TestCase):
         return [
             patch.object(self.inj, "_lock", MagicMock()),
             patch.object(self.inj, "_focus_window", return_value=True),
-            patch.object(self.inj, "_inject_win32_child_edit", return_value=False),
             patch.object(self.inj, "_foreground_info",
                          return_value=(4242, "Edit", 1, "notepad.exe")),
             patch.object(self.inj, "_get_context_for_strategy", return_value={}),
@@ -144,9 +143,8 @@ class InjectResultClipboardRestoreIntegration(unittest.TestCase):
                                                     with patches[11]:
                                                         with patches[12]:
                                                             with patches[13]:
-                                                                with patches[14]:
-                                                                    result = self.inj.inject(
-                                                                        "bar", target=self.target)
+                                                                result = self.inj.inject(
+                                                                    "bar", target=self.target)
         self.assertEqual(result.state, "verified_success")
         self.assertFalse(result.clipboard_preserved,
                          "restore failure must set clipboard_preserved=False")
@@ -201,9 +199,8 @@ class InjectResultClipboardRestoreIntegration(unittest.TestCase):
                                                 with patches[10]:
                                                     with patches[11]:
                                                         with patches[12]:
-                                                            with patches[13]:
-                                                                result = self.inj.inject(
-                                                                    "xyz", target=self.target)
+                                                            result = self.inj.inject(
+                                                                "xyz", target=self.target)
         self.assertEqual(result.state, "attempted_unverified")
         self.assertFalse(result.clipboard_preserved,
                          "restore failure must set clipboard_preserved=False")

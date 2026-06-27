@@ -897,62 +897,6 @@ class Injector:
         except Exception:
             return {}
 
-    def _inject_win32_child_edit(self, text: str, hwnd: int) -> bool:
-        """Inject text into a Win32 Edit/RichEdit child of `hwnd`.
-
-        Uses SendMessage(WM_SETTEXT) + WM_GETTEXT readback so the path is
-        deterministic and does not depend on the target being foreground.
-        Returns True only if the readback matches `text` exactly.
-
-        **Guard:** refuses WM_SETTEXT when the control already has content,
-        because WM_SETTEXT replaces the entire field (non-destructive). For
-        non-empty controls, use the clipboard or SendInput path instead.
-        """
-        child = self._find_child_edit(hwnd)
-        if not child:
-            return False
-        try:
-            WM_SETTEXT = 0x000C
-            WM_GETTEXT = 0x000D
-            WM_GETTEXTLENGTH = 0x000E
-            user32 = ctypes.windll.user32
-            # SendMessageW returns LRESULT (pointer-sized). Without restype
-            # ctypes truncates to 32 bits — break out a private prototype so
-            # we don't mutate global SendMessageW state.
-            send_proto = ctypes.WINFUNCTYPE(
-                ctypes.c_ssize_t,
-                wintypes.HWND, wintypes.UINT,
-                wintypes.WPARAM, wintypes.LPARAM,
-            )
-            send = send_proto(("SendMessageW", user32))
-
-            # ── Guard: refuse if control already has content ──
-            length = int(send(child, WM_GETTEXTLENGTH, 0, 0))
-            if length > 0:
-                logger.info(
-                    "[INJECT-WIN32] refusing WM_SETTEXT — control has %d chars "
-                    "(non-destructive guard)", length)
-                return False
-
-            # Pass `text` as a buffer pointer cast to LPARAM — equivalent
-            # to MSDN's "(LPARAM)lpString" convention.
-            text_buf = ctypes.create_unicode_buffer(text)
-            r = send(child, WM_SETTEXT, 0,
-                     ctypes.cast(text_buf, ctypes.c_void_p).value or 0)
-            if not r:
-                return False
-            time.sleep(0.05)
-            length = int(send(child, WM_GETTEXTLENGTH, 0, 0))
-            if length < 0:
-                return False
-            buf = ctypes.create_unicode_buffer(length + 1)
-            send(child, WM_GETTEXT, length + 1,
-                 ctypes.cast(buf, ctypes.c_void_p).value or 0)
-            return buf.value == text
-        except Exception:
-            logger.info("[INJECT-WIN32] child edit injection failed: %s", traceback.format_exc())
-            return False
-
     def _find_child_edit(self, hwnd: int) -> int:
         matches: list[int] = []
 
@@ -1044,133 +988,14 @@ class Injector:
         import re
         return any(re.search(pattern, page_url) for pattern in rule.get("regex", []))
 
-    def _inject_uia(self, text: str) -> bool | None:
-        """Try UIA ValuePattern injection with read-back verification.
+    def _inject_uia(self, text: str) -> None:
+        """UIA insertion — always returns None (no action).
 
-        Returns tri-state:
-          True   — SetValue succeeded AND read-back confirmed.
-          False  — SetValue was attempted but read-back failed — the
-                   element may have been modified. **Must NOT** fall
-                   through to clipboard paste (would duplicate text).
-          None   — No action taken (no focused element, no ValuePattern).
-                   Caller may proceed to clipboard paste.
-
-        Does NOT call TextPattern.Select() — that would select all content
-        and destroy the user's cursor position. Does NOT interact with the
-        clipboard. Does NOT fall through to additional injection after the
-        element may have been modified.
+        ValuePattern.SetValue has been removed (Round 8 P0-1).  UIA does not
+        expose a reliable selection-aware write API across all targets, so
+        this layer is disabled.  Caller falls through to clipboard/SendInput.
         """
-        try:
-            import comtypes
-            import comtypes.client
-        except Exception as e:
-            logger.info("[INJECT-UIA] comtypes unavailable → fallback: %s", e)
-            return None
-
-        com_initialized = False
-
-        try:
-            comtypes.CoInitialize()
-            com_initialized = True
-
-            # ── Properly create IUIAutomation COM object ──
-            # On Windows 10/11 the UIAutomation typelib (UIAutomationClient.tlb)
-            # is always available. Try loading it first for proper vtable binding.
-            # Fallback: use raw IUnknown (won't have GetFocusedElement but will
-            # be caught by outer except and fall through to clipboard).
-            try:
-                from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation
-                uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
-            except Exception:
-                # Typelib not generated yet — CreateObject returns IUnknown,
-                # which will raise AttributeError on GetFocusedElement.
-                # That's caught by outer except and falls through.
-                uia = comtypes.client.CreateObject(
-                    "{ff48dba4-60ef-4201-aa87-54103eef594e}")
-
-            elem = uia.GetFocusedElement()
-            if elem is None:
-                logger.info("[INJECT-UIA] no focused element → fallback")
-                return None
-
-            # ── Try ValuePattern SetValue ──
-            try:
-                vp = elem.GetCurrentPattern(10002).QueryInterface(
-                    "{EA3A3B8A-4B6E-4B9E-9F6A-6F6B5B2F9B8B}")
-                vp.SetValue(text)
-                logger.info("[INJECT-UIA] SetValue called — verifying read-back")
-            except Exception:
-                logger.info("[INJECT-UIA] ValuePattern not available → no action")
-                return None
-
-            # ── Read-back verification (with timeout) ──
-            readback_ok = self._verify_uia_readback(text, elem)
-            if readback_ok:
-                logger.info("[INJECT-UIA] read-back verified → OK")
-                return True
-            else:
-                logger.info(
-                    "[INJECT-UIA] read-back failed/mismatch → "
-                    "SetValue may have modified target, returning False "
-                    "(no clipboard fallthrough)")
-                return False
-
-        except Exception:
-            logger.info("[INJECT-UIA] exception: %s", traceback.format_exc())
-            return None
-        finally:
-            if com_initialized:
-                try:
-                    comtypes.CoUninitialize()
-                except Exception:
-                    pass
-
-    def _verify_uia_readback(self, expected: str, elem) -> bool:
-        """Read back focused element value with 0.1s timeout. Returns True if match."""
-        result = [None]
-        error = [None]
-
-        def _read():
-            try:
-                import comtypes
-                comtypes.CoInitialize()
-                try:
-                    vp = elem.GetCurrentPattern(10002).QueryInterface(
-                        "{EA3A3B8A-4B6E-4B9E-9F6A-6F6B5B2F9B8B}")
-                    result[0] = (vp.CurrentValue or "")
-                except Exception as e:
-                    error[0] = str(e)[:80]
-                finally:
-                    comtypes.CoUninitialize()
-            except Exception:
-                pass
-
-        t = threading.Thread(target=_read, daemon=True, name="uia-readback")
-        t.start()
-        t.join(0.1)  # 0.1s timeout per spec
-
-        if t.is_alive():
-            logger.warning("[INJECT-UIA] read-back timeout (0.1s) — UIA may be deadlocked")
-            return False
-
-        if error[0]:
-            logger.info("[INJECT-UIA] read-back error: %s", error[0])
-            return False
-
-        read_text = result[0]
-        if read_text is None:
-            logger.info("[INJECT-UIA] read-back returned None")
-            return False
-
-        # Containment check — expected should appear in the element value.
-        # Phase 3 fix: drop the reverse check (read_text in expected) which
-        # produces false positives when readback is empty or short.
-        if expected and expected in read_text:
-            return True
-
-        logger.info("[INJECT-UIA] read-back mismatch: expected=%r got=%r",
-                    expected[:40], read_text[:40])
-        return False
+        return None
 
     def get_foreground_window_info(self) -> tuple[str, str, str, str]:
         """Get (proc, class, title, class) for the foreground window."""

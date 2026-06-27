@@ -142,54 +142,12 @@ class VerifyTargetTextDiffTests(unittest.TestCase):
 
 
 class VerifyUiaReadbackDiffTests(unittest.TestCase):
-    """Direct tests of _verify_uia_readback — rejection of empty false positives."""
+    """_verify_uia_readback is removed — placeholder to avoid reimport."""
 
-    def setUp(self):
-        self.inj = Injector(injection_mode="auto")
-
-    def _make_mock_elem(self, value):
-        """Create a mock UIA element with ValuePattern returning value."""
-        mock_vp = MagicMock()
-        mock_vp.CurrentValue = value
-        mock_elem = MagicMock()
-        mock_elem.GetCurrentPattern.return_value.QueryInterface.return_value = mock_vp
-        return mock_elem
-
-    def test_empty_readback_not_verified(self):
-        """Empty readback must not match — avoids '' in 'text' false positive."""
-        elem = self._make_mock_elem("")
-        result = self.inj._verify_uia_readback("hello", elem)
-        self.assertFalse(result)
-
-    def test_none_readback_not_verified(self):
-        """None readback must not match."""
-        elem = self._make_mock_elem(None)
-        result = self.inj._verify_uia_readback("hello", elem)
-        self.assertFalse(result)
-
-    def test_exact_match_verified(self):
-        """Exact readback match → True."""
-        elem = self._make_mock_elem("hello")
-        result = self.inj._verify_uia_readback("hello", elem)
-        self.assertTrue(result)
-
-    def test_substring_in_readback_verified(self):
-        """Expected is substring of readback → True (UIA readback is whole value)."""
-        elem = self._make_mock_elem("hello world")
-        result = self.inj._verify_uia_readback("hello", elem)
-        self.assertTrue(result)
-
-    def test_readback_in_expected_not_verified(self):
-        """Readback smaller than expected must not match (reverse containment)."""
-        elem = self._make_mock_elem("hel")
-        result = self.inj._verify_uia_readback("hello", elem)
-        self.assertFalse(result)
-
-    def test_mismatch_not_verified(self):
-        """Completely different text → False."""
-        elem = self._make_mock_elem("goodbye")
-        result = self.inj._verify_uia_readback("hello", elem)
-        self.assertFalse(result)
+    def test_verify_uia_readback_removed(self):
+        """_verify_uia_readback was deleted — confirm it doesn't exist."""
+        self.assertFalse(
+            hasattr(Injector(injection_mode="auto"), "_verify_uia_readback"))
 
 
 class PasteUnchangedMapsToInjectionFailed(unittest.TestCase):
@@ -204,7 +162,6 @@ class PasteUnchangedMapsToInjectionFailed(unittest.TestCase):
         return [
             patch.object(self.inj, "_lock", MagicMock()),
             patch.object(self.inj, "_focus_window", return_value=True),
-            patch.object(self.inj, "_inject_win32_child_edit", return_value=False),
             patch.object(self.inj, "_foreground_info",
                          return_value=(4242, "Edit", 1, "notepad.exe")),
             patch.object(self.inj, "_get_context_for_strategy", return_value={}),
@@ -266,9 +223,8 @@ class PasteUnchangedMapsToInjectionFailed(unittest.TestCase):
                                             with patches[9]:
                                                 with patches[10]:
                                                     with patches[11]:
-                                                        with patches[12]:
-                                                            result = self.inj.inject(
-                                                                "xyz", target=self.target)
+                                                        result = self.inj.inject(
+                                                            "xyz", target=self.target)
         self.assertEqual(result.state, "attempted_unverified")
         self.assertEqual(result.reason, "paste_no_readback")
 

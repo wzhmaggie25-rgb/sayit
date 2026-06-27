@@ -1,19 +1,16 @@
-"""Tests: Phase 2 — Non-destructive insertion (no WM_SETTEXT/SetValue).
+"""Tests: Phase 1 — No SetValue/WM_SETTEXT/DocumentRange.Select.
 
-P0-2 and P0-3 from ROUND6_CODE_REVIEW.
+SetValue, WM_SETTEXT, and DocumentRange.Select are permanently removed
+from injector.py (P0-1/P0-2/P0-3 from Round 7 code review).
 
 Verifies:
-1. _inject_win32_child_edit refuses WM_SETTEXT when control already has content
-2. _inject_uia does NOT call TextPattern.Select() + clipboard paste fallthrough
-3. After UIA SetValue is attempted but readback fails, the outer code does NOT
-   fall through to clipboard paste (returns attempted_unverified)
-4. When UIA takes no action (e.g., no focused element), clipboard fallthrough
-   is still allowed
+1. _inject_uia does NOT call TextPattern.Select() — always returns None
+2. After UIA takes no action, clipboard fallthrough is still allowed
+3. Grep gate: zero matches for forbidden API calls in injector.py
 """
 
 from __future__ import annotations
 
-import uuid
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -26,65 +23,11 @@ if str(ROOT) not in sys.path:
 
 from infrastructure.injector import Injector, InjectionTarget
 
-# Reuse the EditHost fixture for the WM_SETTEXT guard test
-try:
-    from test_win32_edit_integration import _EditHost
-    HAS_EDIT_HOST = True
-except ImportError:
-    HAS_EDIT_HOST = False
-
 
 def _make_injection_target(hwnd: int = 4242, pid: int = 1,
                            proc: str = "notepad.exe",
                            cls: str = "Notepad", title: str = "Untitled") -> InjectionTarget:
     return InjectionTarget(hwnd=hwnd, pid=pid, proc=proc, cls=cls, title=title)
-
-
-# ────────────────────────────────────────────────────────
-# Non-destructive Win32 child edit
-# ────────────────────────────────────────────────────────
-
-@unittest.skipUnless(HAS_EDIT_HOST, "_EditHost fixture not available")
-class Win32ChildEditGuardTests(unittest.TestCase):
-    """WM_SETTEXT must NOT overwrite a non-empty edit control."""
-
-    def setUp(self):
-        self.host = _EditHost()
-        self.host.start()
-
-    def tearDown(self):
-        self.host.stop()
-
-    def test_win32_child_edit_still_works_for_empty(self):
-        """When the control is empty, WM_SETTEXT is still allowed."""
-        inj = Injector(injection_mode="auto")
-        sentinel = f"sayit-empty-{uuid.uuid4().hex[:12]}"
-        ok = inj._inject_win32_child_edit(sentinel, self.host.hwnd)
-        self.assertTrue(ok, "injection should work for empty control")
-        actual = self.host.read_edit_text()
-        self.assertEqual(actual, sentinel)
-
-    def test_win32_child_edit_refuses_when_non_empty(self):
-        """When the control already has content, _inject_win32_child_edit
-        must refuse and return False (no WM_SETTEXT overwrite)."""
-        inj = Injector(injection_mode="auto")
-        # Pre-fill the edit control with some content
-        existing = f"existing-{uuid.uuid4().hex[:8]}"
-        inj._inject_win32_child_edit(existing, self.host.hwnd)
-        actual_before = self.host.read_edit_text()
-        self.assertEqual(actual_before, existing,
-                         "pre-fill should have worked")
-
-        # Now try to inject again — should be refused
-        sentinel = f"sayit-overwrite-{uuid.uuid4().hex[:12]}"
-        ok = inj._inject_win32_child_edit(sentinel, self.host.hwnd)
-        self.assertFalse(ok,
-                         "injection must be refused when control has existing content")
-
-        # Verify the original content is untouched
-        actual_after = self.host.read_edit_text()
-        self.assertEqual(actual_after, existing,
-                         "existing content must not be overwritten by WM_SETTEXT")
 
 
 # ────────────────────────────────────────────────────────
@@ -174,43 +117,15 @@ class UiaNoSelectFallthroughTests(unittest.TestCase):
 # ────────────────────────────────────────────────────────
 
 class UiaDirectMethodTests(unittest.TestCase):
-    """Direct tests on _inject_uia behavior — verify returns are correct.
-
-    These test the _inject_uia implementation directly by patching its
-    internal dependencies rather than mocking the comtypes import system.
-    """
+    """Direct tests on _inject_uia behavior — always returns None now."""
 
     def setUp(self):
         self.inj = Injector(injection_mode="auto")
-        self._real_uia = self.inj._inject_uia
 
-    def test_inject_uia_does_not_call_textpattern_select(self):
-        """_inject_uia must NOT call DocumentRange.Select() on ValuePattern failure."""
-        # Verify by patching _inject_uia to capture TextPattern access
-        # and verifying the old code path is gone.
-        called_select = [False]
-
-        original = self.inj._inject_uia
-
-        def tracking_inject_uia(text):
-            # The new _inject_uia should NOT call any TextPattern
-            # If it does, there would be a GetCurrentPattern(10014) call
-            with patch.object(self.inj, "_verify_uia_readback",
-                              return_value=True):
-                result = original(text)
-            return result
-
-        self.inj._inject_uia = tracking_inject_uia
-
-        # Simulate: comtypes unavailable → returns None (no action)
-        with patch.object(self.inj, "_inject_uia",
-                          return_value=None):
-            # This just verifies the mock works
-            pass
-
-        # Restore
-        self.inj._inject_uia = self._real_uia
-        self.assertTrue(True)  # test passes by not crashing
+    def test_inject_uia_always_returns_none(self):
+        """_inject_uia always returns None — no SetValue, no readback."""
+        result = self.inj._inject_uia("hello")
+        self.assertIsNone(result, "_inject_uia must return None")
 
     def test_inject_uia_returns_false_after_setvalue_readback_fail(self):
         """Patch _inject_uia to return False (verified by outer test)."""
@@ -273,6 +188,54 @@ class UiaDirectMethodTests(unittest.TestCase):
 
         self.assertEqual(result.state, "verified_success")
         self.assertEqual(result.method, "clipboard")
+
+
+# ────────────────────────────────────────────────────────
+# Grep gate: ensure forbidden APIs are gone
+# ────────────────────────────────────────────────────────
+
+class ForbiddenApiGrepGateTests(unittest.TestCase):
+    """Phase 0/1: grep-level gates — forbidden APIs must not appear."""
+
+    def _load_injector_source(self) -> str:
+        """Read injector.py source."""
+        import inspect
+        from infrastructure import injector as inj_mod
+        return inspect.getsource(inj_mod)
+
+    def test_no_valuepattern_setvalue(self):
+        """injector.py must NOT call SetValue( (P0-1)."""
+        import re
+        src = self._load_injector_source()
+        for lineno, line in enumerate(src.splitlines(), 1):
+            stripped = line.strip()
+            # Skip comments, docstrings, log messages
+            if stripped.startswith("#") or stripped.startswith('"') or stripped.startswith("'"):
+                continue
+            if "SetValue(" in line:
+                self.fail(f"SetValue( call at line {lineno}: {stripped}")
+
+    def test_no_wm_settext(self):
+        """injector.py must NOT contain WM_SETTEXT."""
+        src = self._load_injector_source()
+        self.assertNotIn("WM_SETTEXT", src,
+                         "WM_SETTEXT permanently removed from injector (P0-2)")
+
+    def test_no_documentrange_select(self):
+        """injector.py must NOT call DocumentRange.Select()."""
+        src = self._load_injector_source()
+        self.assertNotIn(".Select(", src,
+                         "DocumentRange.Select permanently removed (P0-3)")
+
+    def test_no_inject_win32_child_edit(self):
+        """_inject_win32_child_edit must be deleted."""
+        src = self._load_injector_source()
+        self.assertNotIn("_inject_win32_child_edit", src)
+
+    def test_no_verify_uia_readback(self):
+        """_verify_uia_readback must be deleted."""
+        src = self._load_injector_source()
+        self.assertNotIn("_verify_uia_readback", src)
 
 
 if __name__ == "__main__":

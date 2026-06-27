@@ -31,7 +31,7 @@ if sys.platform != "win32":
 from ctypes import wintypes
 from unittest.mock import patch
 
-from infrastructure.injector import Injector, InjectionTarget
+from infrastructure.injector import InjectionTarget
 
 
 WS_OVERLAPPEDWINDOW = 0x00CF0000
@@ -225,33 +225,6 @@ class Win32EditIntegrationTests(unittest.TestCase):
         except Exception:
             pass
 
-    def test_win32_child_edit_injection_roundtrip(self):
-        """Inject a sentinel via the control-safe Win32 path and read it back.
-
-        This is the path the task's contract names "对可直接定位的 Win32
-        子编辑控件优先使用安全的控件级注入". The control-level path
-        uses SendMessage(WM_SETTEXT) + WM_GETTEXT readback, so it does not
-        depend on foreground state and is fully deterministic — ideal for
-        CI.
-        """
-        sentinel = f"sayit-sentinel-{uuid.uuid4().hex[:12]}"
-        inj = Injector(injection_mode="auto")
-        ok = inj._inject_win32_child_edit(sentinel, self.host.hwnd)
-        self.assertTrue(ok, "_inject_win32_child_edit reported failure")
-        actual = self.host.read_edit_text()
-        self.assertEqual(actual, sentinel,
-                         f"Edit control did not receive sentinel: got {actual!r}")
-
-    def test_inject_win32_child_edit_still_works(self):
-        """_inject_win32_child_edit works regardless of foreground state."""
-        sentinel = f"sayit-child-{uuid.uuid4().hex[:12]}"
-        inj = Injector(injection_mode="auto")
-        ok = inj._inject_win32_child_edit(sentinel, self.host.hwnd)
-        self.assertTrue(ok, "_inject_win32_child_edit reported failure")
-        actual = self.host.read_edit_text()
-        self.assertEqual(actual, sentinel,
-                         f"Edit control did not receive sentinel: got {actual!r}")
-
     def test_orchestrator_state_gate_with_real_edit_host(self):
         """End-to-end: while a fake pipeline is "post-processing", an
         incoming hotkey must be ignored — verified by injecting only at
@@ -311,12 +284,14 @@ class Win32EditIntegrationTests(unittest.TestCase):
             self.assertEqual(ignored, ["transcribing"])
             self.assertTrue(orch.is_busy())
 
-            # Let the pipeline finish; outside of orchestrator we inject the
-            # sentinel into the original Edit control ourselves to model
-            # what the real pipeline would do.
-            inj = Injector(injection_mode="auto")
-            ok = inj._inject_win32_child_edit(sentinel, self.host.hwnd)
-            self.assertTrue(ok)
+            # Let the pipeline finish; outside of orchestrator we send the
+            # sentinel into the original Edit control via direct SendMessageW
+            # to model what the real pipeline would do.
+            WM_SETTEXT = 0x000C
+            text_buf = ctypes.create_unicode_buffer(sentinel)
+            ctypes.windll.user32.SendMessageW(
+                self.host.edit_hwnd, WM_SETTEXT, 0,
+                ctypes.cast(text_buf, ctypes.c_void_p).value or 0)
             actual = self.host.read_edit_text()
             self.assertEqual(actual, sentinel,
                              f"Edit control did not receive sentinel: got {actual!r}")
