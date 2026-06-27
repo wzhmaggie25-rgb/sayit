@@ -1,5 +1,5 @@
 # Project State
-> 最后一次更新：2026-06-27 11:00
+> 最后一次更新：2026-06-27 18:00（Round 6 Typeless 稳定化完成）
 
 ## Overview
 
@@ -204,6 +204,22 @@ RecordingPipeline.run() Phase 6
 16. **Clipboard 注入假成功** — 修复（2026-06-26 Round 4）：`paste()` 在 Ctrl+V 后读剪贴板验证文本是否被消费；未消费时返回 `InjectionResult(ok=False, reason='text_not_consumed', clipboard_preserved=True)`
 17. **注入返回无结构** — 修复（2026-06-26 Round 4）：`InjectionResult` dataclass（ok/verified/method/reason/clipboard_preserved/target_restored + `__bool__` 向后兼容），`inject()` 返回 `List[InjectionResult]`
 18. **剪贴板污染 + 虚假注入验证** — 修复（2026-06-27 Round 5）：删除 paste() 中 `post_clip == text` clipboard-consumed heuristic；`paste()` 始终恢复备份；`InjectionResult.state` 新增四个值（`verified_success`/`no_editable_target`/`injection_failed`/`recognition_failed`）；新增 `_assess_target_editability()` 在无目标时直接返回 `no_editable_target`；`_fail()` 不再默认 auto-copy（检查 `copy_result_to_clipboard` 配置，默认 false）；结果卡片 UI（420×320 非阻塞窗口）在无编辑目标/注入失败时展示；事件新增 `NO_EDITABLE_TARGET`/`RESULT_CARD_SHOW`/`RESULT_CARD_COPY`/`RESULT_CARD_CLOSE`
+19. **Round 6 Typeless 稳定化** — 修复（2026-06-27 Round 6）：
+   - **结果卡片重写**：`frontend/ui/result-card.html` 改为原生 HTML/CSS/JS（无 React/CDN，无 ReferenceError），两层文字 + 复制按钮 + ✓ 反馈 + 右上角 ✕。`frontend/main.js` 主进程缓存 `pendingResultCardPayload` 并在 `did-finish-load` 重放，首次 payload 不丢；连续 show 以最新为准。
+   - **受信 IPC**：`frontend/preload.js::sayitResultCard.{onShow,onCopyDone,onReset,copyPending,close}`。renderer 不携任意文本；main 用 Electron `clipboard.writeText(pendingResultText)`。`server.py::/api/result-card/copy` 弃用（返回 `deprecated_use_electron_ipc`），新增 `/api/result-card/copy-confirmed` 仅观测。
+   - **剪贴板 snapshot 保护**：新建 `infrastructure/clipboard_snapshot.py`，EMPTY / TEXT / UNSUPPORTED_OR_MULTIFORMAT / READ_FAILED 四态。`paste()` 在非文本/多格式/读失败时拒绝触发，inject 落到 SendInput。EMPTY 用 `EmptyClipboard()` 恢复，原空 → 仍空。
+   - **真实目标 readback**：`infrastructure/injector.py::_snapshot_target_text`、`_verify_target_text` 用跨进程 `SendMessage(WM_GETTEXTLENGTH/WM_GETTEXT)` 读 Win32 child Edit。paste/SendInput 前后 snapshot，verdict ∈ `{verified, unchanged, no_readback}`。
+   - **`attempted_unverified` 状态**：动作发出但目标不可 readback；**严禁 SendInput 二次输入**（避免重复文字）；中性 RESULT_CARD_SHOW 让用户主动复制。
+   - **SilentMonitor 门禁**：`application/pipeline.py` 只在 `state == "verified_success"` AND `target_verified` 时启动；no_editable_target / attempted_unverified / injection_failed / recognition_failed 均不启动。
+   - **热词提升**：`domain/hotword_promotion.py::decide_promotion` 纯函数 + DB schema v6 (`correction_rules.source_history_ids` JSON + `.promoted` 标志)。≥2 distinct history + unique winner with margin → promote replacement (NOT pattern)；2–12 char、CJK/alnum、≠pattern；冲突/平票/单字/标点不提升；单次最多 1；幂等。`SilentMonitor._maybe_promote_hotword` 端到端集成，HotwordsManager.add_word 同步 ASR。
+   - **测试**：新增 40 用例（5+10+7+18），全套 213 passed / 1 skipped / 6 subtests；`node --check frontend/main.js && node --check frontend/preload.js && node frontend/_smoke_result_card.js` 全 PASS（smoke 34 assertions）。
+
+## Round 6 Checkpoint commits
+
+- `b37026e` — feat(result-card): native HTML/JS card, trusted IPC, no payload race
+- `1a31cc9` — feat(clipboard): snapshot-based protection for non-text formats
+- `e2536ed` — feat(injector): real target readback, attempted_unverified state
+- `9876412` — feat(learning): hotword promotion after 2 distinct histories
 
 ## 不允许随意修改的模块
 

@@ -1,10 +1,31 @@
 # Current Task
 
-> 最后一次更新：2026-06-27
+> 最后一次更新：2026-06-27（Round 6 完成）
 
 ## 状态
 
-**READY**
+**DONE**
+
+## 完成总结
+
+Round 6 Typeless 稳定化全部 12 项交付完成。详见：
+
+- `.ai/CC_SELF_REVIEW.md` — 逐项 P0/P1 自审，全部 PASS。
+- `.ai/ZCODE_REPORT.md` — 实施过程、根因、文件、命令、风险。
+- `.ai/TEST_RESULTS.md` — 213 passed / 1 skipped / 6 subtests，新增 40 用例。
+
+主要 checkpoint commits（已 push 到 `origin/feature/silent-learning-stabilization`）：
+
+- `b37026e` Phase 1: Native HTML result card
+- `1a31cc9` Phase 2: Clipboard snapshot protection
+- `e2536ed` Phase 3+4: Real readback + state machine + SilentMonitor gating
+- `9876412` Phase 5: Hotword promotion
+
+可交付用户实机验收。
+
+## 历史原始任务（仅作存档）
+
+
 
 ## 执行方式
 

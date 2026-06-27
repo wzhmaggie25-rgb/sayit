@@ -1,140 +1,145 @@
 # ZCode Report
-> 最后一次更新：2026-06-27（Typeless 风格注入降级 + 剪贴板策略重构 + 结果卡片 UI）
+
+> 最后一次更新：2026-06-27（Round 6 Typeless 稳定化：result card / 剪贴板 snapshot / readback state machine / hotword promotion）
+> 执行者：Claude Code (glm-latest) via SayIt Agent Bridge v0.2.0
 
 ## 接收到的任务
 
-根据用户决策采用 Typeless 风格注入失败降级体验，修复以下问题：
+完成 `feature/silent-learning-stabilization` 分支上的 Typeless 风格稳定化交付（来自 `.ai/CURRENT_TASK.md` + `.ai/CLAUDE_LONG_TASK.md` Phase 1–6）：
 
-1. 注入失败时不应显示为"识别失败"，final_text 必须保留；
-2. 删除错误的 clipboard-consumed 验证（`post_clip == text` 即 verified success）；
-3. 正确验证注入：verified 只能来自目标控件 readback，不能来自剪贴板变化；
-4. `copy_result_to_clipboard` 默认必须为 `false`；
-5. 四个状态必须严格分离：`verified_success` / `no_editable_target` / `injection_failed` / `recognition_failed`；
-6. 新增结果卡片 UI（非阻塞悬浮窗）在 `no_editable_target` 和注入失败时展示；
-7. 完成代码、测试、报告、commit 和 push，状态改为 `BLOCKED_USER_VALIDATION`。
+1. 修复结果卡片无法离线运行、首次 payload 丢失；
+2. 复制走可信 Electron IPC；
+3. 注入 verified 必须来自目标 readback；
+4. 新增 attempted_unverified 状态，禁止盲目二次输入；
+5. 空剪贴板恢复为空、非文本/多格式不被破坏；
+6. 无可编辑目标不强抢旧输入框、显示大结果卡片；
+7. 结果卡片两层文字 + 复制按钮 + 绿色勾 + 右上角关闭；
+8. no target / unverified / failed 不启动 SilentMonitor；
+9. 重复纠错（2 个不同 history 后）安全提升个人热词；
+10. 保留 RAltStopWatcher、ABI v3、快速停录。
 
-任务优先级文件 `.ai/CURRENT_TASK_OVERRIDE.md`（哈希 `d7e2271e…`）取代了 `.ai/CURRENT_TASK.md` 的冲突描述。
+## 根因判断
+
+- **结果卡片白屏**：`frontend/ui/result-card.html` 使用 React 但未加载 React/ReactDOM；运行时 `ReferenceError: React is not defined`。
+- **首次 payload 丢失**：`createResultCardWindow()` 后立即 `pushToResultCard(...)`；`did-finish-load` 异步，`resultCardReady=false` 时直接 return；主进程未缓存 payload。
+- **假验证 verified**：`paste()` 老实现以"keybd_event 发送成功"为 verified；无任何目标控件 readback。
+- **空剪贴板恢复**：`backup is None` 时直接放弃，临时写入的 final_text 留在剪贴板。
+- **非文本剪贴板**：`_clipboard_set_text` 调 `EmptyClipboard()`，图片/文件/HTML/RTF 全清掉。
+- **错启动 SilentMonitor**：pipeline 用 `ok and ... and injector.last_target_hwnd` 启动，`no_editable_target` 时 `ok=True` 也命中。
+- **Hotword promotion 缺失**：DB schema 只存单个 `source_history_id`，没有累计 set；没有 `promoted` 标志；没有 `decide_promotion` 算法。
 
 ## 实际修改的文件
 
 | 文件 | 变更摘要 |
-|------|----------|
-| `infrastructure/config_store.py` | 新增 `"copy_result_to_clipboard": False` 到 `DEFAULT_CONFIG`（默认关闭自动复制） |
-| `application/eventbus.py` | 新增 4 个事件：`NO_EDITABLE_TARGET`, `RESULT_CARD_SHOW`, `RESULT_CARD_COPY`, `RESULT_CARD_CLOSE` |
-| `infrastructure/injector.py` | 重写 `InjectionResult`：添加 `state`, `clipboard_restored`, `target_verified` 字段；删除 paste() 中 clipboard-consumed heuristic（`post_clip == text` 不再等于 verified）；`paste()` 始终返回 True 并恢复备份；新增 `_assess_target_editability()` 方法；`_inject_locked` 重写 Stage 0（无编辑目标时立即返回 `no_editable_target`）；`_fail()` 不再默认 auto-copy（检查 `copy_result_to_clipboard` 配置） |
-| `application/pipeline.py` | Phase 4 注入分支：`verified_success` → `INJECTION_DONE(True)`；`no_editable_target` → `INJECTION_DONE(False)` + `NO_EDITABLE_TARGET` + `RESULT_CARD_SHOW`（状态 `completed_no_target`，ok=True 确保继续到 PIPELINE_DONE）；`injection_failed` → `INJECTION_DONE(False)` + `PIPELINE_ERROR` + `RESULT_CARD_SHOW` |
-| `server.py` | `wire_events()` 新增 `NO_EDITABLE_TARGET`, `RESULT_CARD_SHOW`, `RESULT_CARD_CLOSE` 处理器；新增 `POST /api/result-card/copy`（pyperclip.copy + `result_card_copy_done` 事件）；新增 `POST /api/result-card/close` |
-| `frontend/main.js` | 新增 `resultCardWin`, `resultCardReady`, `createResultCardWindow()`, `destroyResultCard()`, `pushToResultCard()`；WS 处理器 `no_editable_target`, `result_card_show`（隐藏浮窗创建卡片）, `result_card_close`, `result_card_copy_done` |
-| `frontend/ui/result-card.html` | **新建**：React 结果卡片窗口（420×320），显示"最后一次识别"、文字预览（500 字截断）、复制按钮（POST /api/result-card/copy）、关闭按钮、复制成功绿色 ✓ 后 800ms 自动关闭 |
-| `tests/test_injection_result.py` | 重写为 15 个测试：`InjectionResult` 新字段（state/clipboard_restored/target_verified）；`paste()` 始终还原行为；`inject()` 正确返回 state |
-| `tests/test_clipboard_rules.py` | **新建**：9 个测试覆盖剪贴板规则 + 每个状态的事件路由 |
-| `tests/test_injector_fallback.py` | 重写：5 个测试从断言 auto-copy 改为断言 clipboard 不被覆盖；使用 `_mock_config_copy_false()` helper |
-| `.ai/ZCODE_REPORT.md` | 本文件 |
-| `.ai/TEST_RESULTS.md` | 更新至 171 passed |
-| `.ai/PROJECT_STATE.md` | 添加第 18 项修复：Typeless 风格剪贴板策略 |
-| `.ai/CURRENT_TASK.md` | 状态置 `BLOCKED_USER_VALIDATION` |
+|---|---|
+| `frontend/ui/result-card.html` | 全部重写为原生 HTML/CSS/JS；无 React/CDN；两层文字 + 复制 + ✓ + 右上角 ✕ |
+| `frontend/main.js` | 加 `clipboard` import、`pendingResultCardPayload`、`pendingResultText`；`showResultCard()` 缓存并在 `did-finish-load` 重放；`ipcMain.handle('result-card:copy-pending')` 走 Electron `clipboard.writeText` |
+| `frontend/preload.js` | 新增 `sayitResultCard` IPC bridge（只暴露受信动作，不再传递任意文本） |
+| `frontend/_smoke_result_card.js` | 新建离线 smoke test（34 assertions） |
+| `server.py` | `/api/result-card/copy` 弃用（不再写剪贴板）；新增 `/api/result-card/copy-confirmed` 观测端点 |
+| `infrastructure/clipboard_snapshot.py` | 新建：`ClipboardSnapshot` + EMPTY/TEXT/UNSUPPORTED_OR_MULTIFORMAT/READ_FAILED + `read_snapshot/restore_snapshot` |
+| `infrastructure/injector.py` | `paste()` 改用 snapshot 拒绝非文本/READ_FAILED；返回 `(ok, kind)`；新增 `_snapshot_target_text`、`_verify_target_text`、`_attempted_unverified` 工厂；inject 主流程在 paste/SendInput 前后做 readback |
+| `application/pipeline.py` | 处理 `attempted_unverified`（中性卡片、不启 SilentMonitor）；SilentMonitor 门禁改为 `verified_success` + `target_verified` |
+| `infrastructure/database.py` | schema v6：`correction_rules.source_history_ids`(JSON) + `.promoted`(int)；`merge_rules` 累计 distinct history set；`mark_rule_promoted` 幂等；`get_rules` 解码 JSON 并向后兼容 |
+| `infrastructure/silent_monitor.py` | merge 后调用 `_maybe_promote_hotword(db)`，提升 replacement 调 `HotwordsManager.add_word` 并 mark promoted |
+| `domain/hotword_promotion.py` | 新建：`decide_promotion(rules)` 纯函数 + 阈值常量 |
+| `tests/test_result_card_smoke.py` | 新建（5 用例） |
+| `tests/test_clipboard_snapshot.py` | 新建（10 用例） |
+| `tests/test_readback_state_machine.py` | 新建（7 用例） |
+| `tests/test_hotword_promotion.py` | 新建（18 用例） |
+| `tests/test_injection_result.py` | 适配 paste 新返回值 + readback + attempted_unverified |
+| `tests/test_injector_fallback.py` | paste mock 改 tuple |
+| `.ai/CC_SELF_REVIEW.md` | 新建：P0/P1 自审全 PASS |
+| `.ai/PROJECT_STATE.md` | 更新到本轮 |
+| `.ai/TEST_RESULTS.md` | 更新到本轮 |
 
-## 根因判断
+## 实施内容（按 Phase）
 
-### 剪贴板污染与虚假注入验证
+### Phase 1: Native HTML result card (`b37026e`)
+- 重写 result-card.html（无 React，无 CDN）
+- 主进程 pendingResultCardPayload 缓存 + did-finish-load 重放
+- 受信 IPC（preload `sayitResultCard.*` + ipcMain handlers）
+- 离线 smoke test
 
-1. **`paste()` 中的 clipboard-consumed heuristic**：`post_clip == text` 被当作"文本已被目标消费"的证据。实际上普通 Windows Ctrl+V 粘贴后剪贴板内容不会被消费或清空。这个假设导致：
-   - 当 post_clip 恰好不变时（正常情况），系统错误地认为注入验证失败；
-   - 当 post_clip 被其他程序意外修改时，虚假报告"验证成功"；
-   - 即使目标程序已正确接收文本，剪贴板仍包含原文，pipeline 却可能标记为 failed。
+### Phase 2: Clipboard snapshot protection (`1a31cc9`)
+- `infrastructure/clipboard_snapshot.py` 四态枚举 + 安全恢复
+- `paste()` 返回 `(ok, kind)`，非文本/读失败直接拒绝
+- EMPTY 恢复调 `EmptyClipboard()`，原空 → 仍空
+- 测试覆盖 EMPTY / TEXT / image / file list / HTML+text / READ_FAILED
 
-2. **`_fail()` 无条件 auto-copy**：注入失败时总是把 final_text 复制到剪贴板，覆盖用户原有内容。用户要求 `copy_result_to_clipboard` 默认 false，仅当用户显式配置时才在失败时复制。
+### Phase 3+4: Real readback + state machine + monitor gating (`e2536ed`)
+- 新增 `_snapshot_target_text` / `_verify_target_text` 跨进程 WM_GETTEXT 读 child Edit
+- `attempted_unverified` 状态 + 严禁 SendInput fallback
+- Pipeline 路由 `attempted_unverified` 到 RESULT_CARD_SHOW，不启 SilentMonitor
+- SilentMonitor gating: `verified_success` + `target_verified`
 
-3. **状态混淆**：`recognition_failed` 被用来表示注入失败，导致历史记录中分不清是 ASR/AI 阶段失败还是注入阶段失败。用户要求在 UI 和历史上严格分离。
+### Phase 5: Hotword promotion (`9876412`)
+- `domain/hotword_promotion.py` 纯函数 `decide_promotion`
+- DB schema v6：`source_history_ids` JSON list + `promoted` flag
+- `merge_rules` 维护 distinct set；`mark_rule_promoted` 幂等
+- `SilentMonitor._maybe_promote_hotword` 端到端集成
+- 守门：≥ 2 distinct history、unique winner with margin、replacement only、最长 12 char、不提升整句、最多 1/次、幂等
 
-## 实施内容
-
-### 1. InjectionResult 重构（infrastructure/injector.py）
-
-- 扩展 `InjectionResult` dataclass：
-  - 新增 `state: str = "recognition_failed"`（四个合法值）
-  - 新增 `clipboard_restored: bool = False`
-  - 新增 `target_verified: bool = False`
-- 删除 `paste()` 中的 clipboard-consumed 判断逻辑：`post_clip == text` 不再验证成功
-- 新 `paste()` 语义：发送 Ctrl+V 后总是返回 True，总是恢复备份剪贴板
-- 新增 `_assess_target_editability(target)`：检查目标 hwnd 和 UIA 可编辑性
-- Stage 0（`_inject_locked`）：如果无目标且 editability="no_editable"，立即返回 `InjectionResult(state="no_editable_target", clipboard_preserved=True)`
-
-### 2. Pipeline 状态路由（application/pipeline.py）
-
-四个状态分支：
-
-| state | INJECTION_DONE | 后续事件 | history.status | ok? |
-|-------|---------------|---------|---------------|-----|
-| `verified_success` | True | — | `completed` | True |
-| `no_editable_target` | False | `NO_EDITABLE_TARGET` + `RESULT_CARD_SHOW` | `completed_no_target` | True（继续到 PIPELINE_DONE） |
-| `injection_failed` | False | `PIPELINE_ERROR` + `RESULT_CARD_SHOW` | `error` | False |
-| `recognition_failed` | False | `PIPELINE_ERROR` | `error` | False |
-
-### 3. 结果卡片 UI（frontend/ui/result-card.html + main.js）
-
-- 非阻塞窗口 420×320，`focusable: false`，不抢当前工作焦点
-- 标题"最后一次识别"
-- 文字区域显示 final_text 预览（最多 500 字符）
-- "复制"按钮 → `POST /api/result-card/copy` → 复制到剪贴板
-- "关闭"按钮 → `POST /api/result-card/close` → 销毁窗口
-- 复制成功后显示绿色 ✓ 800ms 后自动关闭
-
-### 4. 配置默认值（infrastructure/config_store.py）
-
-- `"copy_result_to_clipboard": False` — 默认不自动复制
-
-### 5. 测试重构
-
-- `test_injection_result.py`：15 测试，覆盖所有新字段和 state 值
-- `test_clipboard_rules.py`：9 测试，覆盖每个 state 的事件路由和剪贴板行为
-- `test_injector_fallback.py`：5 测试，改为断言 clipboard 不被 auto-copy，使用 `_mock_config_copy_false()`
+### Phase 6: Regression + self-review
+- 213 passed / 1 skipped / 6 subtests
+- node --check OK
+- smoke 34/34
+- `.ai/CC_SELF_REVIEW.md` 全 PASS
 
 ## 执行过的命令
 
 ```bash
-# Full regression test
-cd /d/code/sayit_zcode
-python -m pytest tests/ --timeout=30 -v
-  → 171 passed, 1 skipped in 21.64s
-
-# Individual suites
-python -m pytest tests/test_injection_result.py -v   # 15 passed
-python -m pytest tests/test_clipboard_rules.py -v     # 9 passed
-python -m pytest tests/test_injector_fallback.py -v   # 5 passed
+git rev-parse HEAD                                  # 基线确认
+python -m pytest tests/ -v --timeout=30 -x         # 失败定位
+python -m pytest tests/ --timeout=30 -q            # 各阶段回归
+python -m pytest tests/test_result_card_smoke.py -v
+python -m pytest tests/test_clipboard_snapshot.py -v
+python -m pytest tests/test_readback_state_machine.py -v
+python -m pytest tests/test_hotword_promotion.py -v
+node --check frontend/main.js
+node --check frontend/preload.js
+node frontend/_smoke_result_card.js
+git add ... && git commit -m ... && git push        # 每 Phase checkpoint
 ```
 
 ## 测试结果
 
-```
-171 passed, 1 skipped, 6 subtests passed in 21.64s
-```
+| 阶段 | 命令 | 结果 |
+|---|---|---|
+| 基线 | `pytest tests/` | 171 passed, 1 failed (pre-existing DLL COM) |
+| Phase 1 | `pytest tests/` | 176 passed |
+| Phase 2 | `pytest tests/` | 188 passed |
+| Phase 3+4 | `pytest tests/` | 195 passed |
+| Phase 5 | `pytest tests/` | 213 passed |
+| Final | `pytest tests/ --timeout=30 -v` | **213 passed, 1 skipped, 6 subtests in 20.85s** |
+| Final | `node --check frontend/main.js` | OK |
+| Final | `node --check frontend/preload.js` | OK |
+| Final | `node frontend/_smoke_result_card.js` | **SMOKE TEST PASSED** (34 assertions) |
 
-所有测试通过。新增 15（injection_result）+ 9（clipboard_rules）+ 5（injector_fallback 重写）= 29 个测试变更。
-
-跳过 1：`test_context_helper_dll_com.py` — pre-existing GBK locale 问题。
+Skipped 1：`tests/test_context_helper_dll_com.py::test_dll_com_apartment_and_uia` — 环境 GBK locale 下 subprocess fixture 报错（exit 1，STDERR 含 `Exception in thread Thread-3 (_readerthread)`）。基线提交 `bff3103` 同样失败，与本轮 Typeless / 剪贴板 / readback / hotword 变更完全无关。
 
 ## 未解决的问题
 
-- Hotword promotion 尚未实现（详见 CURRENT_TASK.md §D — 重复纠错提升为个人热词）。根据优先级，将推迟到下次迭代。
-- 实机用户验收尚未进行：需用户物理操作验证长语音 RAlt、剪贴板保持、结果卡片和热词提升。
+1. **`test_context_helper_dll_com.py` 环境问题**（pre-existing）：GBK locale 下 subprocess 启动 fixture 失败。基线同状态。不影响本轮交付。
+2. **UIA ValuePattern `IsReadOnly` 未单独检查**（优化空间）：当前 readback 自验真已能把"看似可写但实际只读"控件兜底为 `attempted_unverified`，但注入前提早检查 IsReadOnly 可避免无效动作。
+3. **结果卡片真机视觉**：smoke 用 vm sandbox 验证逻辑，完整 Chromium 渲染、动画、tab/Enter 焦点、长文本滚动条仍需用户实机验收（本来就是验收范围）。
 
 ## 风险
 
-1. **`_assess_target_editability()` 对某些应用可能返回误判**（如终端、WebView）：Stage 0 中检测为 no_editable 时会跳过所有注入尝试。这是保守策略——宁可显示结果卡片也不盲目注入。
-2. **结果卡片 UI 使用 Electron 新窗口**：`focusable: false` 窗口在部分 Linux WM 上可能不生效，Windows 上已验证。
-3. **`paste()` 始终返回 True**：调用方 (`inject()`) 通过 target readback 验证，不再依赖 paste 返回值。这对于不可 readback 的应用（微信等）返回 `verified=False` 但 `ok=True`。
+- 新 schema v6 升级：`ALTER TABLE` 失败时静默 `pass`，向后兼容；老数据 `source_history_id` 单字段会在第一次 merge 时被读入 `source_history_ids` 列表，行为正确。
+- `paste()` 返回类型从 `bool` 改为 `tuple[bool, str]`：项目内所有调用点已更新；外部插件不存在。
+- `attempted_unverified` 现在 `ok=True`：pipeline 用 `state` 比 `ok` 更严格地门禁，但若有未列举的下游消费者只看 `ok`，他们会把它当成功——审计该字段使用范围未发现额外消费者。
+- DLL COM 测试持续 skipped：监控环境配置；如不行，单独排查（与本任务无关）。
 
 ## 当前提交ID
 
-（待 commit 后更新）
+主要 checkpoint commits（全部已 push 到 `origin/feature/silent-learning-stabilization`）：
 
----
+- `b37026e7` — feat(result-card): native HTML/JS card, trusted IPC, no payload race
+- `1a31cc9f` — feat(clipboard): snapshot-based protection for non-text formats
+- `e2536ed6` — feat(injector): real target readback, attempted_unverified state
+- `9876412c` — feat(learning): hotword promotion after 2 distinct histories
 
-# Round 2 (2026-06-26): 静默学习稳定性 + RAlt 全链路修复
+**implementation_commit**: `9876412cc97e91ee859abfab8d78d354de21b5a2`
 
-[先前内容保留...]
-
-# Round 3 (2026-06-26): 第二次 RAlt 真实失灵兜底 + 中文局部学习 + 长文本注入验证
-
-[先前内容保留...]
+最终远端 HEAD：见本任务输出 JSON 中的 `commit_sha` 字段（取自最后一次 `git push` 后的真实远端 SHA）。
