@@ -75,6 +75,31 @@
   .text-box::-webkit-scrollbar{width:4px}
   .text-box::-webkit-scrollbar-track{background:transparent}
   .text-box::-webkit-scrollbar-thumb{background:rgba(255,255,255,.18);border-radius:2px}
+  .status-bar{
+    font-size:11px;
+    line-height:1.3;
+    padding:5px 10px;
+    border-radius:8px;
+    display:none;
+    word-break:break-word;
+  }
+  .status-bar.visible{display:block}
+  .status-bar.state-verified_success{
+    background:rgba(76,175,80,.12);
+    color:rgba(76,175,80,.85);
+  }
+  .status-bar.state-attempted_unverified{
+    background:rgba(255,193,7,.12);
+    color:rgba(255,193,7,.85);
+  }
+  .status-bar.state-injection_failed{
+    background:rgba(244,67,54,.12);
+    color:rgba(244,67,54,.85);
+  }
+  .status-bar.state-no_editable_target{
+    background:rgba(255,152,0,.12);
+    color:rgba(255,152,0,.85);
+  }
   .actions{
     display:flex;
     align-items:center;
@@ -116,6 +141,7 @@
   <button id="close-btn" class="close-x" aria-label="关闭" title="关闭">✕</button>
   <div class="label">最后转录的文字</div>
   <div id="last-tx" class="last-tx empty"></div>
+  <div id="status-bar" class="status-bar"></div>
   <div id="final-text" class="text-box"></div>
   <div class="actions">
     <span id="check" class="check"><span aria-hidden="true">✓</span><span>已复制</span></span>
@@ -131,9 +157,11 @@
       copyBtn: document.getElementById('copy-btn'),
       closeBtn: document.getElementById('close-btn'),
       check: document.getElementById('check'),
+      statusBar: document.getElementById('status-bar'),
     };
 
-    var state = { finalText: '', lastTranscription: '', copied: false };
+    var state = { finalText: '', lastTranscription: '', copied: false,
+                  resultState: '', resultMessage: '' };
 
     function truncate(s, max){
       if (typeof s !== 'string') return '';
@@ -150,6 +178,16 @@
       } else {
         els.lastTx.textContent = '';
         els.lastTx.classList.add('empty');
+      }
+      // Status bar (shown when state is meaningful)
+      var msg = (state.resultMessage || '').trim();
+      var s = (state.resultState || '').trim();
+      if (s && msg) {
+        els.statusBar.textContent = msg;
+        els.statusBar.className = 'status-bar visible state-' + s.replace(/_/g, '-');
+      } else {
+        els.statusBar.textContent = '';
+        els.statusBar.className = 'status-bar';
       }
       // Final text — long content is scrollable via overflow-y; truncate at 2000 just in case
       els.finalText.textContent = truncate(state.finalText || '', 2000);
@@ -168,6 +206,8 @@
       payload = payload || {};
       state.finalText = String(payload.finalText || payload.text || '');
       state.lastTranscription = String(payload.lastTranscription || payload.last_transcription || '');
+      state.resultState = String(payload.state || '');
+      state.resultMessage = String(payload.message || '');
       state.copied = false;
       render();
     }
@@ -180,6 +220,8 @@
     function resetState(){
       state.finalText = '';
       state.lastTranscription = '';
+      state.resultState = '';
+      state.resultMessage = '';
       state.copied = false;
       render();
     }

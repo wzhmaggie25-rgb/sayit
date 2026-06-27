@@ -75,7 +75,7 @@ class Events:
 
     # Result card (no editable target)
     NO_EDITABLE_TARGET = "pipeline:no-editable-target"  # final_text: str
-    RESULT_CARD_SHOW = "result_card:show"               # final_text: str, last_transcription: str
+    RESULT_CARD_SHOW = "result_card:show"               # final_text, last_transcription, state, message
     RESULT_CARD_COPY = "result_card:copy"               # final_text: str
     RESULT_CARD_CLOSE = "result_card:close"             # no payload
 

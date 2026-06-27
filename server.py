@@ -91,8 +91,9 @@ def wire_events():
     eb.on(Events.ASR_ERROR, lambda m: _event_queue.put({"event": "error", "message": str(m)}))
     eb.on(Events.INJECTION_DONE, lambda ok: _event_queue.put({"event": "injection_done", "ok": ok}))
     eb.on(Events.NO_EDITABLE_TARGET, lambda t: _event_queue.put({"event": "no_editable_target", "text": t}))
-    eb.on(Events.RESULT_CARD_SHOW, lambda t, lt: _event_queue.put({
+    eb.on(Events.RESULT_CARD_SHOW, lambda t, lt, s="", m="": _event_queue.put({
         "event": "result_card_show", "text": t, "last_transcription": lt,
+        "state": s, "message": m,
     }))
     eb.on(Events.RESULT_CARD_CLOSE, lambda: _event_queue.put({"event": "result_card_close"}))
     eb.on(Events.SILENT_LEARNED, lambda c: _event_queue.put({"event": "silent_learned", "count": c}))

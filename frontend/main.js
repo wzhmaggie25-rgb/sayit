@@ -263,10 +263,12 @@ function flushPendingResultCardPayload() {
   } catch (e) { /* ignore */ }
 }
 
-function showResultCard(finalText, lastTranscription) {
+function showResultCard(finalText, lastTranscription, state, message) {
   const payload = {
     finalText: String(finalText || ''),
     lastTranscription: String(lastTranscription || ''),
+    state: String(state || ''),
+    message: String(message || ''),
   };
   // Always capture as the source of truth — newer payloads win if multiple
   // results arrive while the renderer is still mounting.
@@ -376,7 +378,8 @@ function connectWS() {
           // Show/hide float as needed — this shouldn't show the small bubble
           // Keep float hidden; show result card instead
           hideFloat();
-          showResultCard(evt.text, evt.last_transcription || '');
+          showResultCard(evt.text, evt.last_transcription || '',
+                         evt.state || '', evt.message || '');
           break;
         case 'result_card_close':
           if (isUsableWindow(resultCardWin)) {

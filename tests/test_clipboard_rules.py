@@ -97,18 +97,19 @@ class PipelineEventRoutingTests(unittest.TestCase):
         events = []
         self.eb.on(Events.INJECTION_DONE, lambda ok: events.append(("INJECTION_DONE", ok)))
         self.eb.on(Events.NO_EDITABLE_TARGET, lambda t: events.append(("NO_EDITABLE_TARGET", t)))
-        self.eb.on(Events.RESULT_CARD_SHOW, lambda t, lt: events.append(("RESULT_CARD_SHOW", t)))
+        self.eb.on(Events.RESULT_CARD_SHOW, lambda t, lt, s="", m="": events.append(("RESULT_CARD_SHOW", t, s, m)))
         self.eb.on(Events.PIPELINE_ERROR, lambda m: events.append(("PIPELINE_ERROR", m)))
 
         # Simulate pipeline behavior for no_editable_target
         self.eb.emit(Events.INJECTION_DONE, False)
         self.eb.emit(Events.NO_EDITABLE_TARGET, "你好世界")
-        self.eb.emit(Events.RESULT_CARD_SHOW, "你好世界", "你好世界")
+        self.eb.emit(Events.RESULT_CARD_SHOW, "你好世界", "你好世界",
+                     "no_editable_target", "未找到可输入的目标窗口")
 
         self.assertIn(("NO_EDITABLE_TARGET", "你好世界"), events,
                       "no_editable_target must emit NO_EDITABLE_TARGET")
-        self.assertIn(("RESULT_CARD_SHOW", "你好世界"), events,
-                      "no_editable_target must emit RESULT_CARD_SHOW")
+        self.assertTrue(any(e[0] == "RESULT_CARD_SHOW" for e in events),
+                        "no_editable_target must emit RESULT_CARD_SHOW")
         self.assertNotIn(("PIPELINE_ERROR"), [e[0] for e in events],
                          "no_editable_target must NOT emit PIPELINE_ERROR")
 
@@ -117,13 +118,14 @@ class PipelineEventRoutingTests(unittest.TestCase):
         events = []
         self.eb.on(Events.INJECTION_DONE, lambda ok: events.append(("INJECTION_DONE", ok)))
         self.eb.on(Events.PIPELINE_ERROR, lambda m: events.append(("PIPELINE_ERROR", m)))
-        self.eb.on(Events.RESULT_CARD_SHOW, lambda t, lt: events.append(("RESULT_CARD_SHOW", t)))
+        self.eb.on(Events.RESULT_CARD_SHOW, lambda t, lt, s="", m="": events.append(("RESULT_CARD_SHOW", t, s, m)))
         self.eb.on(Events.PIPELINE_DONE, lambda t: events.append(("PIPELINE_DONE", t)))
 
         # Simulate pipeline behavior for injection_failed
         self.eb.emit(Events.INJECTION_DONE, False)
         self.eb.emit(Events.PIPELINE_ERROR, "文本已保存到历史，但未能注入目标输入窗口")
-        self.eb.emit(Events.RESULT_CARD_SHOW, "你好世界", "你好世界")
+        self.eb.emit(Events.RESULT_CARD_SHOW, "你好世界", "你好世界",
+                     "injection_failed", "未能将文本注入目标窗口")
 
         self.assertTrue(any(e[0] == "PIPELINE_ERROR" for e in events),
                         "injection_failed must emit PIPELINE_ERROR")

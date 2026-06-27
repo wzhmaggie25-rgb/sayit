@@ -64,7 +64,8 @@ class ResultCardStaticChecks(unittest.TestCase):
 
     def test_required_dom_ids(self):
         for fragment in ('id="copy-btn"', 'id="close-btn"',
-                         'id="final-text"', 'id="last-tx"', 'id="check"'):
+                         'id="final-text"', 'id="last-tx"', 'id="check"',
+                         'id="status-bar"'):
             self.assertIn(fragment, self.html, fragment)
 
 

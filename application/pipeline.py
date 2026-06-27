@@ -285,7 +285,10 @@ class RecordingPipeline:
                 # neutral result card so the user can verify manually.
                 ok = False  # gate SilentMonitor off
                 self._eb.emit(Events.INJECTION_DONE, False)
-                self._eb.emit(Events.RESULT_CARD_SHOW, final_text, locally_refined_text)
+                self._eb.emit(Events.RESULT_CARD_SHOW, final_text,
+                              locally_refined_text,
+                              inject_result.state,
+                              "文本可能已输入，请检查目标窗口，避免重复粘贴")
                 history_pasted = False
                 history_status = "completed_unverified"
                 history_error = inject_result.reason or "attempted_unverified"
@@ -293,7 +296,10 @@ class RecordingPipeline:
                 ok = True  # Not a failure — user needs result card
                 self._eb.emit(Events.INJECTION_DONE, False)  # False means "not in target"
                 self._eb.emit(Events.NO_EDITABLE_TARGET, final_text)
-                self._eb.emit(Events.RESULT_CARD_SHOW, final_text, locally_refined_text)
+                self._eb.emit(Events.RESULT_CARD_SHOW, final_text,
+                              locally_refined_text,
+                              inject_result.state,
+                              "未找到可输入的目标窗口")
                 history_pasted = False
                 history_status = "completed_no_target"
                 history_error = ""
@@ -305,7 +311,10 @@ class RecordingPipeline:
                 self._eb.emit(Events.INJECTION_DONE, False)
                 self._eb.emit(Events.PIPELINE_ERROR, "文本已保存到历史，但未能注入目标输入窗口")
                 # Show result card for user to copy final text manually
-                self._eb.emit(Events.RESULT_CARD_SHOW, final_text, locally_refined_text)
+                self._eb.emit(Events.RESULT_CARD_SHOW, final_text,
+                              locally_refined_text,
+                              inject_result.state,
+                              "未能将文本注入目标窗口")
                 history_pasted = False
                 history_status = "error"
                 history_error = inject_result.reason or "injection_failed"
