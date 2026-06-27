@@ -476,7 +476,13 @@ ipcMain.on('float-element-positions-clear', () => { elementPositions = []; });
 // Result-card trusted IPC — renderer never supplies arbitrary text. The
 // only writable channel is the user clicking "copy" on the card currently
 // shown, and main writes `pendingResultText` (which only this process set).
-ipcMain.handle('result-card:copy-pending', async () => {
+// Phase 8: validate sender — only the resultCardWin renderer may invoke
+// these handlers. Other renderers (float.html, devtools) get unauthorized.
+ipcMain.handle('result-card:copy-pending', async (event) => {
+  if (!isUsableWindow(resultCardWin) ||
+      event.sender.id !== resultCardWin.webContents.id) {
+    return { ok: false, error: 'unauthorized' };
+  }
   const text = pendingResultText || '';
   if (!text) return { ok: false, error: 'no_pending_text' };
   try {
@@ -485,8 +491,6 @@ ipcMain.handle('result-card:copy-pending', async () => {
     return { ok: false, error: String(e && e.message || e) };
   }
   // Tell backend so it can fire RESULT_CARD_COPY for history/observability.
-  // Backend's /api/result-card/copy endpoint still exists but is being
-  // deprecated; we no longer pass the text through it.
   try { await api('POST', '/api/result-card/copy-confirmed', {}); } catch(e) {}
   // Notify renderer to show the green check.
   if (isUsableWindow(resultCardWin)) {
@@ -497,8 +501,13 @@ ipcMain.handle('result-card:copy-pending', async () => {
   return { ok: true };
 });
 
-ipcMain.handle('result-card:close', () => {
+ipcMain.handle('result-card:close', (event) => {
   // User cancelled — DO NOT touch clipboard.
+  // Phase 8: validate sender — only the resultCardWin renderer.
+  if (!isUsableWindow(resultCardWin) ||
+      event.sender.id !== resultCardWin.webContents.id) {
+    return { ok: false, error: 'unauthorized' };
+  }
   try { if (isUsableWindow(resultCardWin)) resultCardWin.webContents.send('result-card:reset'); } catch(e) {}
   // Tell backend to emit RESULT_CARD_CLOSE event for history.
   try { api('POST', '/api/result-card/close', {}); } catch(e) {}
