@@ -4,28 +4,35 @@
 
 ## 状态
 
-**ZCODE_READY**
+**READY**
 
-> Round 5 提交 `bff31037d6992b421c60f91d41a515e1565a16ce` 未通过代码审查，不得进入用户验收。
+## 执行方式
 
-## 任务名称
+本任务只由：
 
-修复 Typeless 结果卡片、真实注入 readback、完整剪贴板保护，并完成重复纠错提升个人热词。
+```text
+SayIt Agent Bridge v0.2.0 → Claude Code CLI
+```
 
-## 仓库与边界
+自动执行。
 
-- 仓库：`wzhmaggie25-rgb/sayit`
-- 分支：`feature/silent-learning-stabilization`
-- 本轮待修复基线：`bff31037d6992b421c60f91d41a515e1565a16ce`
-- 稳定备份：commit `0d69a98`，tag `local-working-2026-06-25`
-- 本地目录：`D:\code\sayit_zcode`
-- 执行方式：ZCode GUI
+不要由 ZCode、旧 Agent Bridge 实例或其他执行器同时修改本地目录。
 
-不得修改 `main`、`backup/*` 或稳定 tag；不得 force push、`reset --hard`、`git clean`；不得读取或修改用户真实数据库、词典、历史、录音和私人文本。
+## 唯一目标
 
-## 开始前必须读取
+把当前 `feature/silent-learning-stabilization` 分支推进到：
 
-按优先级依次读取：
+> Typeless 风格结果卡片、真实注入 readback、完整剪贴板保护、正确的注入状态/历史/SilentMonitor 路由，以及重复纠错提升个人热词全部完成并通过自主代码审查，可以交给用户做最终实机验收。
+
+## 强制任务文件
+
+开始后必须完整执行：
+
+```text
+.ai/CLAUDE_LONG_TASK.md
+```
+
+并以以下文件作为缺陷和产品事实依据：
 
 ```text
 .ai/ROUND5_CODE_REVIEW.md
@@ -33,103 +40,66 @@
 .ai/TYPELESS_RUNTIME_VALIDATION.md
 ```
 
-`ROUND5_CODE_REVIEW.md` 是本轮直接执行清单，覆盖此前“已完成/等待验收”的结论。
+## 基线
 
-## 必须修复的阻塞项
+- 仓库：`wzhmaggie25-rgb/sayit`
+- 分支：`feature/silent-learning-stabilization`
+- 待修复实现提交：`bff31037d6992b421c60f91d41a515e1565a16ce`
+- 稳定备份：`0d69a98`
+- 稳定 tag：`local-working-2026-06-25`
+- 本地目录：`D:\code\sayit_zcode`
 
-1. 结果卡片不能依赖未加载的 React；优先改为离线可运行的原生 HTML/CSS/JS；
-2. 修复窗口首次创建时 `result_card_show` payload 在 ready 前丢失；
-3. `Ctrl+V`/SendInput 已发送绝不能直接标记 verified；verified 只能来自目标控件 readback；
-4. 增加 `attempted_unverified`，且不可验证后不得盲目走第二条输入路径；
-5. 原剪贴板为空时必须恢复为空；
-6. 检测到图片、文件、HTML、RTF、多格式或未知格式时，不得使用会破坏剪贴板的 paste 路径；
-7. 结果卡片必须展示最近转录信息和 final_text 两层内容，关闭按钮在右上角；
-8. no_editable_target / attempted_unverified / injection_failed 不得启动 SilentMonitor；
-9. 重新实现可靠的当前输入焦点/可编辑性判断，不得把 TextPattern 存在等同于可编辑；
-10. 结果卡片复制改为 Electron IPC，从主进程受信任 pending text 复制，不接受 renderer 任意 text REST 请求；
-11. 完成重复纠错跨不同 history 安全提升为个人热词，不得再次推迟；
-12. `.ai/ZCODE_REPORT.md` 必须写入最终真实完整 commit SHA。
+## 不得缩减的交付范围
 
-详细根因、代码位置、测试要求见：
+1. 修复结果卡片无法离线运行和首次 payload 丢失；
+2. 复制改为可信 Electron IPC；
+3. verified 只来自目标控件 readback；
+4. 增加 attempted_unverified，禁止不可验证后的盲目二次输入；
+5. 空剪贴板恢复为空；
+6. 图片、文件、HTML、RTF、多格式剪贴板不得被破坏；
+7. 无可编辑目标时不强抢旧输入框，保留原剪贴板并显示大结果卡片；
+8. 结果卡片展示两层文字、复制按钮、绿色勾和右上角关闭；
+9. no target/unverified/failed 不启动 SilentMonitor；
+10. 完成两个不同 history 后的重复纠错安全提升个人热词；
+11. 保留 RAltStopWatcher、ABI v3、快速停录和现有 ASR/AI 功能；
+12. 完成全量测试、前端静态检查、离线 smoke test和逐项自审。
 
-```text
-.ai/ROUND5_CODE_REVIEW.md
-```
+不得再次把 hotword promotion 推迟到下一轮。
 
-## 产品规则
+## 自主执行要求
 
-### 正常成功输入
+- 不向用户询问普通实现细节；采用最保守、最不丢数据、最不重复输入的方案；
+- 按 `.ai/CLAUDE_LONG_TASK.md` 分阶段执行；
+- 每阶段测试通过后 checkpoint commit 并 push；
+- 任何 P0 或验收项未通过就继续修；
+- 不得只凭“测试数量增加”宣布完成；
+- 不读取或修改用户真实数据库、词典、历史、录音、日志正文和凭据；
+- 不修改 `main`、`backup/*` 或稳定 tag；
+- 不 force push、reset --hard、git clean；
+- 不删除失败测试。
 
-- final_text 进入当前有效输入框；
-- 不把 final_text 留在剪贴板；
-- 内部若临时借用剪贴板，最终必须恢复原状态；
-- 不弹结果卡片。
+## 完成条件
 
-### 无有效输入目标
-
-- 不强抢焦点恢复旧输入框；
-- 不自动复制；
-- 保留原剪贴板；
-- 弹出大结果卡片；
-- 用户点击复制后才写入 final_text；
-- 显示绿色勾后关闭。
-
-### 不可验证输入
-
-- 状态为 `attempted_unverified`；
-- 不得标记 verified；
-- 不得再盲目 SendInput 造成双份文字；
-- 不启动静默学习。
-
-### 真正识别失败
-
-只有没有产生 final_text 时才使用 `recognition_failed`。
-
-## 必须完成的个人热词提升
-
-- 同一 `(pattern, replacement)` 在两个不同 history 后才提升；
-- 同一 history 不重复计数；
-- 只有 replacement 入词典；
-- 冲突、平票、接近竞争不提升；
-- 整句、追加、多处修改、长短语不提升；
-- 单次最多提升一个词；
-- 重复扫描幂等；
-- 提升后同步 HotwordsManager/ASR；
-- 不清洗或改写用户已有词典。
-
-## 验证
-
-必须运行：
+必须同时满足：
 
 ```text
 python -m pytest tests/ -v --timeout=30
 node --check frontend/main.js
+result-card 离线 smoke test通过
+.ai/CC_SELF_REVIEW.md 所有 P0 = PASS
 ```
 
-并增加：
-
-- result-card 离线 smoke test；
-- 首次 ready payload 不丢失测试；
-- 空剪贴板恢复为空测试；
-- 非文本/多格式不被破坏测试；
-- readback verified/unverified/failed 测试；
-- attempted_unverified 不重复注入测试；
-- no target 不启动 SilentMonitor 测试；
-- 两个不同 history 后提升热词及冲突/幂等测试。
-
-## 交付
-
-更新：
+并更新：
 
 ```text
 .ai/ZCODE_REPORT.md
 .ai/TEST_RESULTS.md
 .ai/PROJECT_STATE.md
+.ai/CC_SELF_REVIEW.md
 ```
 
-完成后：
+最终：
 
-1. commit 并 push 当前 feature 分支；
-2. 报告写入真实完整 SHA；
-3. 远端 HEAD 与报告一致；
-4. 状态改为 `BLOCKED_USER_VALIDATION`。
+- 成功：状态改为 `DONE`，commit 并 push；
+- 真正外部阻塞：状态改为 `BLOCKED`，保存已通过 checkpoint，commit 并 push；
+- 最终输出结构化 JSON 和真实远端 HEAD SHA。
