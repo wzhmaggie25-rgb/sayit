@@ -76,7 +76,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_snapshot_target_text",
                          return_value=(True, "existing|")),
             patch.object(self.inj, "paste",
-                         return_value=(True, "TEXT")),
+                         return_value=(True, "TEXT", True)),
             patch.object(self.inj, "_verify_target_text",
                          return_value="verified"),
         ):
@@ -103,7 +103,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_snapshot_target_text",
                          return_value=(True, "existing|")),
             patch.object(self.inj, "paste",
-                         return_value=(True, "TEXT")),
+                         return_value=(True, "TEXT", True)),
             patch.object(self.inj, "_verify_target_text",
                          return_value="verified"),
         ):
@@ -141,7 +141,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_snapshot_target_text",
                          side_effect=_snapshot_side_effect),
             patch.object(self.inj, "paste",
-                         return_value=(True, "TEXT")),
+                         return_value=(True, "TEXT", True)),
             patch.object(self.inj, "_verify_target_text",
                          return_value="verified"),
         ):
@@ -192,7 +192,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_snapshot_target_text",
                          return_value=(True, "existing|")),
             patch.object(self.inj, "paste",
-                         return_value=(True, "TEXT")),
+                         return_value=(True, "TEXT", True)),
             patch.object(self.inj, "_verify_target_text",
                          return_value="verified"),
         ):
@@ -230,7 +230,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_snapshot_target_text",
                          side_effect=_snapshot_side_effect),
             patch.object(self.inj, "paste",
-                         return_value=(True, "TEXT")),
+                         return_value=(True, "TEXT", True)),
             patch.object(self.inj, "_verify_target_text",
                          return_value="verified"),
         ):
@@ -297,7 +297,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_snapshot_target_text",
                          return_value=(True, "existing|")),
             patch.object(self.inj, "paste",
-                         return_value=(True, "TEXT")),
+                         return_value=(True, "TEXT", True)),
             patch.object(self.inj, "_verify_target_text",
                          return_value="verified"),
         ):
@@ -328,7 +328,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_snapshot_target_text",
                          return_value=(True, "existing|")),
             patch.object(self.inj, "paste",
-                         return_value=(True, "TEXT")),
+                         return_value=(True, "TEXT", True)),
             patch.object(self.inj, "_verify_target_text",
                          return_value="verified"),
         ):
@@ -358,7 +358,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_snapshot_target_text",
                          return_value=(True, "existing|")),
             patch.object(self.inj, "paste",
-                         return_value=(True, "TEXT")),
+                         return_value=(True, "TEXT", True)),
             patch.object(self.inj, "_verify_target_text",
                          return_value="verified"),
         ):

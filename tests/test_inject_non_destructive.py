@@ -100,7 +100,7 @@ class UiaNoSelectFallthroughTests(unittest.TestCase):
         self._sleep_patch = patch("time.sleep")
         self._sleep_patch.start()
         # Ensure paste() returns a proper tuple when mocked
-        self._paste_return = (True, "TEXT")
+        self._paste_return = (True, "TEXT", True)
 
     def tearDown(self):
         self._sleep_patch.stop()
@@ -126,7 +126,7 @@ class UiaNoSelectFallthroughTests(unittest.TestCase):
                          return_value=False),
             # Paste should NOT be called
             patch.object(self.inj, "paste",
-                         return_value=(True, "TEXT")),
+                         return_value=(True, "TEXT", True)),
         ):
             result = self.inj._inject_locked("hello", target)
 
@@ -159,7 +159,7 @@ class UiaNoSelectFallthroughTests(unittest.TestCase):
             patch.object(self.inj, "_snapshot_target_text",
                          return_value=(True, "")),
             patch.object(self.inj, "paste",
-                         return_value=(True, "TEXT")),
+                         return_value=(True, "TEXT", True)),
             patch.object(self.inj, "_verify_target_text",
                          return_value="verified"),
         ):
@@ -265,7 +265,7 @@ class UiaDirectMethodTests(unittest.TestCase):
             patch.object(self.inj, "_snapshot_target_text",
                          return_value=(True, "")),
             patch.object(self.inj, "paste",
-                         return_value=(True, "TEXT")),
+                         return_value=(True, "TEXT", True)),
             patch.object(self.inj, "_verify_target_text",
                          return_value="verified"),
         ):

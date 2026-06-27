@@ -67,7 +67,7 @@ class InjectorFallbackTests(unittest.TestCase):
              patch.object(inj, "_inject_uia", return_value=False), \
              patch.object(inj, "_snapshot_target_text",
                           return_value=(True, "")), \
-             patch.object(inj, "paste", return_value=(False, "EMPTY")), \
+             patch.object(inj, "paste", return_value=(False, "EMPTY", True)), \
              patch.object(inj, "_direct_input", return_value=False), \
              self._mock_config_copy_false(), \
              cp_patch:
@@ -118,7 +118,7 @@ class InjectorFallbackTests(unittest.TestCase):
              patch.object(inj, "_inject_uia", return_value=False), \
              patch.object(inj, "_snapshot_target_text",
                           return_value=(True, "")), \
-             patch.object(inj, "paste", return_value=(False, "EMPTY")), \
+             patch.object(inj, "paste", return_value=(False, "EMPTY", True)), \
              patch.object(inj, "_direct_input", return_value=False), \
              self._mock_config_copy_false(), \
              cp_patch:
@@ -145,7 +145,7 @@ class InjectorFallbackTests(unittest.TestCase):
              patch.object(inj, "_is_terminal_target", return_value=True), \
              patch.object(inj, "_snapshot_target_text",
                           return_value=(True, "")), \
-             patch.object(inj, "paste", return_value=(False, "EMPTY")), \
+             patch.object(inj, "paste", return_value=(False, "EMPTY", True)), \
              self._mock_config_copy_false(), \
              cp_patch:
             ok = inj.inject(self.SENTINEL)

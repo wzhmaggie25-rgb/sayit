@@ -123,9 +123,10 @@ class InjectorPasteRefusesNonText(unittest.TestCase):
                                                   formats=[CF_BITMAP, CF_DIB],
                                                   detail="CF_BITMAP,CF_DIB")), \
              patch.object(self.inj, "_lock", MagicMock()):
-            ok, kind = self.inj.paste("hello")
+            ok, kind, restored = self.inj.paste("hello")
         self.assertFalse(ok)
         self.assertEqual(kind, "UNSUPPORTED_OR_MULTIFORMAT")
+        self.assertTrue(restored)
 
     def test_paste_refuses_file_list(self):
         with patch("infrastructure.clipboard_snapshot.read_snapshot",
@@ -133,17 +134,19 @@ class InjectorPasteRefusesNonText(unittest.TestCase):
                                                   formats=[CF_HDROP],
                                                   detail="CF_HDROP")), \
              patch.object(self.inj, "_lock", MagicMock()):
-            ok, kind = self.inj.paste("hello")
+            ok, kind, restored = self.inj.paste("hello")
         self.assertFalse(ok)
         self.assertEqual(kind, "UNSUPPORTED_OR_MULTIFORMAT")
+        self.assertTrue(restored)
 
     def test_paste_refuses_read_failed(self):
         with patch("infrastructure.clipboard_snapshot.read_snapshot",
                    return_value=ClipboardSnapshot(kind="READ_FAILED")), \
              patch.object(self.inj, "_lock", MagicMock()):
-            ok, kind = self.inj.paste("hello")
+            ok, kind, restored = self.inj.paste("hello")
         self.assertFalse(ok)
         self.assertEqual(kind, "READ_FAILED")
+        self.assertTrue(restored)
 
 
 class InjectorFallsThroughOnUnsafeSnapshot(unittest.TestCase):

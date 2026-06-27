@@ -154,9 +154,10 @@ class InjectorPasteTests(unittest.TestCase):
         with gp, sp, rsp, rrp, \
              patch.object(self.inj, "_lock", MagicMock()), \
              patch("time.sleep"):
-            ok, kind = self.inj.paste("new text")
+            ok, kind, restored = self.inj.paste("new text")
         self.assertTrue(ok, "paste() should return True once shortcut sent")
         self.assertEqual(kind, "TEXT")
+        self.assertTrue(restored, "paste() must report restore_ok=True on success")
         # After paste, clipboard should be restored to original
         self.assertEqual(store["text"], "original-text",
                          "clipboard must be restored after paste")
@@ -167,9 +168,10 @@ class InjectorPasteTests(unittest.TestCase):
         with gp, sp, rsp, rrp, \
              patch.object(self.inj, "_lock", MagicMock()), \
              patch("time.sleep"):
-            ok, kind = self.inj.paste("new text")
+            ok, kind, restored = self.inj.paste("new text")
         self.assertTrue(ok)
         self.assertEqual(kind, "EMPTY")
+        self.assertTrue(restored, "paste() must report restore_ok=True on success")
         # The new contract: EMPTY snapshot must be restored to EMPTY — final
         # text must NOT linger on the clipboard.
         self.assertIsNone(store["text"],
@@ -184,10 +186,11 @@ class InjectorPasteTests(unittest.TestCase):
                        kind="UNSUPPORTED_OR_MULTIFORMAT",
                        formats=[2, 8], detail="CF_BITMAP,CF_DIB")), \
              patch.object(self.inj, "_lock", MagicMock()):
-            ok, kind = self.inj.paste("would-clobber-image")
+            ok, kind, restored = self.inj.paste("would-clobber-image")
         self.assertFalse(ok,
                          "paste must refuse when image/file content present")
         self.assertEqual(kind, "UNSUPPORTED_OR_MULTIFORMAT")
+        self.assertTrue(restored, "clipboard untouched, restore trivially ok")
 
     def test_paste_refuses_read_failed(self):
         """paste() refuses when clipboard read fails (would risk data loss)."""
@@ -195,9 +198,10 @@ class InjectorPasteTests(unittest.TestCase):
         with patch("infrastructure.clipboard_snapshot.read_snapshot",
                    return_value=snapmod.ClipboardSnapshot(kind="READ_FAILED")), \
              patch.object(self.inj, "_lock", MagicMock()):
-            ok, kind = self.inj.paste("text")
+            ok, kind, restored = self.inj.paste("text")
         self.assertFalse(ok)
         self.assertEqual(kind, "READ_FAILED")
+        self.assertTrue(restored, "clipboard untouched, restore trivially ok")
 
     def test_paste_set_text_failure_returns_false(self):
         """If _clipboard_set_text fails, paste returns False immediately."""
@@ -207,9 +211,10 @@ class InjectorPasteTests(unittest.TestCase):
              patch("infrastructure.clipboard_snapshot.read_snapshot",
                    return_value=snapmod.ClipboardSnapshot(kind="EMPTY")), \
              patch.object(self.inj, "_lock", MagicMock()):
-            ok, kind = self.inj.paste("hello")
+            ok, kind, restored = self.inj.paste("hello")
         self.assertFalse(ok)
         self.assertEqual(kind, "set_failed")
+        self.assertTrue(restored, "clipboard untouched, restore trivially ok")
 
     def test_paste_backup_restored_on_keybd_failure(self):
         """If keybd_event fails, backup is still restored."""
@@ -219,8 +224,9 @@ class InjectorPasteTests(unittest.TestCase):
              patch("ctypes.windll.user32.keybd_event",
                    side_effect=Exception("keybd failed")), \
              patch("time.sleep"):
-            ok, kind = self.inj.paste("hello")
+            ok, kind, restored = self.inj.paste("hello")
         self.assertFalse(ok)
+        self.assertTrue(restored, "backup must be restored on keybd failure")
         self.assertEqual(store["text"], "backup",
                          "backup must be restored on keybd failure")
 

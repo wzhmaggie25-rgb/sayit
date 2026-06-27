@@ -382,12 +382,12 @@ class Injector:
         except Exception:
             return ""
 
-    def paste(self, text: str, terminal: bool = False) -> tuple[bool, str]:
+    def paste(self, text: str, terminal: bool = False) -> tuple[bool, str, bool]:
         """Clipboard paste via ctypes keybd_event (bypasses UIPI for admin windows).
 
-        Returns ``(paste_sent, snapshot_kind)``:
+        Returns ``(shortcut_sent, snapshot_kind, restore_ok)``:
 
-        - ``paste_sent``: True when the Ctrl+V (or Ctrl+Shift+V) shortcut was
+        - ``shortcut_sent``: True when the Ctrl+V (or Ctrl+Shift+V) shortcut was
           dispatched. Does NOT mean the text reached the target — the caller
           must readback the target before declaring ``verified_success``.
         - ``snapshot_kind``: one of "EMPTY" / "TEXT" / "UNSUPPORTED_OR_MULTIFORMAT"
@@ -395,11 +395,17 @@ class Injector:
           detected (image / file list / HTML / RTF / multiple formats) the
           paste is REFUSED and snapshot_kind reflects that — the caller must
           pick a different injection path so we never destroy user content.
+        - ``restore_ok``: True when the original clipboard snapshot was
+          successfully restored after the paste. False means the final text
+          may still be on the clipboard.
 
         Restores the original clipboard after the paste based on the snapshot:
         EMPTY → EmptyClipboard, TEXT → write back the original string. The old
         "did clipboard still hold our text after Ctrl+V" heuristic is gone —
         it produced false negatives on every normal paste consumer.
+
+        Restore retries up to 3 times with 0.1s back-off. On final failure the
+        caller marks clipboard_preserved/restored as False.
         """
         from infrastructure.clipboard_snapshot import (
             ClipboardSnapshot, read_snapshot, restore_snapshot,
@@ -417,10 +423,10 @@ class Injector:
                 logger.warning(
                     "[INJECT-CLIPBOARD] refusing clipboard paste — snapshot=%s "
                     "(would destroy user content)", snap.kind)
-                return False, snap.kind
+                return False, snap.kind, True  # untouched, so restore is trivially ok
 
             if not _clipboard_set_text(text):
-                return False, "set_failed"
+                return False, "set_failed", True
 
             text_len = len(text)
             pre = 0.05 if text_len < 100 else (0.10 if text_len < 1000 else 0.20)
@@ -449,22 +455,31 @@ class Injector:
             except Exception:
                 logger.warning("[injector] keybd_event paste failed: %s", traceback.format_exc())
                 # Always try to restore — paste shortcut never dispatched.
-                restore_snapshot(snap)
-                return False, snap.kind
+                restore_ok = self._restore_with_retry(snap)
+                return False, snap.kind, restore_ok
             time.sleep(post)
 
             # ALWAYS restore based on snapshot — EMPTY → EmptyClipboard,
             # TEXT → write back original string. Never leave the final text
             # sitting on the clipboard for the user to discover later.
+            restore_ok = self._restore_with_retry(snap)
+            logger.info(
+                "[INJECT-CLIPBOARD] restore result=%s kind=%s terminal=%s",
+                restore_ok, snap.kind, terminal)
+            return True, snap.kind, restore_ok
+
+    def _restore_with_retry(self, snap) -> bool:
+        """Restore clipboard snapshot with up to 3 retries and 0.1s back-off."""
+        from infrastructure.clipboard_snapshot import restore_snapshot
+        for attempt in range(3):
             if restore_snapshot(snap):
-                logger.info(
-                    "[INJECT-CLIPBOARD] restored clipboard snapshot kind=%s terminal=%s",
-                    snap.kind, terminal)
-            else:
-                logger.warning(
-                    "[INJECT-CLIPBOARD] snapshot restore returned False kind=%s",
-                    snap.kind)
-            return True, snap.kind
+                return True
+            if attempt < 2:
+                time.sleep(0.1)
+        logger.warning(
+            "[INJECT-CLIPBOARD] restore failed after 3 attempts kind=%s",
+            snap.kind)
+        return False
 
     def _direct_input(self, text: str) -> bool:
         try:
@@ -701,15 +716,16 @@ class Injector:
                                     clipboard_preserved=(not cfg_copy),
                                     reason=reason or "all_injection_paths_failed")
 
-        def _ok(method: str, verified: bool = False, target_restored: bool = False) -> InjectionResult:
+        def _ok(method: str, verified: bool = False, target_restored: bool = False,
+                restore_ok: bool = True) -> InjectionResult:
             return InjectionResult(ok=True, state="verified_success",
                                     verified=verified, method=method,
-                                    clipboard_preserved=True,  # always restored
-                                    clipboard_restored=True,
+                                    clipboard_preserved=restore_ok,
+                                    clipboard_restored=restore_ok,
                                     target_verified=verified,
                                     target_restored=target_restored)
 
-        def _attempted_unverified(method: str, reason: str = "") -> InjectionResult:
+        def _attempted_unverified(method: str, reason: str = "", restore_ok: bool = True) -> InjectionResult:
             """Action dispatched but target readback was not possible.
 
             Per ROUND5_CODE_REVIEW.md P0-3: the Ctrl+V/SendInput shortcut
@@ -725,8 +741,8 @@ class Injector:
                 state="attempted_unverified",
                 verified=False,
                 method=method,
-                clipboard_preserved=True,
-                clipboard_restored=True,
+                clipboard_preserved=restore_ok,
+                clipboard_restored=restore_ok,
                 target_verified=False,
                 reason=reason or "shortcut_sent_no_readback",
             )
@@ -814,12 +830,12 @@ class Injector:
             readback_hwnd, pre_ok, len(pre_text) if pre_ok else -1)
 
         # Layer 2: Clipboard paste
-        # New contract: paste() returns (paste_sent, snapshot_kind). It
-        # refuses to run when the snapshot is non-text/multi-format/read-failed
+        # New contract: paste() returns (shortcut_sent, snapshot_kind, restore_ok).
+        # It refuses to run when the snapshot is non-text/multi-format/read-failed
         # so we never destroy user clipboard content. In that case fall
         # through to SendInput (which does not touch the clipboard).
         if strategy != "send_input":
-            paste_sent, snap_kind = self.paste(text, terminal=is_terminal)
+            paste_sent, snap_kind, restore_ok = self.paste(text, terminal=is_terminal)
             if paste_sent:
                 if is_terminal:
                     self._release_modifiers(force=True, reason="terminal_after_paste_ok")
@@ -827,10 +843,11 @@ class Injector:
                 verdict = self._verify_target_text(
                     readback_hwnd, text, pre_text if pre_ok else None)
                 logger.info(
-                    "[INJECT-POST] clipboard paste sent verdict=%s snapshot=%s",
-                    verdict, snap_kind)
+                    "[INJECT-POST] clipboard paste sent verdict=%s snapshot=%s "
+                    "restore_ok=%s",
+                    verdict, snap_kind, restore_ok)
                 if verdict == "verified":
-                    return _ok("clipboard", verified=True)
+                    return _ok("clipboard", verified=True, restore_ok=restore_ok)
                 if verdict == "unchanged":
                     # Paste shortcut sent but target text did not change —
                     # the consumer refused our paste (admin window / IME /
@@ -842,7 +859,7 @@ class Injector:
                     return _fail("paste_target_unchanged")
                 # no_readback — cannot prove anything either way.
                 return _attempted_unverified(
-                    "clipboard", reason="paste_no_readback")
+                    "clipboard", reason="paste_no_readback", restore_ok=restore_ok)
             logger.info(
                 "[INJECT-PATH] clipboard skipped/failed snapshot=%s — "
                 "falling through", snap_kind)
