@@ -79,6 +79,27 @@ GMEM_MOVEABLE = 0x0002
 CF_UNICODETEXT = 13
 
 
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("hwndActive", wintypes.HWND),
+        ("hwndFocus", wintypes.HWND),
+        ("hwndCapture", wintypes.HWND),
+        ("hwndMenuOwner", wintypes.HWND),
+        ("hwndMoveSize", wintypes.HWND),
+        ("hwndCaret", wintypes.HWND),
+        ("rcCaret", ctypes.wintypes.RECT),
+    ]
+
+
+GUI_CARETBLINKING = 0x00000001
+GUI_INMOVESIZE = 0x00000002
+GUI_INMENUMODE = 0x00000004
+GUI_SYSTEMMENUMODE = 0x00000008
+GUI_POPUPMENUMODE = 0x00000010
+
+
 class _KeyBdInput(ctypes.Structure):
     _fields_ = [
         ("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
@@ -300,71 +321,115 @@ class Injector:
     def _assess_target_editability(self, target: InjectionTarget | None) -> str:
         """Assess whether the foreground/focused element is an editable text target.
 
+        Uses GetGUIThreadInfo to find the real focused control on the
+        foreground thread (works across processes without AttachThreadInput).
+
         Returns one of:
-          "editable" — focused UIA element with ValuePattern/TextPattern,
-                       or foreground hwnd has Win32 Edit/RichEdit child, or
-                       known app strategy exists.
+          "editable" — focused UIA element with ValuePattern and
+                       CurrentIsReadOnly=False, or Win32 Edit/RichEdit focus.
           "no_editable" — no focused element, foreground hwnd missing,
-                          or UIA reports no editable capabilities.
+                          UIA element is read-only, TextPattern-only (not enough),
+                          or unknown/0 hwnd.
           "unknown" — cannot determine (should fall through to injection attempt).
         """
         try:
-            hwnd = ctypes.windll.user32.GetForegroundWindow()
-            if not hwnd:
+            fg_hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not fg_hwnd:
                 logger.info("[INJECT-EDITABILITY] no foreground window → no_editable")
                 return "no_editable"
 
-            # Quick Win32 check: does foreground hwnd or its focused child have Edit class?
-            focus_hwnd = ctypes.windll.user32.GetFocus()
+            # ── GetGUIThreadInfo: real focused control ──
+            tid = ctypes.windll.user32.GetWindowThreadProcessId(fg_hwnd, None)
+            gui = GUITHREADINFO()
+            gui.cbSize = ctypes.sizeof(GUITHREADINFO)
+            if not ctypes.windll.user32.GetGUIThreadInfo(tid, ctypes.byref(gui)):
+                logger.info("[INJECT-EDITABILITY] GetGUIThreadInfo failed → unknown")
+                return "unknown"
+            focus_hwnd = int(gui.hwndFocus) if gui.hwndFocus else 0
+
             if focus_hwnd:
                 class_buf = ctypes.create_unicode_buffer(256)
                 ctypes.windll.user32.GetClassNameW(focus_hwnd, class_buf, 256)
                 cls = (class_buf.value or "").lower()
                 if "edit" in cls or "richedit" in cls:
-                    logger.info("[INJECT-EDITABILITY] focused Win32 edit control → editable")
+                    logger.info(
+                        "[INJECT-EDITABILITY] GetGUIThreadInfo focus is "
+                        "Edit/RichEdit (hwnd=%d) → editable", focus_hwnd)
                     return "editable"
 
-            # Try UIA focused element
+            # ── UIA focused element — require ValuePattern AND !read-only ──
             try:
                 import comtypes
                 comtypes.CoInitialize()
                 try:
-                    from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation
-                    uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
+                    from comtypes.gen.UIAutomationClient import (
+                        CUIAutomation, IUIAutomation)
+                    uia = comtypes.client.CreateObject(
+                        CUIAutomation, interface=IUIAutomation)
                     elem = uia.GetFocusedElement()
                     if elem is None:
-                        logger.info("[INJECT-EDITABILITY] no UIA focused element → no_editable")
+                        logger.info(
+                            "[INJECT-EDITABILITY] no UIA focused element → "
+                            "no_editable")
                         return "no_editable"
-                    # Check for ValuePattern or TextPattern
+
+                    # ValuePattern + IsReadOnly check
                     try:
                         vp = elem.GetCurrentPattern(10002)
                         if vp is not None:
-                            logger.info("[INJECT-EDITABILITY] UIA ValuePattern available → editable")
-                            return "editable"
+                            q = vp.QueryInterface
+                            try:
+                                read_only = bool(
+                                    q(comtypes.gen.UIAutomationClient.IUIAutomationValuePattern).
+                                    CurrentIsReadOnly)
+                                if read_only:
+                                    logger.info(
+                                        "[INJECT-EDITABILITY] ValuePattern "
+                                        "is read-only → no_editable")
+                                    return "no_editable"
+                                logger.info(
+                                    "[INJECT-EDITABILITY] ValuePattern "
+                                    "editable → editable")
+                                return "editable"
+                            except Exception:
+                                # Can't determine read-only — assume editable
+                                logger.info(
+                                    "[INJECT-EDITABILITY] ValuePattern "
+                                    "read-only check failed → editable")
+                                return "editable"
                     except Exception:
                         pass
+
+                    # TextPattern alone is NOT sufficient for editability
                     try:
                         tp = elem.GetCurrentPattern(10014)
                         if tp is not None:
-                            logger.info("[INJECT-EDITABILITY] UIA TextPattern available → editable")
-                            return "editable"
+                            logger.info(
+                                "[INJECT-EDITABILITY] TextPattern only "
+                                "(no ValuePattern) → no_editable")
+                            return "no_editable"
                     except Exception:
                         pass
-                    # No editable pattern found
-                    logger.info("[INJECT-EDITABILITY] UIA element has no editable pattern → no_editable")
+
+                    logger.info(
+                        "[INJECT-EDITABILITY] UIA element has no editable "
+                        "pattern → no_editable")
                     return "no_editable"
                 finally:
                     comtypes.CoUninitialize()
+            except ImportError:
+                logger.debug("[INJECT-EDITABILITY] comtypes not available")
             except Exception as e:
                 logger.debug("[INJECT-EDITABILITY] UIA check failed: %s", e)
 
-            # Fallback: check for child edit under foreground
-            if hwnd and self._find_child_edit(hwnd):
-                logger.info("[INJECT-EDITABILITY] child edit found → editable")
-                return "editable"
+            # ── No sensitive fallback: 0 hwnd / unknown → no_editable ──
+            if not fg_hwnd:
+                logger.info("[INJECT-EDITABILITY] no foreground hwnd → no_editable")
+                return "no_editable"
 
-            logger.info("[INJECT-EDITABILITY] cannot determine editability → unknown")
-            return "unknown"
+            logger.info("[INJECT-EDITABILITY] cannot determine editability → "
+                        "no_editable (conservative)")
+            return "no_editable"
         except Exception as e:
             logger.debug("[INJECT-EDITABILITY] assessment error: %s", e)
             return "unknown"
@@ -768,6 +833,13 @@ class Injector:
 
         # ── Stage A: use current foreground (never restore captured target) ──
         hwnd, cls, pid, proc = self._foreground_info()
+        if not hwnd:
+            logger.info(
+                "[INJECT-POST] no foreground hwnd — "
+                "returning no_editable_target state (conservative)")
+            return InjectionResult(ok=False, state="no_editable_target",
+                                    clipboard_preserved=True,
+                                    reason="no_editable_target")
         self.last_target_hwnd = hwnd or 0
         self.last_target_pid = pid
         self.last_target_proc = proc

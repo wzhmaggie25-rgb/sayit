@@ -162,6 +162,8 @@ class PasteUnchangedMapsToInjectionFailed(unittest.TestCase):
         return [
             patch.object(self.inj, "_lock", MagicMock()),
             patch.object(self.inj, "_focus_window", return_value=True),
+            patch.object(self.inj, "_assess_target_editability",
+                         return_value="editable"),
             patch.object(self.inj, "_foreground_info",
                          return_value=(4242, "Edit", 1, "notepad.exe")),
             patch.object(self.inj, "_get_context_for_strategy", return_value={}),
@@ -185,6 +187,36 @@ class PasteUnchangedMapsToInjectionFailed(unittest.TestCase):
                          side_effect=[(True, "abc"), (True, "abc")]),
             patch.object(self.inj, "_direct_input", direct_mock),
         ]
+        # 12 common + 2 extra = 14 patches (indices 0-13)
+        self.assertEqual(len(patches), 14)
+        with patches[0]:
+            with patches[1]:
+                with patches[2]:
+                    with patches[3]:
+                        with patches[4]:
+                            with patches[5]:
+                                with patches[6]:
+                                    with patches[7]:
+                                        with patches[8]:
+                                            with patches[9]:
+                                                with patches[10]:
+                                                    with patches[11]:
+                                                        with patches[12]:
+                                                            with patches[13]:
+                                                                result = self.inj.inject(
+                                                                    "xyz", target=self.target)
+        self.assertEqual(result.state, "injection_failed")
+        self.assertEqual(result.reason, "paste_target_unchanged")
+        # Must NOT fall through to SendInput
+        direct_mock.assert_not_called()
+
+    def test_paste_no_readback_still_attempted_unverified(self):
+        """No/ambiguous readback after paste → attempted_unverified (not changed)."""
+        patches = self._common_patches() + [
+            patch.object(self.inj, "_snapshot_target_text",
+                         side_effect=[(True, ""), (False, "")]),
+        ]
+        self.assertEqual(len(patches), 13)
         with patches[0]:
             with patches[1]:
                 with patches[2]:
@@ -200,31 +232,6 @@ class PasteUnchangedMapsToInjectionFailed(unittest.TestCase):
                                                         with patches[12]:
                                                             result = self.inj.inject(
                                                                 "xyz", target=self.target)
-        self.assertEqual(result.state, "injection_failed")
-        self.assertEqual(result.reason, "paste_target_unchanged")
-        # Must NOT fall through to SendInput
-        direct_mock.assert_not_called()
-
-    def test_paste_no_readback_still_attempted_unverified(self):
-        """No/ambiguous readback after paste → attempted_unverified (not changed)."""
-        patches = self._common_patches() + [
-            patch.object(self.inj, "_snapshot_target_text",
-                         side_effect=[(True, ""), (False, "")]),
-        ]
-        with patches[0]:
-            with patches[1]:
-                with patches[2]:
-                    with patches[3]:
-                        with patches[4]:
-                            with patches[5]:
-                                with patches[6]:
-                                    with patches[7]:
-                                        with patches[8]:
-                                            with patches[9]:
-                                                with patches[10]:
-                                                    with patches[11]:
-                                                        result = self.inj.inject(
-                                                            "xyz", target=self.target)
         self.assertEqual(result.state, "attempted_unverified")
         self.assertEqual(result.reason, "paste_no_readback")
 

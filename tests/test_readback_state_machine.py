@@ -37,6 +37,8 @@ class ReadbackPathTests(unittest.TestCase):
         return [
             patch.object(self.inj, "_lock", MagicMock()),
             patch.object(self.inj, "_focus_window", return_value=True),
+            patch.object(self.inj, "_assess_target_editability",
+                         return_value="editable"),
             patch.object(self.inj, "_foreground_info",
                          return_value=(4242, "Edit", 1, "notepad.exe")),
             patch.object(self.inj, "_get_context_for_strategy", return_value={}),
@@ -60,6 +62,8 @@ class ReadbackPathTests(unittest.TestCase):
                          side_effect=[(True, "foo"), (True, "foobar")]),
             patch.object(self.inj, "_direct_input", return_value=False),  # should not be called
         ]
+        # 12 common + 2 extra = 14 patches (indices 0-13)
+        self.assertEqual(len(patches), 14)
         with patches[0]:
             with patches[1]:
                 with patches[2]:
@@ -73,8 +77,9 @@ class ReadbackPathTests(unittest.TestCase):
                                                 with patches[10]:
                                                     with patches[11]:
                                                         with patches[12]:
-                                                            result = self.inj.inject(
-                                                                "bar", target=self.target)
+                                                            with patches[13]:
+                                                                result = self.inj.inject(
+                                                                    "bar", target=self.target)
         self.assertTrue(result.ok)
         self.assertEqual(result.state, "verified_success")
         self.assertEqual(result.method, "clipboard")
@@ -98,6 +103,8 @@ class ReadbackPathTests(unittest.TestCase):
                          side_effect=[(True, "abc"), (True, "abc")]),
             patch.object(self.inj, "_direct_input", direct_mock),
         ]
+        # 12 common + 2 extra = 14 patches (indices 0-13)
+        self.assertEqual(len(patches), 14)
         ctx_managers = []
         try:
             for p in patches:
@@ -119,6 +126,8 @@ class ReadbackPathTests(unittest.TestCase):
             patch.object(self.inj, "_snapshot_target_text",
                          side_effect=[(True, ""), (False, "")]),
         ]
+        # 12 common + 1 extra = 13 patches (indices 0-12)
+        self.assertEqual(len(patches), 13)
         ctx_managers = []
         try:
             for p in patches:
@@ -141,6 +150,8 @@ class ReadbackPathTests(unittest.TestCase):
                          side_effect=[(True, ""), (False, "")]),
             patch.object(self.inj, "_direct_input", direct_mock),
         ]
+        # 12 common + 2 extra = 14 patches (indices 0-13)
+        self.assertEqual(len(patches), 14)
         ctx_managers = []
         try:
             for p in patches:
@@ -165,6 +176,8 @@ class SendInputReadbackTests(unittest.TestCase):
         target = InjectionTarget(hwnd=4242, pid=1, proc="x.exe", cls="Edit", title="t")
         with patch.object(self.inj, "_lock", MagicMock()), \
              patch.object(self.inj, "_focus_window", return_value=True), \
+             patch.object(self.inj, "_assess_target_editability",
+                          return_value="editable"), \
              patch.object(self.inj, "_foreground_info",
                           return_value=(4242, "Edit", 1, "x.exe")), \
              patch.object(self.inj, "_get_context_for_strategy", return_value={}), \
@@ -184,6 +197,8 @@ class SendInputReadbackTests(unittest.TestCase):
         target = InjectionTarget(hwnd=4242, pid=1, proc="x.exe", cls="Edit", title="t")
         with patch.object(self.inj, "_lock", MagicMock()), \
              patch.object(self.inj, "_focus_window", return_value=True), \
+             patch.object(self.inj, "_assess_target_editability",
+                          return_value="editable"), \
              patch.object(self.inj, "_foreground_info",
                           return_value=(4242, "Edit", 1, "x.exe")), \
              patch.object(self.inj, "_get_context_for_strategy", return_value={}), \
