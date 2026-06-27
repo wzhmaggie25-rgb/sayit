@@ -266,6 +266,17 @@ class SilentMonitor:
                 db.merge_rules(merged)
 
             added_terms = self._auto_add_dictionary_terms(original_text, edited_text)
+
+            # ── Phase 5: hotword promotion ─────────────────────────
+            # After merging, see whether any rule now has evidence from
+            # ≥ 2 distinct history sessions and is the unique winner among
+            # competing replacements for its pattern. If so, promote the
+            # replacement (NOT the pattern) into the personal dictionary
+            # and mark the rule so the next scan does not re-promote.
+            promoted_word = self._maybe_promote_hotword(db)
+            if promoted_word:
+                added_terms = list(added_terms) + [promoted_word]
+
             status = "EXTRACTED" if count or added_terms else "NO_RULE"
             self._mark_history(edited_text, status)
             logger.info(
@@ -280,6 +291,49 @@ class SilentMonitor:
         except Exception as e:
             self._mark_history(edited_text, "LEARN_FAILED")
             logger.warning("SilentMonitor: learn failed: %s", e)
+
+    def _maybe_promote_hotword(self, db) -> Optional[str]:
+        """Run the hotword promotion decision against current rules.
+
+        Returns the promoted word (replacement string) if one was added,
+        else None. At most one promotion per call. Marks the source rule
+        as promoted so re-scans are idempotent.
+        """
+        try:
+            from domain.hotword_promotion import decide_promotion
+            rules = db.get_rules(active_only=False)
+            decision = decide_promotion(rules)
+            if not decision.promoted_word:
+                return None
+            word = decision.promoted_word
+            pat, repl = decision.promoted_rule_keys
+            # Add to dictionary. Prefer HotwordsManager so ASR sync happens.
+            added = False
+            if self._hotwords_mgr is not None:
+                try:
+                    added = bool(self._hotwords_mgr.add_word(word))
+                except Exception as e:
+                    logger.warning("SilentMonitor: hotwords_mgr.add_word failed: %s", e)
+            if not added:
+                try:
+                    added = bool(db.add_dictionary_word(word))
+                except Exception as e:
+                    logger.warning("SilentMonitor: db.add_dictionary_word failed: %s", e)
+            # Mark the rule as promoted regardless — even if the dictionary
+            # already contained the word, we never want to re-evaluate.
+            try:
+                db.mark_rule_promoted(pat, repl)
+            except Exception as e:
+                logger.warning("SilentMonitor: mark_rule_promoted failed: %s", e)
+            if added:
+                logger.info(
+                    "[HOTWORD-PROMOTION] promoted replacement=%r (from pattern=%r) "
+                    "to personal dictionary", word, pat)
+                return word
+            return None
+        except Exception as e:
+            logger.warning("SilentMonitor: hotword promotion error: %s", e)
+            return None
 
     def _get_current_context(self, inserted_text: str = "") -> Optional[FocusContext]:
         if self._target_hwnd:

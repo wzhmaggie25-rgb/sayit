@@ -1,5 +1,6 @@
 """SQLite database — history, hotwords, correction rules, dictionary."""
 from __future__ import annotations
+import json
 import logging
 import os
 import sqlite3
@@ -12,7 +13,7 @@ from infrastructure.paths import database_path
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 CREATE_TABLES = [
     """CREATE TABLE IF NOT EXISTS schema_version (
@@ -149,6 +150,20 @@ class Database:
                         pass
                 if current < 5:
                     self._migrate_history_id_to_text(conn)
+                if current < 6:
+                    # Phase 5: hotword promotion needs to track the set of
+                    # distinct history_ids a rule has appeared in (one
+                    # source_history_id per row is not enough) and a flag
+                    # for already-promoted rules so re-scan is idempotent.
+                    for col, decl in [
+                        ("source_history_ids", "TEXT DEFAULT '[]'"),
+                        ("promoted", "INTEGER NOT NULL DEFAULT 0"),
+                    ]:
+                        try:
+                            conn.execute(
+                                f"ALTER TABLE correction_rules ADD COLUMN {col} {decl}")
+                        except Exception:
+                            pass  # column already exists
                 for stmt in CREATE_INDEXES:
                     conn.execute(stmt)
                 if current < SCHEMA_VERSION:
@@ -424,12 +439,35 @@ class Database:
                         "SELECT * FROM correction_rules WHERE is_active = 1")
                 else:
                     cur = conn.execute("SELECT * FROM correction_rules")
-                return [dict(row) for row in cur.fetchall()]
+                rules: list[dict] = []
+                for row in cur.fetchall():
+                    d = dict(row)
+                    # source_history_ids is stored as JSON text — decode for
+                    # the caller. Backwards-compatible: missing/empty column
+                    # falls back to source_history_id (singleton list).
+                    raw = d.get("source_history_ids") or "[]"
+                    try:
+                        ids = json.loads(raw) if isinstance(raw, str) else list(raw)
+                    except Exception:
+                        ids = []
+                    if not ids and d.get("source_history_id"):
+                        ids = [d["source_history_id"]]
+                    d["source_history_ids"] = [str(x) for x in ids if x]
+                    d["promoted"] = bool(d.get("promoted", 0))
+                    rules.append(d)
+                return rules
             finally:
                 conn.close()
 
     def merge_rules(self, new_rules: list[dict]) -> int:
-        """Merge new rules, incrementing confidence for existing matches."""
+        """Merge new rules, incrementing confidence for existing matches.
+
+        For Phase 5 hotword promotion we additionally accumulate the SET of
+        distinct ``source_history_id`` values that contributed evidence for
+        each ``(pattern, replacement)``. Re-scanning the same history does
+        not grow the set — that is the entire point of distinct-evidence
+        gating.
+        """
         count = 0
         with self._db_lock:
             conn = self._get_conn()
@@ -439,21 +477,38 @@ class Database:
                         "SELECT * FROM correction_rules WHERE pattern = ? AND replacement = ?",
                         (rule['pattern'], rule['replacement']))
                     existing = cur.fetchone()
+                    new_hid = rule.get('source_history_id')
                     if existing:
+                        # Pull existing set, add new history id if present.
+                        existing_d = dict(existing)
+                        raw = existing_d.get("source_history_ids") or "[]"
+                        try:
+                            ids = json.loads(raw) if isinstance(raw, str) else list(raw)
+                        except Exception:
+                            ids = []
+                        # Backfill from legacy single-id column on the very
+                        # first merge after the schema upgrade.
+                        if not ids and existing_d.get("source_history_id"):
+                            ids = [existing_d["source_history_id"]]
+                        if new_hid and str(new_hid) not in {str(x) for x in ids}:
+                            ids.append(str(new_hid))
                         new_conf = min(0.95, existing['confidence'] + 0.15)
                         new_count = existing['match_count'] + 1
                         conn.execute(
                             """UPDATE correction_rules
-                               SET confidence=?, match_count=?, updated_at=?
+                               SET confidence=?, match_count=?, updated_at=?,
+                                   source_history_ids=?
                                WHERE id=?""",
-                            (new_conf, new_count, datetime.now().isoformat(), existing['id']))
+                            (new_conf, new_count, datetime.now().isoformat(),
+                             json.dumps(ids), existing['id']))
                     else:
+                        ids = [str(new_hid)] if new_hid else []
                         conn.execute(
                             """INSERT INTO correction_rules
                                (id, pattern, replacement, source_type, source_history_id,
                                 confidence, match_count, apply_count, is_active, is_regex,
-                                created_at, updated_at)
-                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                created_at, updated_at, source_history_ids, promoted)
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (rule['id'], rule['pattern'], rule['replacement'],
                              rule.get('source_type', 'user_edit'),
                              rule.get('source_history_id'),
@@ -461,12 +516,28 @@ class Database:
                              int(rule.get('is_active', True)),
                              int(rule.get('is_regex', False)),
                              rule.get('created_at', datetime.now().isoformat()),
-                             rule.get('updated_at', datetime.now().isoformat())))
+                             rule.get('updated_at', datetime.now().isoformat()),
+                             json.dumps(ids), 0))
                     count += 1
                 conn.commit()
             finally:
                 conn.close()
         return count
+
+    def mark_rule_promoted(self, pattern: str, replacement: str) -> bool:
+        """Flag a rule as already-promoted to the personal dictionary so
+        re-scans skip it. Idempotent."""
+        with self._db_lock:
+            conn = self._get_conn()
+            try:
+                cur = conn.execute(
+                    """UPDATE correction_rules SET promoted = 1, updated_at = ?
+                       WHERE pattern = ? AND replacement = ?""",
+                    (datetime.now().isoformat(), pattern, replacement))
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
 
     def update_rule_stats(self, rule_id: str, applied: bool = True):
         with self._db_lock:
