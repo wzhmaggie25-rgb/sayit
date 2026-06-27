@@ -358,13 +358,6 @@ class Injector:
             except Exception as e:
                 logger.debug("[INJECT-EDITABILITY] UIA check failed: %s", e)
 
-            # Fallback: if we have a strategy table match, assume editable
-            if target and target.proc:
-                proc_lower = target.proc.lower()
-                if proc_lower in APP_STRATEGIES:
-                    logger.info("[INJECT-EDITABILITY] known app strategy → editable")
-                    return "editable"
-
             # Fallback: check for child edit under foreground
             if hwnd and self._find_child_edit(hwnd):
                 logger.info("[INJECT-EDITABILITY] child edit found → editable")
@@ -728,54 +721,20 @@ class Injector:
             text[:20], len(text), self._MODIFIER_RELEASE_ORDER,
             self._get_modifier_states())
 
-        # ── Stage 0: Assess target editability ──
-        # If no target hwnd was captured AND the current foreground has no
-        # editable element, return no_editable_target immediately (never
-        # touches clipboard).
-        if target is None or not target.hwnd:
-            editability = self._assess_target_editability(target)
-            if editability == "no_editable":
-                logger.info(
-                    "[INJECT-POST] no editable target (no hwnd) — "
-                    "returning no_editable_target state")
-                return InjectionResult(ok=False, state="no_editable_target",
-                                        clipboard_preserved=True,
-                                        reason="no_editable_target")
-
-        # ── Stage A: try to restore the original target window ──
-        target_restored = False
-        if target is not None and target.hwnd:
+        # ── Stage 0: Assess current foreground editability ──
+        # Do NOT restore captured target — inject into current foreground.
+        # If no editable element is focused, return no_editable_target
+        # immediately (never touches clipboard).
+        editability = self._assess_target_editability(target)
+        if editability == "no_editable":
             logger.info(
-                "[INJECT-TARGET] restoring hwnd=%s pid=%s proc=%s class=%s title=%r",
-                target.hwnd, target.pid, target.proc, target.cls, target.title[:80])
-            for attempt in range(3):
-                if self._focus_window(target.hwnd):
-                    target_restored = True
-                    break
-                time.sleep(0.05 * (attempt + 1))
-            if not target_restored:
-                logger.warning(
-                    "[INJECT-TARGET] restore failed after 3 attempts hwnd=%s proc=%s title=%r",
-                    target.hwnd, target.proc, target.title[:80])
-                # Prefer control-level injection — does not need foreground.
-                if self._inject_win32_child_edit(text, target.hwnd):
-                    self.last_target_hwnd = target.hwnd
-                    self.last_target_pid = target.pid
-                    self.last_target_proc = target.proc
-                    self.last_target_class = target.cls
-                    self.last_target_title = target.title
-                    logger.info("[INJECT-POST] ok via=Win32ChildEdit (no foreground)")
-                    return _ok("win32_child", verified=True)
-                # No foreground access and no child edit → check editability
-                editability = self._assess_target_editability(target)
-                if editability == "no_editable":
-                    logger.info(
-                        "[INJECT-POST] target exists but not editable → no_editable_target")
-                    return InjectionResult(ok=False, state="no_editable_target",
-                                            clipboard_preserved=True,
-                                            reason="target_not_editable")
-                return _fail("target_restore_failed")
+                "[INJECT-POST] no editable target — "
+                "returning no_editable_target state")
+            return InjectionResult(ok=False, state="no_editable_target",
+                                    clipboard_preserved=True,
+                                    reason="no_editable_target")
 
+        # ── Stage A: use current foreground (never restore captured target) ──
         hwnd, cls, pid, proc = self._foreground_info()
         self.last_target_hwnd = hwnd or 0
         self.last_target_pid = pid
@@ -794,26 +753,6 @@ class Injector:
             self.last_target_title = title_buf.value or ""
         except Exception:
             self.last_target_title = ""
-
-        # If the foreground HWND drifted away from the captured target, try
-        # the direct Win32 control route before giving up — it works without
-        # needing the window to be foreground.
-        if target is not None and target.hwnd and hwnd != target.hwnd:
-            logger.warning(
-                "[INJECT-TARGET] foreground mismatch after restore: expected=%s actual=%s",
-                target.hwnd, hwnd)
-            if self._inject_win32_child_edit(text, target.hwnd):
-                self.last_target_hwnd = target.hwnd
-                self.last_target_pid = target.pid
-                self.last_target_proc = target.proc
-                self.last_target_class = target.cls
-                self.last_target_title = target.title
-                logger.info("[INJECT-POST] ok via=Win32ChildEdit (foreground mismatch recovery)")
-                return _ok("win32_child", verified=True)
-            return _fail("foreground_mismatch")
-
-        if hwnd and hwnd != ctypes.windll.user32.GetForegroundWindow():
-            self._focus_window(hwnd)
 
         context = self._get_context_for_strategy()
         strategy = self._strategy_for_context(proc, cls, context)
@@ -839,11 +778,11 @@ class Injector:
                 logger.info("[INJECT-POST] ok via=UIA")
                 # UIA path already does its own readback in _verify_uia_readback;
                 # if _inject_uia returned True we trust it as verified.
-                return _ok("uia", verified=True, target_restored=target_restored)
+                return _ok("uia", verified=True)
 
         # Pre-paste target snapshot — used to differentiate
         # verified / unchanged / no_readback after a paste shortcut.
-        readback_hwnd = (target.hwnd if target and target.hwnd else hwnd) or 0
+        readback_hwnd = hwnd or 0
         pre_ok, pre_text = self._snapshot_target_text(readback_hwnd)
         logger.info(
             "[INJECT-READBACK] pre-snapshot hwnd=%s ok=%s len=%d",
@@ -866,8 +805,7 @@ class Injector:
                     "[INJECT-POST] clipboard paste sent verdict=%s snapshot=%s",
                     verdict, snap_kind)
                 if verdict == "verified":
-                    return _ok("clipboard", verified=True,
-                               target_restored=target_restored)
+                    return _ok("clipboard", verified=True)
                 if verdict == "unchanged":
                     # Paste shortcut sent but target text did not change —
                     # the consumer refused our paste (admin window / IME /
@@ -896,8 +834,7 @@ class Injector:
                 readback_hwnd, text, pre_text if pre_ok else None)
             logger.info("[INJECT-POST] sendinput verdict=%s", verdict)
             if verdict == "verified":
-                return _ok("sendinput", verified=True,
-                           target_restored=target_restored)
+                return _ok("sendinput", verified=True)
             if verdict == "unchanged":
                 # SendInput dispatched but target didn't budge — clear
                 # failure (control disabled, window inactive, etc.).

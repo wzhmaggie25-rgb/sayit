@@ -242,24 +242,12 @@ class Win32EditIntegrationTests(unittest.TestCase):
         self.assertEqual(actual, sentinel,
                          f"Edit control did not receive sentinel: got {actual!r}")
 
-    def test_inject_via_target_hwnd_when_foreground_drifted(self):
-        """Even when the foreground is not our window, passing the target
-        hwnd into inject() must still route to the Win32 child path so the
-        sentinel actually lands in the original Edit control."""
-        sentinel = f"sayit-mismatch-{uuid.uuid4().hex[:12]}"
+    def test_inject_win32_child_edit_still_works(self):
+        """_inject_win32_child_edit works regardless of foreground state."""
+        sentinel = f"sayit-child-{uuid.uuid4().hex[:12]}"
         inj = Injector(injection_mode="auto")
-        target = InjectionTarget(
-            hwnd=self.host.hwnd, pid=0, proc="python.exe",
-            cls="SayitTestEdit", title="SayIt Edit Host")
-        # Make the foreground mismatch deterministic — pretend restore
-        # always fails so the inject() top branch routes through
-        # _inject_win32_child_edit. This is exactly the case the user
-        # complained about: "the result only ended up in history, not in
-        # the original input box".
-        with patch.object(inj, "_focus_window", return_value=False):
-            ok = inj.inject(sentinel, target=target)
-        self.assertTrue(ok,
-                        "inject() failed to route to Win32 child path on restore failure")
+        ok = inj._inject_win32_child_edit(sentinel, self.host.hwnd)
+        self.assertTrue(ok, "_inject_win32_child_edit reported failure")
         actual = self.host.read_edit_text()
         self.assertEqual(actual, sentinel,
                          f"Edit control did not receive sentinel: got {actual!r}")

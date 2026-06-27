@@ -45,44 +45,60 @@ class InjectorFallbackTests(unittest.TestCase):
         return patch("infrastructure.injector.ConfigStore.get",
                      return_value=False)
 
-    # ── 1: target restore failure ───────────────────────────────
+    # ── 1: injection failure preserves clipboard ─────────────────
 
-    def test_target_restore_failure_preserves_clipboard(self):
-        """When the original window cannot be focused AND no child Edit
-        control exists, inject() returns False but clipboard is preserved
-        (NOT auto-copied)."""
+    def test_injection_failure_preserves_clipboard(self):
+        """When all injection layers fail, inject() returns False but
+        clipboard is preserved (NOT auto-copied)."""
         inj = self._make_injector()
         target = InjectionTarget(hwnd=123, pid=1, proc="fake.exe",
                                  cls="FakeClass", title="Fake")
         cp_patch, cp_captured = _patch_clipboard()
-        with patch.object(inj, "_focus_window", return_value=False), \
-             patch.object(inj, "_inject_win32_child_edit", return_value=False), \
+        # Simulate: foreground is editable, but all layers fail
+        with patch.object(inj, "_focus_window"), \
+             patch.object(inj, "_foreground_info",
+                          return_value=(42, "Edit", 99, "notepad.exe")), \
+             patch.object(inj, "_assess_target_editability",
+                          return_value="editable"), \
+             patch.object(inj, "_get_context_for_strategy", return_value={}), \
+             patch.object(inj, "_strategy_for_context",
+                          return_value="clipboard"), \
+             patch.object(inj, "_is_terminal_target", return_value=False), \
+             patch.object(inj, "_inject_uia", return_value=False), \
+             patch.object(inj, "_snapshot_target_text",
+                          return_value=(True, "")), \
+             patch.object(inj, "paste", return_value=(False, "EMPTY")), \
+             patch.object(inj, "_direct_input", return_value=False), \
              self._mock_config_copy_false(), \
              cp_patch:
             ok = inj.inject(self.SENTINEL, target=target)
-        self.assertFalse(ok, "inject reported success on restore failure")
+        self.assertFalse(ok, "inject reported success despite all layers failing")
         # Text should NOT be on clipboard by default
         self.assertNotIn(self.SENTINEL, cp_captured,
                          "final_text must NOT be auto-copied on failure")
 
-    # ── 2: foreground mismatch ─────────────────────────────────
+    # ── 2: no editable target preserves clipboard ────────────────
 
-    def test_foreground_mismatch_preserves_clipboard(self):
+    def test_no_editable_preserves_clipboard(self):
+        """When foreground is not editable, inject() returns
+        no_editable_target and clipboard is preserved."""
         inj = self._make_injector()
         target = InjectionTarget(hwnd=123, pid=1, proc="fake.exe",
                                  cls="FakeClass", title="Fake")
         cp_patch, cp_captured = _patch_clipboard()
-        # _focus_window succeeds, but foreground info returns a different HWND
-        with patch.object(inj, "_focus_window", return_value=True), \
+        with patch.object(inj, "_focus_window"), \
              patch.object(inj, "_foreground_info",
-                          return_value=(999, "OtherClass", 2, "other.exe")), \
-             patch.object(inj, "_inject_win32_child_edit", return_value=False), \
+                          return_value=(0, "", 0, "")), \
+             patch.object(inj, "_assess_target_editability",
+                          return_value="no_editable"), \
              self._mock_config_copy_false(), \
              cp_patch:
             ok = inj.inject(self.SENTINEL, target=target)
         self.assertFalse(ok)
+        self.assertEqual(ok.state if hasattr(ok, 'state') else None,
+                         "no_editable_target")
         self.assertNotIn(self.SENTINEL, cp_captured,
-                         "clipboard must NOT be auto-copied on mismatch")
+                         "clipboard must NOT be auto-copied on no_editable")
 
     # ── 3: UIA failure → clipboard paste failure → SendInput failure ──
 
@@ -90,11 +106,18 @@ class InjectorFallbackTests(unittest.TestCase):
         inj = self._make_injector()
         cp_patch, cp_captured = _patch_clipboard()
         # No target — go straight into the normal waterfall.
-        with patch.object(inj, "_focus_window", return_value=True), \
+        with patch.object(inj, "_focus_window"), \
              patch.object(inj, "_foreground_info",
                           return_value=(42, "Edit", 99, "notepad.exe")), \
+             patch.object(inj, "_assess_target_editability",
+                          return_value="editable"), \
              patch.object(inj, "_get_context_for_strategy", return_value={}), \
+             patch.object(inj, "_strategy_for_context",
+                          return_value="clipboard"), \
+             patch.object(inj, "_is_terminal_target", return_value=False), \
              patch.object(inj, "_inject_uia", return_value=False), \
+             patch.object(inj, "_snapshot_target_text",
+                          return_value=(True, "")), \
              patch.object(inj, "paste", return_value=(False, "EMPTY")), \
              patch.object(inj, "_direct_input", return_value=False), \
              self._mock_config_copy_false(), \
@@ -111,10 +134,17 @@ class InjectorFallbackTests(unittest.TestCase):
         That early-return path must still preserve clipboard (no auto-copy)."""
         inj = self._make_injector()
         cp_patch, cp_captured = _patch_clipboard()
-        with patch.object(inj, "_focus_window", return_value=True), \
+        with patch.object(inj, "_focus_window"), \
              patch.object(inj, "_foreground_info",
                           return_value=(42, "ConsoleWindowClass", 99, "cmd.exe")), \
+             patch.object(inj, "_assess_target_editability",
+                          return_value="editable"), \
              patch.object(inj, "_get_context_for_strategy", return_value={}), \
+             patch.object(inj, "_strategy_for_context",
+                          return_value="clipboard_terminal"), \
+             patch.object(inj, "_is_terminal_target", return_value=True), \
+             patch.object(inj, "_snapshot_target_text",
+                          return_value=(True, "")), \
              patch.object(inj, "paste", return_value=(False, "EMPTY")), \
              self._mock_config_copy_false(), \
              cp_patch:
@@ -130,10 +160,14 @@ class InjectorFallbackTests(unittest.TestCase):
         we must not also pollute the clipboard."""
         inj = self._make_injector()
         cp_patch, cp_captured = _patch_clipboard()
-        with patch.object(inj, "_focus_window", return_value=True), \
+        with patch.object(inj, "_focus_window"), \
              patch.object(inj, "_foreground_info",
                           return_value=(42, "Edit", 99, "notepad.exe")), \
+             patch.object(inj, "_assess_target_editability",
+                          return_value="editable"), \
              patch.object(inj, "_get_context_for_strategy", return_value={}), \
+             patch.object(inj, "_strategy_for_context",
+                          return_value="uia"), \
              patch.object(inj, "_inject_uia", return_value=True), \
              cp_patch:
             ok = inj.inject(self.SENTINEL)
