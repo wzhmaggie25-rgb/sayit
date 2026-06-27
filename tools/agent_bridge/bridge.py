@@ -23,7 +23,7 @@ from pathlib import Path
 # Constants
 # ---------------------------------------------------------------------------
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TOOLS_DIR = PROJECT_ROOT / "tools" / "agent_bridge"
 AI_DIR = PROJECT_ROOT / ".ai"
@@ -97,6 +97,10 @@ def find_config() -> Path:
 def load_config(config_path: Path | str | None = None) -> dict:
     """Load config from JSON file merged over defaults.
 
+    Uses ``utf-8-sig`` to handle BOM-prefixed files produced by some
+    editors, and silently skips unrecognised keys while preserving
+    all DEFAULT_CONFIG defaults.
+
     Returns a config dict.  Missing values fall back to DEFAULT_CONFIG.
     """
     cfg = dict(DEFAULT_CONFIG)
@@ -107,7 +111,7 @@ def load_config(config_path: Path | str | None = None) -> dict:
     config_path = Path(config_path)
     if config_path.is_file():
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, "r", encoding="utf-8-sig") as f:
                 user_cfg = json.load(f)
             cfg.update(user_cfg)
         except (json.JSONDecodeError, OSError) as exc:
@@ -483,16 +487,62 @@ def _try_parse_json(text: str) -> dict | None:
                 return obj
         except json.JSONDecodeError:
             pass
+    # Try extracting any {...} object from noisy stdout
+    # Support Claude envelope and fenced JSON among surrounding text
+    match = re.search(r'(?s)\{.*?"ok"\s*:\s*(?:true|false).*?\}', text)
+    if match:
+        try:
+            obj = json.loads(match.group(0))
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
     return None
+
+
+def _read_current_task_status(path: Path | None = None) -> str | None:
+    """Read the **STATUS** marker from CURRENT_TASK.md.
+
+    Returns the status string (e.g. "DONE", "BLOCKED", "READY") or None
+    if it cannot be determined.
+    """
+    p = path or AI_DIR / "CURRENT_TASK.md"
+    if not p.is_file():
+        return None
+    try:
+        text = p.read_text(encoding="utf-8")
+        m = re.search(r"\*\*([A-Z_]+)\*\*", text)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
+def _has_new_commits_since(start_sha: str, path: Path | None = None) -> bool:
+    """Return True if HEAD is different from *start_sha*."""
+    try:
+        current = get_local_sha(path=path)
+        return current != start_sha
+    except RuntimeError:
+        return False
 
 
 def parse_claude_result(result: subprocess.CompletedProcess) -> dict:
     """Parse Claude's stdout into a result dict.
 
-    Handles three formats:
+    Handles four formats:
     1. Direct flat JSON:  {"ok": true, ...}
     2. Envelope with `result` string field (Claude --output-format json)
     3. Envelope with `is_error` field
+    4. Noisy stdout with JSON embedded among surrounding text
+
+    When stdout parse fails but Claude exited 0:
+    - CURRENT_TASK already DONE + working tree clean + new commits
+      → success fallback (Claude genuinely finished, JSON was lost)
+    - CURRENT_TASK already BLOCKED → preserve BLOCKED
+    - CURRENT_TASK still READY → parse failure
+
     Returns a dict with at least ``{"ok": bool}``.
     """
     if result.returncode != 0:
@@ -507,46 +557,81 @@ def parse_claude_result(result: subprocess.CompletedProcess) -> dict:
 
     # 1. Try parsing top-level JSON directly
     parsed = _try_parse_json(stdout)
-    if parsed is None:
+    if parsed is not None:
+        # 2. If it has a top-level "ok" field, it's already the direct format
+        if "ok" in parsed:
+            return parsed
+
+        # 3. Envelope format: check the "result" field
+        result_text = parsed.get("result")
+        if result_text is not None and isinstance(result_text, str) and result_text.strip():
+            inner = _try_parse_json(result_text)
+            if inner is not None and "ok" in inner:
+                inner["_envelope_type"] = parsed.get("type", "")
+                inner["_session_id"] = parsed.get("session_id", "")
+                inner["_is_error"] = parsed.get("is_error", False)
+                return inner
+            # result field is a plain string, not JSON — wrap it
+            return {
+                "ok": not parsed.get("is_error", True),
+                "summary": result_text,
+                "_envelope_type": parsed.get("type", ""),
+                "_session_id": parsed.get("session_id", ""),
+                "_is_error": parsed.get("is_error", True),
+            }
+
+        # 4. Envelope with is_error field but no result
+        if "is_error" in parsed:
+            return {
+                "ok": not parsed["is_error"],
+                "summary": str(parsed.get("result", "")),
+                "_envelope_type": parsed.get("type", ""),
+            }
+
+        # 5. Unknown shape — return as-is, caller checks "ok"
+        return dict(parsed)
+
+    # ── Parse failure fallback ──────────────────────────────────
+    # If stdout had no parseable JSON but Claude exited 0, check
+    # whether Claude genuinely completed by inspecting task status.
+    task_status = _read_current_task_status()
+    working_clean = is_working_directory_clean()
+
+    logger.warning(
+        "Claude stdout parse failure — task_status=%s clean=%s "
+        "stdout=%.500s stderr=%.500s",
+        task_status, working_clean, stdout, result.stderr or "")
+
+    if task_status == "DONE" and working_clean:
+        # Claude clearly finished; JSON envelope was just lost.
+        logger.info("Parse fallback: CURRENT_TASK is DONE, tree clean → success")
+        return {
+            "ok": True,
+            "phase": "parse_fallback",
+            "summary": "Claude completed (parse fallback — CURRENT_TASK is DONE, tree clean)",
+            "raw_stdout": stdout[:3000],
+            "raw_stderr": (result.stderr or "")[:1000],
+        }
+
+    if task_status == "BLOCKED":
+        # Claude explicitly said BLOCKED — preserve it.
+        logger.info("Parse fallback: CURRENT_TASK is BLOCKED → preserve")
         return {
             "ok": False,
-            "phase": "parse",
-            "summary": "No valid JSON found in Claude output",
+            "phase": "parse_fallback",
+            "summary": "CURRENT_TASK is BLOCKED (preserved by parse fallback)",
             "raw_stdout": stdout[:3000],
         }
 
-    # 2. If it has a top-level "ok" field, it's already the direct format
-    if "ok" in parsed:
-        return parsed
-
-    # 3. Envelope format: check the "result" field
-    result_text = parsed.get("result")
-    if result_text is not None and isinstance(result_text, str) and result_text.strip():
-        inner = _try_parse_json(result_text)
-        if inner is not None and "ok" in inner:
-            inner["_envelope_type"] = parsed.get("type", "")
-            inner["_session_id"] = parsed.get("session_id", "")
-            inner["_is_error"] = parsed.get("is_error", False)
-            return inner
-        # result field is a plain string, not JSON — wrap it
-        return {
-            "ok": not parsed.get("is_error", True),
-            "summary": result_text,
-            "_envelope_type": parsed.get("type", ""),
-            "_session_id": parsed.get("session_id", ""),
-            "_is_error": parsed.get("is_error", True),
-        }
-
-    # 4. Envelope with is_error field but no result
-    if "is_error" in parsed:
-        return {
-            "ok": not parsed["is_error"],
-            "summary": str(parsed.get("result", "")),
-            "_envelope_type": parsed.get("type", ""),
-        }
-
-    # 5. Unknown shape — return as-is, caller checks "ok"
-    return dict(parsed)
+    # Still READY or unknown — genuine parse failure.
+    logger.error("Parse failure and CURRENT_TASK still READY → blocking")
+    return {
+        "ok": False,
+        "phase": "parse",
+        "summary": "No valid JSON found in Claude output",
+        "raw_stdout": stdout[:3000],
+        "raw_stderr": (result.stderr or "")[:1000],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -571,18 +656,33 @@ def set_task_status(status: str, notes: str = "") -> None:
     logger.info("Set CURRENT_TASK status to %s", status)
 
 
-def write_run_report(status: str, reason: str, details: str = "") -> None:
-    """Write .ai/BRIDGE_RUN_REPORT.md with execution status."""
-    report = AI_DIR / "BRIDGE_RUN_REPORT.md"
-    report.write_text(
-        f"# Bridge Run Report\n"
-        f"\n"
-        f"**Status:** {status}\n"
-        f"**Timestamp:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"**Reason:** {reason}\n"
+def write_run_report(status: str, reason: str, details: str = "",
+                     raw_stdout: str = "", raw_stderr: str = "") -> None:
+    """Write .ai/BRIDGE_RUN_REPORT.md with execution status.
+
+    Includes truncated stdout/stderr when provided so the report captures
+    what Claude produced even when JSON parsing failed.
+    """
+    now = time.strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        head_sha = get_local_sha()
+    except RuntimeError:
+        head_sha = "unknown"
+    report_parts = [
+        f"# Bridge Run Report\n",
+        f"\n",
+        f"**Status:** {status}\n",
+        f"**Timestamp:** {now}\n",
+        f"**HEAD:** {head_sha}\n",
+        f"**Reason:** {reason}\n",
         f"**Details:** {details[:2000]}\n",
-        encoding="utf-8",
-    )
+    ]
+    if raw_stdout:
+        report_parts.append(f"\n**stdout (truncated):**\n```\n{raw_stdout[:2000]}\n```\n")
+    if raw_stderr:
+        report_parts.append(f"\n**stderr (truncated):**\n```\n{raw_stderr[:1000]}\n```\n")
+    report = AI_DIR / "BRIDGE_RUN_REPORT.md"
+    report.write_text("".join(report_parts), encoding="utf-8")
     logger.info("Wrote BRIDGE_RUN_REPORT.md (status=%s)", status)
 
 
@@ -590,16 +690,31 @@ def write_run_report(status: str, reason: str, details: str = "") -> None:
 # H: BLOCKED commit + push
 # ---------------------------------------------------------------------------
 
-def commit_and_push_blocked(reason: str, result_summary: str) -> bool:
+def commit_and_push_blocked(reason: str, result_summary: str,
+                            raw_stdout: str = "", raw_stderr: str = "") -> bool:
     """Commit a BLOCKED status + run report to GitHub, then push.
+
+    Refuses to overwrite a **DONE** CURRENT_TASK — if Claude already
+    completed the task, the BLOCKED write is a false alarm.
 
     Only stages .ai/CURRENT_TASK.md and .ai/BRIDGE_RUN_REPORT.md.
     Does NOT include any unintended Claude changes.
-    Returns True on success.
+    Returns True on success (including refusal due to already DONE).
     """
+    # Refuse to overwrite DONE
+    task_status = _read_current_task_status()
+    if task_status == "DONE":
+        logger.warning(
+            "commit_and_push_blocked: CURRENT_TASK is already DONE — "
+            "refusing to overwrite with BLOCKED. "
+            "reason=%s summary=%.200s", reason, result_summary,
+        )
+        return True  # Not an error — caller treats as handled
+
     try:
         # Write report and set status locally
-        write_run_report("BLOCKED", reason, result_summary)
+        write_run_report("BLOCKED", reason, result_summary,
+                         raw_stdout=raw_stdout, raw_stderr=raw_stderr)
         set_task_status("BLOCKED")
 
         # Stage ONLY .ai files
@@ -794,7 +909,11 @@ def run_once(config: dict) -> bool:
             summary = result.get("summary", "")[:500]
             reason = result.get("phase", "unknown")
             logger.error("Task failed (phase=%s): %s", reason, summary)
-            blocked_ok = commit_and_push_blocked(reason, summary)
+            blocked_ok = commit_and_push_blocked(
+                reason, summary,
+                raw_stdout=result.get("raw_stdout", ""),
+                raw_stderr=result.get("raw_stderr", ""),
+            )
             if not blocked_ok:
                 logger.warning(
                     "BLOCKED report could not be pushed — remote may not see it. "
