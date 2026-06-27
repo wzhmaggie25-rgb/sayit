@@ -23,7 +23,8 @@ from pathlib import Path
 # Constants
 # ---------------------------------------------------------------------------
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
+SUCCESS_TERMINALS = {"DONE", "BLOCKED_USER_VALIDATION"}
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TOOLS_DIR = PROJECT_ROOT / "tools" / "agent_bridge"
 AI_DIR = PROJECT_ROOT / ".ai"
@@ -468,17 +469,27 @@ def call_claude(prompt: str, config: dict) -> subprocess.CompletedProcess:
 # ---------------------------------------------------------------------------
 
 def _try_parse_json(text: str) -> dict | None:
-    """Attempt to parse *text* as JSON.  Returns None on failure."""
+    """Attempt to parse *text* as JSON.  Returns None on failure.
+
+    Uses ``json.JSONDecoder`` to iteratively scan the input and return the
+    *last* valid JSON object that is a dict — handles multi-segment noisy
+    stdout where earlier non-JSON chunks or partial objects exist.  This
+    replaces the earlier greedy-regex approach which could match across
+    boundaries or miss fragments.
+    """
     text = text.strip()
     if not text:
         return None
+
+    # 1. First try direct full parse (fast path)
     try:
         obj = json.loads(text)
         if isinstance(obj, dict):
             return obj
     except json.JSONDecodeError:
         pass
-    # Try extracting from ```json...``` block
+
+    # 2. Try extracting from ```json...``` block
     match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
     if match:
         try:
@@ -487,16 +498,30 @@ def _try_parse_json(text: str) -> dict | None:
                 return obj
         except json.JSONDecodeError:
             pass
-    # Try extracting any {...} object from noisy stdout
-    # Support Claude envelope and fenced JSON among surrounding text
-    match = re.search(r'(?s)\{.*?"ok"\s*:\s*(?:true|false).*?\}', text)
-    if match:
+
+    # 3. Iterative JSON decoder scan — pick last valid dict
+    decoder = json.JSONDecoder()
+    idx = 0
+    last_valid: dict | None = None
+    while idx < len(text):
+        # Skip whitespace/non-JSON prefix
+        while idx < len(text) and text[idx] in ' \t\n\r':
+            idx += 1
+        if idx >= len(text):
+            break
+        # Try to decode a JSON value at current position
         try:
-            obj = json.loads(match.group(0))
+            obj, end = decoder.raw_decode(text, idx)
             if isinstance(obj, dict):
-                return obj
+                last_valid = obj
+            idx = end
         except json.JSONDecodeError:
-            pass
+            # Skip one character and try again
+            idx += 1
+
+    if last_valid is not None:
+        return last_valid
+
     return None
 
 
@@ -528,7 +553,23 @@ def _has_new_commits_since(start_sha: str, path: Path | None = None) -> bool:
         return False
 
 
-def parse_claude_result(result: subprocess.CompletedProcess) -> dict:
+def _read_task_sha(path: Path | None = None) -> str | None:
+    """Extract the task start SHA from CURRENT_TASK.md's ```text block."""
+    p = path or AI_DIR / "CURRENT_TASK.md"
+    if not p.is_file():
+        return None
+    try:
+        text = p.read_text(encoding="utf-8")
+        m = re.search(r"```text\s*\n\s*([a-f0-9]{40})", text)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
+def parse_claude_result(result: subprocess.CompletedProcess,
+                         task_sha: str | None = None) -> dict:
     """Parse Claude's stdout into a result dict.
 
     Handles four formats:
@@ -538,10 +579,14 @@ def parse_claude_result(result: subprocess.CompletedProcess) -> dict:
     4. Noisy stdout with JSON embedded among surrounding text
 
     When stdout parse fails but Claude exited 0:
-    - CURRENT_TASK already DONE + working tree clean + new commits
+    - CURRENT_TASK is a success terminal + working tree clean + new commits
       → success fallback (Claude genuinely finished, JSON was lost)
     - CURRENT_TASK already BLOCKED → preserve BLOCKED
     - CURRENT_TASK still READY → parse failure
+
+    *task_sha* is the SHA captured *before* Claude ran; it is used in the
+    success-terminal parse-fallback to call ``_has_new_commits_since``.
+    When omitted the helper falls back to ``_read_task_sha()``.
 
     Returns a dict with at least ``{"ok": bool}``.
     """
@@ -602,13 +647,22 @@ def parse_claude_result(result: subprocess.CompletedProcess) -> dict:
         "stdout=%.500s stderr=%.500s",
         task_status, working_clean, stdout, result.stderr or "")
 
-    if task_status == "DONE" and working_clean:
-        # Claude clearly finished; JSON envelope was just lost.
-        logger.info("Parse fallback: CURRENT_TASK is DONE, tree clean → success")
+    # Resolve task_sha for new-commits check
+    if not task_sha:
+        task_sha = _read_task_sha()
+    has_new_commits = _has_new_commits_since(task_sha) if task_sha else False
+
+    if task_status in SUCCESS_TERMINALS and working_clean and has_new_commits:
+        # Claude finished; JSON envelope was just lost.
+        logger.info(
+            "Parse fallback: CURRENT_TASK is %s, tree clean, new commits → success",
+            task_status)
         return {
             "ok": True,
             "phase": "parse_fallback",
-            "summary": "Claude completed (parse fallback — CURRENT_TASK is DONE, tree clean)",
+            "summary": (
+                f"Claude completed (parse fallback — "
+                f"CURRENT_TASK is {task_status}, tree clean, new commits)"),
             "raw_stdout": stdout[:3000],
             "raw_stderr": (result.stderr or "")[:1000],
         }
@@ -701,13 +755,13 @@ def commit_and_push_blocked(reason: str, result_summary: str,
     Does NOT include any unintended Claude changes.
     Returns True on success (including refusal due to already DONE).
     """
-    # Refuse to overwrite DONE
+    # Refuse to overwrite success terminals
     task_status = _read_current_task_status()
-    if task_status == "DONE":
+    if task_status in SUCCESS_TERMINALS:
         logger.warning(
-            "commit_and_push_blocked: CURRENT_TASK is already DONE — "
+            "commit_and_push_blocked: CURRENT_TASK is already %s — "
             "refusing to overwrite with BLOCKED. "
-            "reason=%s summary=%.200s", reason, result_summary,
+            "reason=%s summary=%.200s", task_status, reason, result_summary,
         )
         return True  # Not an error — caller treats as handled
 
@@ -863,7 +917,7 @@ def run_claude_task(task_sha: str, config: dict) -> dict:
 
     logger.info("Claude exit code: %d", result.returncode)
 
-    parsed = parse_claude_result(result)
+    parsed = parse_claude_result(result, task_sha=task_sha)
     logger.info(
         "Claude result: ok=%s summary=%s",
         parsed.get("ok"),

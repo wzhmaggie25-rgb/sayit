@@ -131,9 +131,29 @@ class ParseFallbackDoneTests(unittest.TestCase):
         self._clean_patch = mock.patch.object(bridge, "is_working_directory_clean", return_value=True)
         self._clean_patch.start()
 
+        # For tests that need a task SHA, set up a git repo
+        self._git_inited = False
+        self._old_root = None
+
+    def _ensure_git_repo(self):
+        """Init a minimal git repo in self._tmp_path if not already done."""
+        if self._git_inited:
+            return
+        self._old_root = bridge.PROJECT_ROOT
+        bridge.PROJECT_ROOT = self._tmp_path
+        subprocess.run(["git", "init"], cwd=self._tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=T", "-c", "user.email=t@t",
+             "commit", "--allow-empty", "-m", "root"],
+            cwd=self._tmp_path, capture_output=True,
+        )
+        self._git_inited = True
+
     def tearDown(self):
         self._clean_patch.stop()
         bridge.AI_DIR = self._old_ai
+        if self._old_root is not None:
+            bridge.PROJECT_ROOT = self._old_root
         self._tmp.cleanup()
 
     def _make_result(self, stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
@@ -145,11 +165,28 @@ class ParseFallbackDoneTests(unittest.TestCase):
         _write_file(bridge.AI_DIR / "CURRENT_TASK.md",
                      f"# Task\n\n**{status}**\n\nDo the thing.\n")
 
-    # --- DONE + clean tree → success fallback ---
+    # --- DONE + clean tree + new commits → success fallback ---
     def test_done_and_clean_yields_success(self):
         self._write_current_task("DONE")
+        self._ensure_git_repo()
+        # Write CURRENT_TASK.md as the file SHA source
+        _write_file(bridge.AI_DIR / "CURRENT_TASK.md",
+                     "# Task\n\n**DONE**\n\n```text\nabc123\n```\n")
         r = self._make_result("no JSON here at all")
-        parsed = bridge.parse_claude_result(r)
+        with mock.patch.object(bridge, "_has_new_commits_since", return_value=True):
+            parsed = bridge.parse_claude_result(r, task_sha="abc123")
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed.get("phase"), "parse_fallback")
+
+    # --- BLOCKED_USER_VALIDATION + clean + new commits → success fallback ---
+    def test_blocked_user_validation_and_clean_yields_success(self):
+        self._write_current_task("BLOCKED_USER_VALIDATION")
+        self._ensure_git_repo()
+        _write_file(bridge.AI_DIR / "CURRENT_TASK.md",
+                     "# Task\n\n**BLOCKED_USER_VALIDATION**\n\n```text\nabc123\n```\n")
+        r = self._make_result("no JSON here at all")
+        with mock.patch.object(bridge, "_has_new_commits_since", return_value=True):
+            parsed = bridge.parse_claude_result(r, task_sha="abc123")
         self.assertTrue(parsed["ok"])
         self.assertEqual(parsed.get("phase"), "parse_fallback")
 
@@ -178,16 +215,32 @@ class ParseFallbackDoneTests(unittest.TestCase):
         self.assertFalse(parsed["ok"])
         self.assertEqual(parsed.get("phase"), "claude")
 
-    # --- DONE but dirty tree → parse failure (no fallback) ---
+    # --- Success terminal but dirty tree → parse failure (no fallback) ---
     def test_done_but_dirty_no_fallback(self):
         self._write_current_task("DONE")
+        self._ensure_git_repo()
+        _write_file(bridge.AI_DIR / "CURRENT_TASK.md",
+                     "# Task\n\n**DONE**\n\n```text\nabc123\n```\n")
         self._clean_patch.stop()
         with mock.patch.object(bridge, "is_working_directory_clean", return_value=False):
             r = self._make_result("no JSON here")
-            parsed = bridge.parse_claude_result(r)
+            with mock.patch.object(bridge, "_has_new_commits_since", return_value=True):
+                parsed = bridge.parse_claude_result(r, task_sha="abc123")
             self.assertFalse(parsed["ok"])
             self.assertEqual(parsed.get("phase"), "parse")
         self._clean_patch.start()
+
+    # --- Success terminal but no new commits → parse failure ---
+    def test_done_no_new_commits_no_fallback(self):
+        self._write_current_task("DONE")
+        self._ensure_git_repo()
+        _write_file(bridge.AI_DIR / "CURRENT_TASK.md",
+                     "# Task\n\n**DONE**\n\n```text\nabc123\n```\n")
+        r = self._make_result("no JSON here")
+        with mock.patch.object(bridge, "_has_new_commits_since", return_value=False):
+            parsed = bridge.parse_claude_result(r, task_sha="abc123")
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed.get("phase"), "parse")
 
 
 # ---------------------------------------------------------------------------
