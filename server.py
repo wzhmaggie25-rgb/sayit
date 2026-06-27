@@ -89,7 +89,12 @@ def wire_events():
     eb.on(Events.PIPELINE_ERROR, lambda m: _event_queue.put({"event": "error", "message": str(m)}))
     eb.on(Events.RECORDING_ERROR, lambda m: _event_queue.put({"event": "error", "message": str(m)}))
     eb.on(Events.ASR_ERROR, lambda m: _event_queue.put({"event": "error", "message": str(m)}))
-    eb.on(Events.INJECTION_DONE, lambda ok: _event_queue.put({"event": "injection_done", "ok": ok}))
+    eb.on(Events.INJECTION_DONE, lambda result: _event_queue.put({
+        "event": "injection_done", "ok": result.ok,
+        "state": result.state, "verified": result.verified,
+        "method": result.method, "reason": result.reason or "",
+        "clipboard_restored": result.clipboard_restored,
+    }))
     eb.on(Events.NO_EDITABLE_TARGET, lambda t: _event_queue.put({"event": "no_editable_target", "text": t}))
     eb.on(Events.RESULT_CARD_SHOW, lambda t, lt, s="", m="": _event_queue.put({
         "event": "result_card_show", "text": t, "last_transcription": lt,

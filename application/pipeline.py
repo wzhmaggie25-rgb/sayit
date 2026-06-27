@@ -7,6 +7,7 @@ from typing import Optional
 
 from domain.models import RecordingState
 from application.eventbus import EventBus, Events
+from infrastructure.injector import InjectionResult
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +266,9 @@ class RecordingPipeline:
             # Determine state and emit appropriate events
             if inject_result is None:
                 # Exception before InjectionResult was returned
-                self._eb.emit(Events.INJECTION_DONE, False)
+                synthetic = InjectionResult(ok=False, state="injection_failed",
+                                             reason="injection_exception")
+                self._eb.emit(Events.INJECTION_DONE, synthetic)
                 self._eb.emit(Events.PIPELINE_ERROR, "文本已保存到历史，但未能注入目标输入窗口")
                 self.state = RecordingState.ERROR
                 history_pasted = False
@@ -274,7 +277,7 @@ class RecordingPipeline:
                 ok = False
             elif inject_result.state == "verified_success":
                 ok = True
-                self._eb.emit(Events.INJECTION_DONE, True)
+                self._eb.emit(Events.INJECTION_DONE, inject_result)
                 history_pasted = True
                 history_status = "completed"
                 history_error = ""
@@ -284,7 +287,7 @@ class RecordingPipeline:
                 # a target that already accepted the first attempt. Show a
                 # neutral result card so the user can verify manually.
                 ok = False  # gate SilentMonitor off
-                self._eb.emit(Events.INJECTION_DONE, False)
+                self._eb.emit(Events.INJECTION_DONE, inject_result)
                 self._eb.emit(Events.RESULT_CARD_SHOW, final_text,
                               locally_refined_text,
                               inject_result.state,
@@ -294,7 +297,7 @@ class RecordingPipeline:
                 history_error = inject_result.reason or "attempted_unverified"
             elif inject_result.state == "no_editable_target":
                 ok = True  # Not a failure — user needs result card
-                self._eb.emit(Events.INJECTION_DONE, False)  # False means "not in target"
+                self._eb.emit(Events.INJECTION_DONE, inject_result)  # False means "not in target"
                 self._eb.emit(Events.NO_EDITABLE_TARGET, final_text)
                 self._eb.emit(Events.RESULT_CARD_SHOW, final_text,
                               locally_refined_text,
@@ -308,7 +311,7 @@ class RecordingPipeline:
                 # Per override: also show result card for failed injection so
                 # user can copy manually — but still emit error event for float
                 ok = False
-                self._eb.emit(Events.INJECTION_DONE, False)
+                self._eb.emit(Events.INJECTION_DONE, inject_result)
                 self._eb.emit(Events.PIPELINE_ERROR, "文本已保存到历史，但未能注入目标输入窗口")
                 # Show result card for user to copy final text manually
                 self._eb.emit(Events.RESULT_CARD_SHOW, final_text,

@@ -82,12 +82,15 @@ class PipelineEventRoutingTests(unittest.TestCase):
     def test_verified_success_emits_injection_done(self):
         """verified_success path: INJECTION_DONE(True) + PIPELINE_DONE."""
         events = []
-        self.eb.on(Events.INJECTION_DONE, lambda ok: events.append(("INJECTION_DONE", ok)))
+        self.eb.on(Events.INJECTION_DONE, lambda result: events.append(("INJECTION_DONE", result.ok)))
         self.eb.on(Events.PIPELINE_DONE, lambda t: events.append(("PIPELINE_DONE", t)))
         self.eb.on(Events.PIPELINE_ERROR, lambda m: events.append(("PIPELINE_ERROR", m)))
 
         # Simulate what pipeline.py does for verified_success
-        self.eb.emit(Events.INJECTION_DONE, True)
+        result = InjectionResult(ok=True, state="verified_success", verified=True,
+                                  method="clipboard", clipboard_preserved=True,
+                                  clipboard_restored=True, target_verified=True)
+        self.eb.emit(Events.INJECTION_DONE, result)
 
         self.assertIn(("INJECTION_DONE", True), events,
                       "verified_success must emit INJECTION_DONE(True)")
@@ -95,13 +98,15 @@ class PipelineEventRoutingTests(unittest.TestCase):
     def test_no_editable_target_emits_events(self):
         """no_editable_target path: NO_EDITABLE_TARGET + RESULT_CARD_SHOW."""
         events = []
-        self.eb.on(Events.INJECTION_DONE, lambda ok: events.append(("INJECTION_DONE", ok)))
+        self.eb.on(Events.INJECTION_DONE, lambda result: events.append(("INJECTION_DONE", result.ok)))
         self.eb.on(Events.NO_EDITABLE_TARGET, lambda t: events.append(("NO_EDITABLE_TARGET", t)))
         self.eb.on(Events.RESULT_CARD_SHOW, lambda t, lt, s="", m="": events.append(("RESULT_CARD_SHOW", t, s, m)))
         self.eb.on(Events.PIPELINE_ERROR, lambda m: events.append(("PIPELINE_ERROR", m)))
 
         # Simulate pipeline behavior for no_editable_target
-        self.eb.emit(Events.INJECTION_DONE, False)
+        result = InjectionResult(ok=False, state="no_editable_target",
+                                  clipboard_preserved=True, reason="no_editable_target")
+        self.eb.emit(Events.INJECTION_DONE, result)
         self.eb.emit(Events.NO_EDITABLE_TARGET, "你好世界")
         self.eb.emit(Events.RESULT_CARD_SHOW, "你好世界", "你好世界",
                      "no_editable_target", "未找到可输入的目标窗口")
@@ -116,13 +121,15 @@ class PipelineEventRoutingTests(unittest.TestCase):
     def test_injection_failed_emits_error_and_result_card(self):
         """injection_failed path: PIPELINE_ERROR + RESULT_CARD_SHOW."""
         events = []
-        self.eb.on(Events.INJECTION_DONE, lambda ok: events.append(("INJECTION_DONE", ok)))
+        self.eb.on(Events.INJECTION_DONE, lambda result: events.append(("INJECTION_DONE", result.ok)))
         self.eb.on(Events.PIPELINE_ERROR, lambda m: events.append(("PIPELINE_ERROR", m)))
         self.eb.on(Events.RESULT_CARD_SHOW, lambda t, lt, s="", m="": events.append(("RESULT_CARD_SHOW", t, s, m)))
         self.eb.on(Events.PIPELINE_DONE, lambda t: events.append(("PIPELINE_DONE", t)))
 
         # Simulate pipeline behavior for injection_failed
-        self.eb.emit(Events.INJECTION_DONE, False)
+        result = InjectionResult(ok=False, state="injection_failed",
+                                  clipboard_preserved=True, reason="all_three_layers_failed")
+        self.eb.emit(Events.INJECTION_DONE, result)
         self.eb.emit(Events.PIPELINE_ERROR, "文本已保存到历史，但未能注入目标输入窗口")
         self.eb.emit(Events.RESULT_CARD_SHOW, "你好世界", "你好世界",
                      "injection_failed", "未能将文本注入目标窗口")

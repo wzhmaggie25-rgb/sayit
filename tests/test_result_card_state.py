@@ -136,3 +136,79 @@ class ResultCardServerBroadcastTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InjectionDoneStructuredPayloadTests(unittest.TestCase):
+    """Phase 7: INJECTION_DONE carries full InjectionResult, not just bool."""
+
+    def setUp(self):
+        self.eb = EventBus()
+        self.events = []
+
+    def test_injection_done_carries_structured_payload(self):
+        """Emitting INJECTION_DONE with InjectionResult captures all fields."""
+        self.eb.on(Events.INJECTION_DONE, self._capture)
+        result = InjectionResult(
+            ok=True,
+            state="verified_success",
+            verified=True,
+            method="clipboard",
+            clipboard_preserved=True,
+            clipboard_restored=True,
+            target_verified=True,
+            reason="",
+        )
+        self.eb.emit(Events.INJECTION_DONE, result)
+        self.assertEqual(len(self.events), 1)
+        captured = self.events[0]
+        self.assertEqual(captured.ok, True)
+        self.assertEqual(captured.state, "verified_success")
+        self.assertEqual(captured.verified, True)
+        self.assertEqual(captured.method, "clipboard")
+        self.assertEqual(captured.clipboard_restored, True)
+        self.assertEqual(captured.target_verified, True)
+
+    def test_injection_done_backward_compat_ok_true(self):
+        """result.ok is the same as the old bare True: verified_success."""
+        self.eb.on(Events.INJECTION_DONE, lambda r: self.events.append(r.ok))
+        result = InjectionResult(ok=True, state="verified_success", verified=True)
+        self.eb.emit(Events.INJECTION_DONE, result)
+        self.assertEqual(len(self.events), 1)
+        self.assertIs(self.events[0], True)
+
+    def test_injection_done_backward_compat_ok_false(self):
+        """result.ok is the same as the old bare False."""
+        self.eb.on(Events.INJECTION_DONE, lambda r: self.events.append(r.ok))
+        result = InjectionResult(ok=False, state="injection_failed")
+        self.eb.emit(Events.INJECTION_DONE, result)
+        self.assertEqual(len(self.events), 1)
+        self.assertIs(self.events[0], False)
+
+    def test_injection_done_all_states_have_ok(self):
+        """Every possible state has a sensible ok value."""
+        states_ok = [
+            ("verified_success", True),
+            ("attempted_unverified", False),
+            ("no_editable_target", True),
+            ("injection_failed", False),
+            ("recognition_failed", False),
+        ]
+        self.eb.on(Events.INJECTION_DONE, lambda r: self.events.append((r.state, r.ok)))
+        for state, expected_ok in states_ok:
+            result = InjectionResult(ok=expected_ok, state=state)
+            self.eb.emit(Events.INJECTION_DONE, result)
+        self.assertEqual(len(self.events), 5)
+        for (state, ok), (expected_state, expected_ok) in zip(self.events, states_ok):
+            self.assertEqual(state, expected_state)
+            self.assertEqual(ok, expected_ok)
+
+    def test_injection_done_attempted_unverified_reason_preserved(self):
+        """reason field survives the emit round-trip."""
+        self.eb.on(Events.INJECTION_DONE, lambda r: self.events.append(r.reason))
+        result = InjectionResult(ok=False, state="attempted_unverified",
+                                  reason="paste_no_readback")
+        self.eb.emit(Events.INJECTION_DONE, result)
+        self.assertEqual(self.events[0], "paste_no_readback")
+
+    def _capture(self, result):
+        self.events.append(result)
