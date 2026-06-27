@@ -198,18 +198,33 @@ class DatabaseDistinctHistoryAccumulationTests(unittest.TestCase):
         self.db.merge_rules([self._new_rule("叫一下", "焦虑", "h1")])
         rules = self.db.get_rules()
         self.assertEqual(rules[0]["source_history_ids"], ["h1"])
+        self.assertEqual(rules[0]["confidence"], 0.5)
+        self.assertEqual(rules[0]["match_count"], 1)
 
         self.db.merge_rules([self._new_rule("叫一下", "焦虑", "h2")])
         rules = self.db.get_rules()
         self.assertEqual(sorted(rules[0]["source_history_ids"]), ["h1", "h2"])
+        self.assertAlmostEqual(rules[0]["confidence"], 0.65)  # 0.5 + 0.15
+        self.assertEqual(rules[0]["match_count"], 2)
 
     def test_merge_same_history_does_not_grow(self):
         """Re-merging with the same history_id must not inflate evidence."""
         self.db.merge_rules([self._new_rule("叫一下", "焦虑", "h1")])
-        self.db.merge_rules([self._new_rule("叫一下", "焦虑", "h1")])
         rules = self.db.get_rules()
         self.assertEqual(rules[0]["source_history_ids"], ["h1"],
                          "same history_id must dedupe")
+        self.assertEqual(rules[0]["confidence"], 0.5)
+        self.assertEqual(rules[0]["match_count"], 1)
+
+        # Second merge with same history_id — nothing should change.
+        self.db.merge_rules([self._new_rule("叫一下", "焦虑", "h1")])
+        rules = self.db.get_rules()
+        self.assertEqual(rules[0]["source_history_ids"], ["h1"],
+                         "source_history_ids must not grow")
+        self.assertEqual(rules[0]["confidence"], 0.5,
+                         "confidence must NOT increase on same history")
+        self.assertEqual(rules[0]["match_count"], 1,
+                         "match_count must NOT increase on same history")
 
     def test_mark_rule_promoted_idempotent(self):
         self.db.merge_rules([self._new_rule("叫一下", "焦虑", "h1")])

@@ -490,17 +490,22 @@ class Database:
                         # first merge after the schema upgrade.
                         if not ids and existing_d.get("source_history_id"):
                             ids = [existing_d["source_history_id"]]
-                        if new_hid and str(new_hid) not in {str(x) for x in ids}:
+                        # Idempotent: only update when new_hid provides new evidence.
+                        # Same history (or None) must NOT change confidence,
+                        # match_count, source_history_ids, or updated_at.
+                        had_new_evidence = bool(
+                            new_hid and str(new_hid) not in {str(x) for x in ids})
+                        if had_new_evidence:
                             ids.append(str(new_hid))
-                        new_conf = min(0.95, existing['confidence'] + 0.15)
-                        new_count = existing['match_count'] + 1
-                        conn.execute(
-                            """UPDATE correction_rules
-                               SET confidence=?, match_count=?, updated_at=?,
-                                   source_history_ids=?
-                               WHERE id=?""",
-                            (new_conf, new_count, datetime.now().isoformat(),
-                             json.dumps(ids), existing['id']))
+                            new_conf = min(0.95, existing['confidence'] + 0.15)
+                            new_count = existing['match_count'] + 1
+                            conn.execute(
+                                """UPDATE correction_rules
+                                   SET confidence=?, match_count=?, updated_at=?,
+                                       source_history_ids=?
+                                   WHERE id=?""",
+                                (new_conf, new_count, datetime.now().isoformat(),
+                                 json.dumps(ids), existing['id']))
                     else:
                         ids = [str(new_hid)] if new_hid else []
                         conn.execute(
