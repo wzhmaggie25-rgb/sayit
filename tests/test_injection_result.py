@@ -258,6 +258,10 @@ class InjectorResultTests(unittest.TestCase):
         # Make readback report the expected text in the post-paste snapshot.
         with patch.object(self.inj, "_direct_input", return_value=True), \
              patch.object(self.inj, "_lock", MagicMock()), \
+             patch.object(self.inj, "_foreground_info",
+                          return_value=(0xABC, "", 0, "")), \
+             patch.object(self.inj, "_assess_target_editability",
+                          return_value="unknown"), \
              patch.object(self.inj, "_snapshot_target_text",
                           side_effect=[(True, ""), (True, "hello")]), \
              patch("infrastructure.clipboard_snapshot.read_snapshot",
@@ -277,7 +281,7 @@ class InjectorResultTests(unittest.TestCase):
         with patch.object(self.inj, "_lock", MagicMock()):
             with patch.object(self.inj, "_direct_input", return_value=False), \
                  patch.object(self.inj, "_foreground_info",
-                              return_value=(0, "", 0, "")), \
+                              return_value=(0xABC, "", 0, "")), \
                  patch.object(self.inj, "_get_context_for_strategy",
                               return_value={}), \
                  patch.object(self.inj, "_strategy_for_context",

@@ -158,8 +158,10 @@ class InjectorFallsThroughOnUnsafeSnapshot(unittest.TestCase):
     def test_inject_skips_clipboard_when_snapshot_unsupported(self):
         """Real-world case: user has an image on clipboard. SendInput should run."""
         with patch.object(self.inj, "_lock", MagicMock()):
-            with patch.object(self.inj, "_foreground_info",
-                              return_value=(0, "", 0, "")), \
+            with patch.object(self.inj, "_get_focused_edit_hwnd",
+                              return_value=0), \
+                 patch.object(self.inj, "_foreground_info",
+                              return_value=(0xABC, "", 0, "")), \
                  patch.object(self.inj, "_assess_target_editability",
                               return_value="editable"), \
                  patch.object(self.inj, "_get_context_for_strategy",
@@ -168,6 +170,10 @@ class InjectorFallsThroughOnUnsafeSnapshot(unittest.TestCase):
                               return_value="clipboard"), \
                  patch.object(self.inj, "_is_terminal_target",
                               return_value=False), \
+                 patch.object(self.inj, "_snapshot_target_text",
+                              return_value=(True, "")), \
+                 patch.object(self.inj, "_verify_target_text",
+                              return_value="verified"), \
                  patch("infrastructure.clipboard_snapshot.read_snapshot",
                        return_value=ClipboardSnapshot(
                            kind="UNSUPPORTED_OR_MULTIFORMAT",

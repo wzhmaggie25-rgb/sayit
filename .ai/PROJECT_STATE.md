@@ -1,5 +1,5 @@
 # Project State
-> 最后一次更新：2026-06-27 20:30（Round 7 安全注入 + 真实学习门禁 + Bridge 可靠化完成）
+> 最后一次更新：2026-06-27 23:00（Round 8 最终安全收口完成 — BLOCKED_USER_VALIDATION）
 
 ## Overview
 
@@ -213,17 +213,17 @@ RecordingPipeline.run() Phase 6
    - **SilentMonitor 门禁**：`application/pipeline.py` 只在 `state == "verified_success"` AND `target_verified` 时启动；no_editable_target / attempted_unverified / injection_failed / recognition_failed 均不启动。
    - **热词提升**：`domain/hotword_promotion.py::decide_promotion` 纯函数 + DB schema v6 (`correction_rules.source_history_ids` JSON + `.promoted` 标志)。≥2 distinct history + unique winner with margin → promote replacement (NOT pattern)；2–12 char、CJK/alnum、≠pattern；冲突/平票/单字/标点不提升；单次最多 1；幂等。`SilentMonitor._maybe_promote_hotword` 端到端集成，HotwordsManager.add_word 同步 ASR。
    - **测试**：新增 40 用例（5+10+7+18），全套 213 passed / 1 skipped / 6 subtests；`node --check frontend/main.js && node --check frontend/preload.js && node frontend/_smoke_result_card.js` 全 PASS（smoke 34 assertions）。
-20. **Round 7 安全注入 + 真实学习门禁 + Bridge 可靠化** — 修复（2026-06-27 Round 7）：
-   - **Bridge v0.2.1**：`tools/agent_bridge/bridge.py` 使用 utf-8-sig 配置加载；parser 支持 noisy stdout / Claude envelope / fenced JSON / direct JSON；exit 0 + parse failure 时 CURRENT_TASK 已 DONE + clean tree + 有新提交 → 视作成功 fallback，不再覆盖为 BLOCKED；`commit_and_push_blocked()` 发现 DONE 时拒绝覆盖。
-   - **当前焦点注入（P0-1）**：`infrastructure/injector.py::_inject_locked()` 不再调用 `_focus_window(captured_target.hwnd)`；注入时读取当前 foreground hwnd；captured target 仅用于诊断/identity/readback anchor；禁止恢复旧窗口/抢焦点。
-   - **非破坏性插入（P0-2/P0-3）**：`_inject_win32_child_edit()` 在控件已有内容时拒绝 WM_SETTEXT；`_inject_locked()` 三态路由 UIA 结果（True→成功、False→直接 attempted_unverified 不 paste、None→允许 clipboard fallthrough）；完全删除 DocumentRange.Select() 调用。
-   - **真实 readback diff（P0-4/P0-5）**：`_verify_target_text()` 通过 pre/post 比较判断插入结果；pre==post → unchanged → injection_failed；post 可通过"pre + expected"得到 → verified_success；no readback → attempted_unverified；不再使用 `expected in post` substring 比较消除假阳性。
-   - **剪贴板恢复事实一致（P0-6）**：`paste()` 返回三值 `(shortcut_sent, snapshot_kind, restore_ok)`；restore 失败重试 3 次；`InjectionResult.clipboard_preserved/clipboard_restored` 传播 restore_ok。
-   - **结果卡片状态提示（P0-7）**：RESULT_CARD_SHOW 携带 state + 中文 message；result-card.html 新增 `#status-bar` 元素和状态 CSS 类（`.state-attempted` 黄色警告、`.state-failed` 红色、`.state-no-target` 中性）。
-   - **热词提升竞争冲突（P1-2）**：`decide_promotion()` 不再过滤 evidence<2 的 candidate；任何现有已 promotion competitor 锁定 pattern；margin ≥ 2 才提升。
-   - **promotion 写入顺序（P1-3）**：`_maybe_promote_hotword()` 先 add_word 同步 ASR，确认成功后 mark promoted；临时失败可重试。
-   - **结构化 INJECTION_DONE（P1-4）**：pipeline 发出完整 `InjectionResult` 对象；server WebSocket 广播 ok/state/verified/method/reason/clipboard_restored。
-   - **测试**：新增/修改 29 个测试文件，新增 832 行测试代码；全套 302 passed / 1 skipped / 6 subtests。
+21. **Round 8 最终安全收口** — 修复（2026-06-27 Round 8）：
+    - **Phase 0 (Bridge v0.2.2)**：`SUCCESS_TERMINALS` 包括 DONE + BLOCKED_USER_VALIDATION；`_has_new_commits_since()` 在 parse fallback 中被实际调用。
+    - **Phase 1 (Injector cleanup, P0-1/P0-2/P0-3)**：完全删除 `ValuePattern.SetValue`、`WM_SETTEXT`、`DocumentRange.Select`。注入层改为 TextPattern-only tri-state 路由（True→verified, False→attempted_unverified, None→fallthrough）。
+    - **Phase 2 (Editability gate, P0-4)**：`_assess_target_editability()` 重写：优先 GetGUIThreadInfo 获取真实 Edit/RichEdit 焦点；ValuePattern + CurrentIsReadOnly=False → editable；TextPattern-only → no_editable；0 hwnd → no_editable_target。
+    - **Phase 3 (Selection-aware insertion, P0-3)**：新建 `_get_focused_edit_hwnd()`（GetGUIThreadInfo hwndFocus） + `_inject_win32_selection_aware()`（EM_GETSEL+EM_REPLACESEL）。仅在实际焦点 Edit/RichEdit 上运行。tri-state 返回。8 测试。
+    - **Phase 4 (Readback diff, P0-5)**：`_snapshot_target_text()` 优先从焦点编辑框读取；`_verify_target_text()` 用 pre/post diff 取代 substring fallback。pre==post→unchanged→injection_failed。pre 不可读→no_readback→attempted_unverified。
+    - **Phase 5 (Clipboard propagation, P0-6)**：`_fail()` 接受 `restore_ok` 和 `clipboard_preserved` 参数。paste_target_unchanged 准确传播 restore_ok。其他路径默认 preserved=True。
+    - **Phase 6 (Merge idempotent, P0-7)**：`merge_rules()` `had_new_evidence` gate：同 history 重放不增加 confidence/match_count。
+    - **Phase 7 (Promotion sync-only, P0-8)**：`_maybe_promote_hotword()` 仅 HotwordsManager.add_word，无 `db.add_dictionary_word` fallback。
+    - **Phase 8 (IPC sender, P0-9)**：`result-card:copy-pending` 和 `result-card:close` 校验 `event.sender.id === resultCardWin.webContents.id`。
+    - **Phase 9 (Regression + gates)**：修复 3 个测试适配新 editability/foreground 门控。全量 338 passed 0 fail。代码门控全部通过。ROUND8_SELF_REVIEW.md 全 PASS。
 
 ## Round 6 Checkpoint commits
 
@@ -244,6 +244,20 @@ RecordingPipeline.run() Phase 6
 - `50dea04` — feat(injection): Phase 7 — structured INJECTION_DONE payload with full InjectionResult (P1-4)
 
 **Final Round 7 HEAD: `50dea046af9cab4a4cff7a4dd9708dbd74900bda`**
+
+## Round 8 Checkpoint commits
+
+- `af74068` — fix(bridge): v0.2.2 — SUCCESS_TERMINALS, _has_new_commits_since call, JSON decoder scan
+- `96e18f7` — fix(injector): Phase 1 — remove SetValue/WM_SETTEXT/DocumentRange.Select (P0-1/P0-2/P0-3)
+- `272dcb9` — feat(injector): Phase 2 — GetGUIThreadInfo + read-only + TextPattern-only rejection
+- `fa01726` — feat(injector): Phase 3 — selection-aware EM_REPLACESEL with non-destructive insertion
+- `c1ce4fd` — feat(injector): Phase 4 — unified pre+selection+post readback, removed substring fallback
+- `b193831` — feat(injector): Phase 5 — _fail() clipboard propagation across all paths
+- `5beeded` — feat(database): Phase 6 — merge_rules idempotent on duplicate history
+- `3297ba2` — feat(silent_monitor): Phase 7 — promotion sync-only, no DB fallback
+- `e98ad19` — feat(main.js): Phase 8 — IPC sender validation for result-card handlers
+
+**Final Round 8 HEAD: `e98ad195f3639592e93124ba0e8fe15a537192ca`**
 
 ## 不允许随意修改的模块
 
