@@ -626,10 +626,13 @@ class Injector:
 
     def _verify_target_text(self, hwnd: int, expected: str,
                              pre_text: str | None) -> str:
-        """Decide post-paste readback outcome.
+        """Decide post-paste readback outcome via pre/post diff.
+
+        Phase 3 fix: reject substring false positives by requiring a
+        provable pre→post insertion.
 
         Returns one of:
-          "verified"     — expected appears in post; safe to mark verified.
+          "verified"     — post content PROVES expected was inserted.
           "unchanged"    — target text did not change at all (paste was
                            confirmed-rejected). Caller should map to
                            ``injection_failed``.
@@ -639,12 +642,25 @@ class Injector:
         ok, post = self._snapshot_target_text(hwnd)
         if not ok:
             return "no_readback"
+
+        # Without a pre snapshot, fall back to weak substring check.
         if pre_text is None:
             return "verified" if expected and expected in post else "no_readback"
+
         if post == pre_text:
             return "unchanged"
-        if expected and expected in post:
-            return "verified"
+
+        # Strong diff check: post must be pre with expected cleanly inserted.
+        if expected:
+            # Count increase rules out the case where expected was already
+            # present and only a different edit occurred.
+            if post.count(expected) > pre_text.count(expected):
+                idx = post.find(expected)
+                if idx >= 0:
+                    # Removing the first occurrence of expected from post
+                    # should recover pre exactly.
+                    if post[:idx] + post[idx + len(expected):] == pre_text:
+                        return "verified"
         return "no_readback"
 
     def inject(self, text: str, target: InjectionTarget | None = None) -> InjectionResult:
@@ -818,11 +834,12 @@ class Injector:
                 if verdict == "unchanged":
                     # Paste shortcut sent but target text did not change —
                     # the consumer refused our paste (admin window / IME /
-                    # UIPI / disabled control). DO NOT try SendInput on top:
-                    # we have no proof the paste was truly rejected vs
-                    # rendered elsewhere; chase will risk duplicate text.
-                    return _attempted_unverified(
-                        "clipboard", reason="paste_target_unchanged")
+                    # UIPI / disabled control). Per Round 7 spec:
+                    # reliable unchanged → injection_failed.
+                    # DO NOT try SendInput on top: we have no proof the paste
+                    # was truly rejected vs rendered elsewhere; chase will
+                    # risk duplicate text.
+                    return _fail("paste_target_unchanged")
                 # no_readback — cannot prove anything either way.
                 return _attempted_unverified(
                     "clipboard", reason="paste_no_readback")
@@ -1128,8 +1145,10 @@ class Injector:
             logger.info("[INJECT-UIA] read-back returned None")
             return False
 
-        # Simple containment check — text should appear somewhere in the element
-        if expected in read_text or read_text in expected:
+        # Containment check — expected should appear in the element value.
+        # Phase 3 fix: drop the reverse check (read_text in expected) which
+        # produces false positives when readback is empty or short.
+        if expected and expected in read_text:
             return True
 
         logger.info("[INJECT-UIA] read-back mismatch: expected=%r got=%r",

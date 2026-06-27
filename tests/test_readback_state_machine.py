@@ -82,14 +82,17 @@ class ReadbackPathTests(unittest.TestCase):
         self.assertEqual(result.method, "clipboard")
         self.assertTrue(result.target_verified)
 
-    def test_paste_target_unchanged_returns_attempted_unverified(self):
+    def test_paste_target_unchanged_returns_injection_failed(self):
         """Pre 'abc', post 'abc' — paste did nothing.
 
+        Round 7 spec: reliable unchanged → injection_failed.
+
         We can't tell whether the consumer rejected the paste or whether
-        the text was rendered somewhere else (autocomplete dropdown, OS IME
-        composition, etc.). The Round 5 fix is explicit: do NOT then try
-        SendInput on top, that risks duplicate text in apps that accepted
-        the paste but route results through a separate buffer.
+        the text was rendered somewhere else, but since readback IS
+        available and proves the target did not change, this is a clear
+        failure. Do NOT then try SendInput on top, that risks duplicate
+        text in apps that accepted the paste but route results through a
+        separate buffer.
         """
         direct_mock = MagicMock(return_value=True)
         patches = self._common_patches() + [
@@ -106,9 +109,9 @@ class ReadbackPathTests(unittest.TestCase):
             for p in reversed(patches):
                 try: p.__exit__(None, None, None)
                 except Exception: pass
-        # Per spec: shortcut sent + target unchanged → attempted_unverified,
-        # NOT injection_failed (we cannot prove rejection vs render-elsewhere).
-        self.assertEqual(result.state, "attempted_unverified")
+        # Per Round 7 spec: reliable unchanged → injection_failed
+        self.assertEqual(result.state, "injection_failed")
+        self.assertEqual(result.reason, "paste_target_unchanged")
         # SendInput must NOT have been called — that's the whole point.
         direct_mock.assert_not_called()
 
