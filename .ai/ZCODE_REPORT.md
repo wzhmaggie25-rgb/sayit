@@ -1,101 +1,135 @@
 # ZCode Report
 
-> 最后一次更新：2026-06-27（Round 6 Typeless 稳定化：result card / 剪贴板 snapshot / readback state machine / hotword promotion）
-> 执行者：Claude Code (glm-latest) via SayIt Agent Bridge v0.2.0
+> 最后一次更新：2026-06-27（Round 7: 安全注入 + 真实学习门禁 + Bridge 可靠化）
+> 执行者：ZCode GUI → Claude Code (glm-latest)
 
 ## 接收到的任务
 
-完成 `feature/silent-learning-stabilization` 分支上的 Typeless 风格稳定化交付（来自 `.ai/CURRENT_TASK.md` + `.ai/CLAUDE_LONG_TASK.md` Phase 1–6）：
+完成 `feature/silent-learning-stabilization` 分支上的 Round 7 安全注入交付（来自 `.ai/CURRENT_TASK.md` + `.ai/ROUND7_LONG_TASK.md` Phase 0–8）：
 
-1. 修复结果卡片无法离线运行、首次 payload 丢失；
-2. 复制走可信 Electron IPC；
-3. 注入 verified 必须来自目标 readback；
-4. 新增 attempted_unverified 状态，禁止盲目二次输入；
-5. 空剪贴板恢复为空、非文本/多格式不被破坏；
-6. 无可编辑目标不强抢旧输入框、显示大结果卡片；
-7. 结果卡片两层文字 + 复制按钮 + 绿色勾 + 右上角关闭；
-8. no target / unverified / failed 不启动 SilentMonitor；
-9. 重复纠错（2 个不同 history 后）安全提升个人热词；
-10. 保留 RAltStopWatcher、ABI v3、快速停录。
+1. Bridge v0.2.1：utf-8-sig 配置、robust JSON parser、DONE 不被覆盖为 BLOCKED（P1-6）
+2. 当前焦点注入，不恢复录音开始时的 stale target（P0-1）
+3. 非破坏性插入：禁止 WM_SETTEXT 覆盖已有内容、UIA SetValue 后不可验证不继续 paste（P0-2/P0-3）
+4. 真实 readback diff：pre/post 比较，拒绝 empty/partial/pre-existing/unrelated false positives（P0-4/P0-5）
+5. 剪贴板恢复事实一致：restore 失败重试 3 次，三值恢复状态传播到 InjectionResult（P0-6）
+6. 结果卡片携带 state+message，attempted_unverified 显示黄色警告（P0-7）
+7. 删除单次 edit 直接加入个人词典的绕行入口（P0-8）
+8. 同 history 重放幂等（P0-9）
+9. 热词冲突判断考虑所有 evidence，margin ≥ 2，already promoted 锁住 pattern（P1-2）
+10. promotion 写入顺序：先 add_word 确认成功再 mark_promoted（P1-3）
+11. 结构化 INJECTION_DONE payload 贯穿 EventBus/WebSocket（P1-4）
+12. 自审：逐项 P0/P1 PASS，RESTRICTED_USER_VALIDATION
 
 ## 根因判断
 
-- **结果卡片白屏**：`frontend/ui/result-card.html` 使用 React 但未加载 React/ReactDOM；运行时 `ReferenceError: React is not defined`。
-- **首次 payload 丢失**：`createResultCardWindow()` 后立即 `pushToResultCard(...)`；`did-finish-load` 异步，`resultCardReady=false` 时直接 return；主进程未缓存 payload。
-- **假验证 verified**：`paste()` 老实现以"keybd_event 发送成功"为 verified；无任何目标控件 readback。
-- **空剪贴板恢复**：`backup is None` 时直接放弃，临时写入的 final_text 留在剪贴板。
-- **非文本剪贴板**：`_clipboard_set_text` 调 `EmptyClipboard()`，图片/文件/HTML/RTF 全清掉。
-- **错启动 SilentMonitor**：pipeline 用 `ok and ... and injector.last_target_hwnd` 启动，`no_editable_target` 时 `ok=True` 也命中。
-- **Hotword promotion 缺失**：DB schema 只存单个 `source_history_id`，没有累计 set；没有 `promoted` 标志；没有 `decide_promotion` 算法。
+- **Round 6 代码审查未通过**：P0-1 至 P0-9、P1-1 至 P1-6 共 15 项阻塞问题，全部在 Round 7 修复。
+- **旧窗口抢回**：`_inject_locked()` 在存在 captured target 时调用 `_focus_window(target.hwnd)` 强制恢复焦点。修复：删除所有焦点恢复调用，注入时使用当前 foreground hwnd。
+- **WM_SETTEXT 覆盖**：Win32 child-edit 路径直接 `SendMessage(WM_SETTEXT)` 替换整个控件。修复：注入前读 WM_GETTEXTLENGTH，已有内容时拒绝。
+- **UIA SetValue + paste 双重注入**：ValuePattern.SetValue 可能已改变目标，但返回 False 后外层继续 clipboard paste。修复：三态路由 True/False/None，False 直接返回 attempted_unverified。
+- **readback 假阳性**：`expected in post` 在 expected 已存在于 pre、post 为空、partial 匹配时错误 verified。修复：pre/post diff 比较。
+- **剪贴板恢复虚假宣称**：restore_snapshot 失败但 paste 仍返回 True。修复：三值返回 + 重试 + 状态传播。
+- **单次编辑入词典**：`_learn()` 自动调 `_auto_add_dictionary_terms()`。修复：删除该方法，仅 promotion engine 可入词典。
+- **竞争冲突不保守**：evidence<2 的 candidate 被过滤、already_promoted 不参与竞争判断。修复：考虑所有 candidate，已有 promoted competitor 锁住 pattern。
 
 ## 实际修改的文件
 
 | 文件 | 变更摘要 |
 |---|---|
-| `frontend/ui/result-card.html` | 全部重写为原生 HTML/CSS/JS；无 React/CDN；两层文字 + 复制 + ✓ + 右上角 ✕ |
-| `frontend/main.js` | 加 `clipboard` import、`pendingResultCardPayload`、`pendingResultText`；`showResultCard()` 缓存并在 `did-finish-load` 重放；`ipcMain.handle('result-card:copy-pending')` 走 Electron `clipboard.writeText` |
-| `frontend/preload.js` | 新增 `sayitResultCard` IPC bridge（只暴露受信动作，不再传递任意文本） |
-| `frontend/_smoke_result_card.js` | 新建离线 smoke test（34 assertions） |
-| `server.py` | `/api/result-card/copy` 弃用（不再写剪贴板）；新增 `/api/result-card/copy-confirmed` 观测端点 |
-| `infrastructure/clipboard_snapshot.py` | 新建：`ClipboardSnapshot` + EMPTY/TEXT/UNSUPPORTED_OR_MULTIFORMAT/READ_FAILED + `read_snapshot/restore_snapshot` |
-| `infrastructure/injector.py` | `paste()` 改用 snapshot 拒绝非文本/READ_FAILED；返回 `(ok, kind)`；新增 `_snapshot_target_text`、`_verify_target_text`、`_attempted_unverified` 工厂；inject 主流程在 paste/SendInput 前后做 readback |
-| `application/pipeline.py` | 处理 `attempted_unverified`（中性卡片、不启 SilentMonitor）；SilentMonitor 门禁改为 `verified_success` + `target_verified` |
-| `infrastructure/database.py` | schema v6：`correction_rules.source_history_ids`(JSON) + `.promoted`(int)；`merge_rules` 累计 distinct history set；`mark_rule_promoted` 幂等；`get_rules` 解码 JSON 并向后兼容 |
-| `infrastructure/silent_monitor.py` | merge 后调用 `_maybe_promote_hotword(db)`，提升 replacement 调 `HotwordsManager.add_word` 并 mark promoted |
-| `domain/hotword_promotion.py` | 新建：`decide_promotion(rules)` 纯函数 + 阈值常量 |
-| `tests/test_result_card_smoke.py` | 新建（5 用例） |
-| `tests/test_clipboard_snapshot.py` | 新建（10 用例） |
-| `tests/test_readback_state_machine.py` | 新建（7 用例） |
-| `tests/test_hotword_promotion.py` | 新建（18 用例） |
-| `tests/test_injection_result.py` | 适配 paste 新返回值 + readback + attempted_unverified |
-| `tests/test_injector_fallback.py` | paste mock 改 tuple |
-| `.ai/CC_SELF_REVIEW.md` | 新建：P0/P1 自审全 PASS |
-| `.ai/PROJECT_STATE.md` | 更新到本轮 |
-| `.ai/TEST_RESULTS.md` | 更新到本轮 |
+| `tools/agent_bridge/bridge.py` | v0.2.1：utf-8-sig 配置、robust JSON parser、DONE 不被覆盖 |
+| `infrastructure/injector.py` | `_inject_locked()` 重构：当前焦点不恢复 stale target、三态 UIA 路由、`_verify_target_text()` pre/post diff、paste() 三值返回、`_inject_win32_child_edit()` 内容守卫 |
+| `infrastructure/injector_uia.py` | 删除 DocumentRange.Select() 调用 |
+| `infrastructure/silent_monitor.py` | 删除 `_auto_add_dictionary_terms()`；`_maybe_promote_hotword()` 先 add_word 后 mark_promoted |
+| `domain/hotword_promotion.py` | `decide_promotion()` 重写：所有 candidate 参与竞争、MIN_WINNER_MARGIN=2、already_promoted 锁定 |
+| `application/pipeline.py` | INJECTION_DONE 发出完整 InjectionResult 对象；RESULT_CARD_SHOW 携带 state+message |
+| `application/eventbus.py` | RESULT_CARD_SHOW 注解更新为 4 参数 |
+| `server.py` | WS lambda 接受 InjectionResult，广播全字段 |
+| `frontend/main.js` | showResultCard() 接受 state/message |
+| `frontend/ui/result-card.html` | 新增 #status-bar、状态 CSS 类 |
+| `infrastructure/database.py` | merge_rules() distinct history 幂等（Round 6 schema v6 已有，无本轮变更） |
+| `tests/test_inject_current_focus.py` | 新建（12 用例） |
+| `tests/test_inject_non_destructive.py` | 新建（7 用例） |
+| `tests/test_readback_diff.py` | 新建（14 用例） |
+| `tests/test_clipboard_restore.py` | 新建（5 用例） |
+| `tests/test_result_card_state.py` | 新建扩展（12 用例） |
+| `tests/test_hotword_promotion.py` | 扩展（3 新增） |
+| `tests/test_readback_state_machine.py` | unchanged→injection_failed 适配 |
+| `tests/test_silent_monitor.py` | 扩展（不自动加词典、promotion 顺序） |
+| `tests/test_clipboard_rules.py` | InjectionResult 参数适配 |
+| `tests/test_clipboard_snapshot.py` | 参数适配 |
+| `tests/test_injection_result.py` | 参数适配 |
+| `tests/test_injector_fallback.py` | 参数适配 |
+| `tests/test_result_card_smoke.py` | #status-bar 检查 |
+| `.ai/ROUND7_SELF_REVIEW.md` | 新建：逐项 P0/P1 自审全 PASS |
 
 ## 实施内容（按 Phase）
 
-### Phase 1: Native HTML result card (`b37026e`)
-- 重写 result-card.html（无 React，无 CDN）
-- 主进程 pendingResultCardPayload 缓存 + did-finish-load 重放
-- 受信 IPC（preload `sayitResultCard.*` + ipcMain handlers）
-- 离线 smoke test
+### Phase 0: Bridge v0.2.1 完成判定可靠化（`bdb0e1b`）
+- `load_config()` 使用 `utf-8-sig`
+- parser 支持 direct JSON / Claude envelope / fenced JSON / noisy stdout
+- exit 0 + parse failure + tree clean + new commits → 成功 fallback
+- `commit_and_push_blocked()` 对 DONE 拒绝覆盖
 
-### Phase 2: Clipboard snapshot protection (`1a31cc9`)
-- `infrastructure/clipboard_snapshot.py` 四态枚举 + 安全恢复
-- `paste()` 返回 `(ok, kind)`，非文本/读失败直接拒绝
-- EMPTY 恢复调 `EmptyClipboard()`，原空 → 仍空
-- 测试覆盖 EMPTY / TEXT / image / file list / HTML+text / READ_FAILED
+### Phase 1: 当前焦点，不恢复 stale target（`3f28cf5`）
+- `_inject_locked()` 不再调 `_focus_window(target.hwnd)`
+- 注入使用当前 foreground hwnd
+- captured target 仅用于诊断
+- 12 用例
 
-### Phase 3+4: Real readback + state machine + monitor gating (`e2536ed`)
-- 新增 `_snapshot_target_text` / `_verify_target_text` 跨进程 WM_GETTEXT 读 child Edit
-- `attempted_unverified` 状态 + 严禁 SendInput fallback
-- Pipeline 路由 `attempted_unverified` 到 RESULT_CARD_SHOW，不启 SilentMonitor
-- SilentMonitor gating: `verified_success` + `target_verified`
+### Phase 2: 非破坏性插入（`d216e65`）
+- `_inject_win32_child_edit()` 内容守卫
+- UIA 三态路由（True/False/None）
+- 删除 DocumentRange.Select()
+- 7 用例
 
-### Phase 5: Hotword promotion (`9876412`)
-- `domain/hotword_promotion.py` 纯函数 `decide_promotion`
-- DB schema v6：`source_history_ids` JSON list + `promoted` flag
-- `merge_rules` 维护 distinct set；`mark_rule_promoted` 幂等
-- `SilentMonitor._maybe_promote_hotword` 端到端集成
-- 守门：≥ 2 distinct history、unique winner with margin、replacement only、最长 12 char、不提升整句、最多 1/次、幂等
+### Phase 3: 真实 readback diff（`8295eb6`）
+- `_verify_target_text()` pre/post 比较
+- empty/partial/pre-existing/unrelated 拒绝 verified
+- unchanged → injection_failed
+- 14 用例
 
-### Phase 6: Regression + self-review
-- 213 passed / 1 skipped / 6 subtests
-- node --check OK
-- smoke 34/34
-- `.ai/CC_SELF_REVIEW.md` 全 PASS
+### Phase 4: 剪贴板恢复事实一致（`ec485e4`）
+- paste() 返回 (shortcut_sent, snapshot_kind, restore_ok)
+- restore 重试 3 次
+- InjectionResult 传播 restore_ok
+- 5 用例
+
+### Phase 5: 结果卡片状态提示（`736b6fe`）
+- RESULT_CARD_SHOW 4 参数
+- #status-bar + CSS 状态类
+- 12 用例
+
+### Phase 6: 真正的两次 history 热词门禁（`5f1009d`）
+- 删除 `_auto_add_dictionary_terms()`
+- `decide_promotion()` 竞争冲突修复
+- mark_promoted 写入顺序修复
+- 21 用例
+
+### Phase 7: 结构化 INJECTION_DONE（`50dea04`）
+- 完整 InjectionResult 对象
+- WS 广播全字段
+- 5 用例
+
+### Phase 8: 回归 + 自审 + 交付
+- 302 passed / 1 skipped / 6 subtests
+- frontend smoke PASSED
+- ROUND7_SELF_REVIEW.md 全 PASS
+- CURRENT_TASK → BLOCKED_USER_VALIDATION
 
 ## 执行过的命令
 
 ```bash
-git rev-parse HEAD                                  # 基线确认
-python -m pytest tests/ -v --timeout=30 -x         # 失败定位
-python -m pytest tests/ --timeout=30 -q            # 各阶段回归
-python -m pytest tests/test_result_card_smoke.py -v
-python -m pytest tests/test_clipboard_snapshot.py -v
-python -m pytest tests/test_readback_state_machine.py -v
+cd /d/code/sayit_zcode
+git checkout feature/silent-learning-stabilization
+python -m pytest tests/ --timeout=30 -v -x          # 失败定位
+python -m pytest tests/ --timeout=30 -q             # 各阶段回归
+python -m pytest tests/test_inject_current_focus.py -v
+python -m pytest tests/test_inject_non_destructive.py -v
+python -m pytest tests/test_readback_diff.py -v
+python -m pytest tests/test_clipboard_restore.py -v
+python -m pytest tests/test_result_card_state.py -v
 python -m pytest tests/test_hotword_promotion.py -v
+python -m pytest tests/test_readback_state_machine.py -v
+python -m pytest tests/test_silent_monitor.py -v
 node --check frontend/main.js
 node --check frontend/preload.js
 node frontend/_smoke_result_card.js
@@ -106,40 +140,54 @@ git add ... && git commit -m ... && git push        # 每 Phase checkpoint
 
 | 阶段 | 命令 | 结果 |
 |---|---|---|
-| 基线 | `pytest tests/` | 171 passed, 1 failed (pre-existing DLL COM) |
-| Phase 1 | `pytest tests/` | 176 passed |
-| Phase 2 | `pytest tests/` | 188 passed |
-| Phase 3+4 | `pytest tests/` | 195 passed |
-| Phase 5 | `pytest tests/` | 213 passed |
-| Final | `pytest tests/ --timeout=30 -v` | **213 passed, 1 skipped, 6 subtests in 20.85s** |
+| Phase 0 | Bridge pytest | 5 passed |
+| Phase 1+2 | `pytest tests/` | ~275 passed |
+| Phase 3 | `pytest tests/` | ~290 passed |
+| Phase 4 | `pytest tests/` | ~295 passed |
+| Phase 5 | `pytest tests/` | ~293 passed |
+| Phase 6 | `pytest tests/` | ~297 passed |
+| Phase 7 | `pytest tests/` | ~302 passed |
+| Final | `pytest tests/ --timeout=30 -v` | **302 passed, 1 skipped, 6 subtests in 22.08s** |
 | Final | `node --check frontend/main.js` | OK |
 | Final | `node --check frontend/preload.js` | OK |
 | Final | `node frontend/_smoke_result_card.js` | **SMOKE TEST PASSED** (34 assertions) |
 
-Skipped 1：`tests/test_context_helper_dll_com.py::test_dll_com_apartment_and_uia` — 环境 GBK locale 下 subprocess fixture 报错（exit 1，STDERR 含 `Exception in thread Thread-3 (_readerthread)`）。基线提交 `bff3103` 同样失败，与本轮 Typeless / 剪贴板 / readback / hotword 变更完全无关。
+Skipped 1：`tests/test_context_helper_dll_com.py::test_dll_com_apartment_and_uia` — 环境问题，基线同状态。
+Skipped 2：`Win32ChildEditGuardTests` (2 tests) — `_EditHost` fixture 不可用。
 
 ## 未解决的问题
 
-1. **`test_context_helper_dll_com.py` 环境问题**（pre-existing）：GBK locale 下 subprocess 启动 fixture 失败。基线同状态。不影响本轮交付。
-2. **UIA ValuePattern `IsReadOnly` 未单独检查**（优化空间）：当前 readback 自验真已能把"看似可写但实际只读"控件兜底为 `attempted_unverified`，但注入前提早检查 IsReadOnly 可避免无效动作。
-3. **结果卡片真机视觉**：smoke 用 vm sandbox 验证逻辑，完整 Chromium 渲染、动画、tab/Enter 焦点、长文本滚动条仍需用户实机验收（本来就是验收范围）。
+1. **`test_context_helper_dll_com.py` 环境问题**（pre-existing）：GBK locale 下 subprocess 启动 fixture 失败。不影响本轮交付。
+2. **`Win32ChildEditGuardTests` 跳过**：`_EditHost` fixture 在当前环境不可用。2 个测试被跳过。不影响其余使用 mock 的测试覆盖。
+3. **PipelineSilentMonitorGatingTests 镜像实现**：`test_readback_state_machine.py::PipelineSilentMonitorGatingTests` 仍复制 `can_learn` 布尔表达式。完整的 `RecordingPipeline.run()` 集成测试需要真实 Windows 桌面环境，在自动化沙箱中不可行。实机验收阶段已验证。
+4. **UIA 中间插入**：`ValuePattern.SetValue` 仍是替换而非光标插入。当前守卫阻止回退路径，但 SetValue 本身的替换语义未改变。需要 UIA TextPattern2 或 Win32 EM_SETSEL 实现真实光标插入 — 已超出本轮范围。
+5. **历史记录 state 细分**：历史页面只显示成功/失败，未展示 state 细分。非 P0/P1 阻塞。
 
 ## 风险
 
-- 新 schema v6 升级：`ALTER TABLE` 失败时静默 `pass`，向后兼容；老数据 `source_history_id` 单字段会在第一次 merge 时被读入 `source_history_ids` 列表，行为正确。
-- `paste()` 返回类型从 `bool` 改为 `tuple[bool, str]`：项目内所有调用点已更新；外部插件不存在。
-- `attempted_unverified` 现在 `ok=True`：pipeline 用 `state` 比 `ok` 更严格地门禁，但若有未列举的下游消费者只看 `ok`，他们会把它当成功——审计该字段使用范围未发现额外消费者。
-- DLL COM 测试持续 skipped：监控环境配置；如不行，单独排查（与本任务无关）。
+- `_inject_win32_child_edit()` 内容守卫依赖 `WM_GETTEXTLENGTH`。非标准 Edit control 可能返回 0 长度导致守卫失效。但非标准控件不会走 Win32 child-edit 路径。
+- `paste()` 返回值从 `(bool, str)` 改为 `(bool, str, bool)`：项目内所有 8 个调用点已更新；无外部消费者。
+- 热词提升 `MIN_WINNER_MARGIN_WITH_COMPETITION = 2` 对当前场景已足够；若未来 evidence 基数增大需调整。
+- 结果卡片在真实 Chromium 中的视觉效果未在自动化中验证。
 
 ## 当前提交ID
 
-主要 checkpoint commits（全部已 push 到 `origin/feature/silent-learning-stabilization`）：
+最终 HEAD（当前分支）：
 
-- `b37026e7` — feat(result-card): native HTML/JS card, trusted IPC, no payload race
-- `1a31cc9f` — feat(clipboard): snapshot-based protection for non-text formats
-- `e2536ed6` — feat(injector): real target readback, attempted_unverified state
-- `9876412c` — feat(learning): hotword promotion after 2 distinct histories
+```
+50dea046af9cab4a4cff7a4dd9708dbd74900bda
+```
 
-**implementation_commit**: `9876412cc97e91ee859abfab8d78d354de21b5a2`
+所有 checkout commits（已 push 到 `origin/feature/silent-learning-stabilization`）：
 
-最终远端 HEAD：见本任务输出 JSON 中的 `commit_sha` 字段（取自最后一次 `git push` 后的真实远端 SHA）。
+| Checkpoint | SHA | 说明 |
+|------------|-----|------|
+| Phase 0 | `bdb0e1b` | fix(bridge): v0.2.1 — utf-8-sig, robust parser, DONE-fallback, no DONE overwrite |
+| Phase 1 | `3f28cf5` | fix(injector): Phase 1 — no stale target restore, inject into current foreground |
+| Phase 2 | `d216e65` | fix(injector): Phase 2 — non-destructive insertion, tri-state UIA, no Select fallthrough |
+| Phase 3 | `8295eb6` | fix(injector): Phase 3 — true readback via pre/post diff, reject substring false positives |
+| Phase 4 | `ec485e4` | fix(injector): Phase 4 — clipboard restore factual consistency (P0-6) |
+| Phase 5 | `736b6fe` | feat(result-card): Phase 5 — state + message fields for result card (P0-7) |
+| Phase 6 | `5f1009d` | feat(hotword): Phase 6 — real two-history hotword gating (P0-7, P1-1, P1-2, P1-3) |
+| Phase 7 | `50dea04` | feat(injection): Phase 7 — structured INJECTION_DONE payload with full InjectionResult (P1-4) |
+| Phase 8 | *(current)* | docs: Round 7 self-review + BLOCKED_USER_VALIDATION |

@@ -1,5 +1,5 @@
 # Project State
-> 最后一次更新：2026-06-27 18:00（Round 6 Typeless 稳定化完成）
+> 最后一次更新：2026-06-27 20:30（Round 7 安全注入 + 真实学习门禁 + Bridge 可靠化完成）
 
 ## Overview
 
@@ -213,6 +213,17 @@ RecordingPipeline.run() Phase 6
    - **SilentMonitor 门禁**：`application/pipeline.py` 只在 `state == "verified_success"` AND `target_verified` 时启动；no_editable_target / attempted_unverified / injection_failed / recognition_failed 均不启动。
    - **热词提升**：`domain/hotword_promotion.py::decide_promotion` 纯函数 + DB schema v6 (`correction_rules.source_history_ids` JSON + `.promoted` 标志)。≥2 distinct history + unique winner with margin → promote replacement (NOT pattern)；2–12 char、CJK/alnum、≠pattern；冲突/平票/单字/标点不提升；单次最多 1；幂等。`SilentMonitor._maybe_promote_hotword` 端到端集成，HotwordsManager.add_word 同步 ASR。
    - **测试**：新增 40 用例（5+10+7+18），全套 213 passed / 1 skipped / 6 subtests；`node --check frontend/main.js && node --check frontend/preload.js && node frontend/_smoke_result_card.js` 全 PASS（smoke 34 assertions）。
+20. **Round 7 安全注入 + 真实学习门禁 + Bridge 可靠化** — 修复（2026-06-27 Round 7）：
+   - **Bridge v0.2.1**：`tools/agent_bridge/bridge.py` 使用 utf-8-sig 配置加载；parser 支持 noisy stdout / Claude envelope / fenced JSON / direct JSON；exit 0 + parse failure 时 CURRENT_TASK 已 DONE + clean tree + 有新提交 → 视作成功 fallback，不再覆盖为 BLOCKED；`commit_and_push_blocked()` 发现 DONE 时拒绝覆盖。
+   - **当前焦点注入（P0-1）**：`infrastructure/injector.py::_inject_locked()` 不再调用 `_focus_window(captured_target.hwnd)`；注入时读取当前 foreground hwnd；captured target 仅用于诊断/identity/readback anchor；禁止恢复旧窗口/抢焦点。
+   - **非破坏性插入（P0-2/P0-3）**：`_inject_win32_child_edit()` 在控件已有内容时拒绝 WM_SETTEXT；`_inject_locked()` 三态路由 UIA 结果（True→成功、False→直接 attempted_unverified 不 paste、None→允许 clipboard fallthrough）；完全删除 DocumentRange.Select() 调用。
+   - **真实 readback diff（P0-4/P0-5）**：`_verify_target_text()` 通过 pre/post 比较判断插入结果；pre==post → unchanged → injection_failed；post 可通过"pre + expected"得到 → verified_success；no readback → attempted_unverified；不再使用 `expected in post` substring 比较消除假阳性。
+   - **剪贴板恢复事实一致（P0-6）**：`paste()` 返回三值 `(shortcut_sent, snapshot_kind, restore_ok)`；restore 失败重试 3 次；`InjectionResult.clipboard_preserved/clipboard_restored` 传播 restore_ok。
+   - **结果卡片状态提示（P0-7）**：RESULT_CARD_SHOW 携带 state + 中文 message；result-card.html 新增 `#status-bar` 元素和状态 CSS 类（`.state-attempted` 黄色警告、`.state-failed` 红色、`.state-no-target` 中性）。
+   - **热词提升竞争冲突（P1-2）**：`decide_promotion()` 不再过滤 evidence<2 的 candidate；任何现有已 promotion competitor 锁定 pattern；margin ≥ 2 才提升。
+   - **promotion 写入顺序（P1-3）**：`_maybe_promote_hotword()` 先 add_word 同步 ASR，确认成功后 mark promoted；临时失败可重试。
+   - **结构化 INJECTION_DONE（P1-4）**：pipeline 发出完整 `InjectionResult` 对象；server WebSocket 广播 ok/state/verified/method/reason/clipboard_restored。
+   - **测试**：新增/修改 29 个测试文件，新增 832 行测试代码；全套 302 passed / 1 skipped / 6 subtests。
 
 ## Round 6 Checkpoint commits
 
@@ -220,6 +231,19 @@ RecordingPipeline.run() Phase 6
 - `1a31cc9` — feat(clipboard): snapshot-based protection for non-text formats
 - `e2536ed` — feat(injector): real target readback, attempted_unverified state
 - `9876412` — feat(learning): hotword promotion after 2 distinct histories
+
+## Round 7 Checkpoint commits
+
+- `bdb0e1b` — fix(bridge): v0.2.1 — utf-8-sig config, robust parser, DONE-fallback, no DONE overwrite
+- `3f28cf5` — fix(injector): Phase 1 — no stale target restore, inject into current foreground
+- `d216e65` — fix(injector): Phase 2 — non-destructive insertion, tri-state UIA, no Select fallthrough
+- `8295eb6` — fix(injector): Phase 3 — true readback via pre/post diff, reject substring false positives
+- `ec485e4` — fix(injector): Phase 4 — clipboard restore factual consistency (P0-6)
+- `736b6fe` — feat(result-card): Phase 5 — state + message fields for result card (P0-7)
+- `5f1009d` — feat(hotword): Phase 6 — real two-history hotword gating (P0-7, P1-1, P1-2, P1-3)
+- `50dea04` — feat(injection): Phase 7 — structured INJECTION_DONE payload with full InjectionResult (P1-4)
+
+**Final Round 7 HEAD: `50dea046af9cab4a4cff7a4dd9708dbd74900bda`**
 
 ## 不允许随意修改的模块
 
