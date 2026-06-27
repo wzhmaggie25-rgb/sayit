@@ -278,6 +278,17 @@ class RecordingPipeline:
                 history_pasted = True
                 history_status = "completed"
                 history_error = ""
+            elif inject_result.state == "attempted_unverified":
+                # Paste/SendInput shortcut dispatched but target readback was
+                # not possible. We must NOT retry — risks duplicate text in
+                # a target that already accepted the first attempt. Show a
+                # neutral result card so the user can verify manually.
+                ok = False  # gate SilentMonitor off
+                self._eb.emit(Events.INJECTION_DONE, False)
+                self._eb.emit(Events.RESULT_CARD_SHOW, final_text, locally_refined_text)
+                history_pasted = False
+                history_status = "completed_unverified"
+                history_error = inject_result.reason or "attempted_unverified"
             elif inject_result.state == "no_editable_target":
                 ok = True  # Not a failure — user needs result card
                 self._eb.emit(Events.INJECTION_DONE, False)  # False means "not in target"
@@ -317,20 +328,33 @@ class RecordingPipeline:
             )
 
             if not ok or inject_result is None:
-                if inject_result is not None and inject_result.state == "no_editable_target":
-                    # no_editable_target: save history but skip error + done via fallthrough
+                if inject_result is not None and inject_result.state in (
+                        "no_editable_target", "attempted_unverified"):
+                    # no_editable_target / attempted_unverified: save history,
+                    # show result card, but skip SilentMonitor.
                     pass
                 else:
                     return  # already emitted PIPELINE_ERROR
 
             # ── Phase 6: Silent monitor ─────────────────────────────
+            # Per ROUND5_CODE_REVIEW.md P0-7: only verified_success with a
+            # target_verified readback may start the SilentMonitor. Other
+            # states (no_editable_target, attempted_unverified, injection_failed,
+            # recognition_failed) must NEVER engage learning on an unrelated
+            # window or stale hwnd.
             silent_learning_enabled = True
             try:
                 from infrastructure.config_store import ConfigStore
                 silent_learning_enabled = ConfigStore().get("silent_learning", True)
             except Exception:
                 pass
-            if ok and silent_learning_enabled and injector.last_target_hwnd:
+            can_learn = (
+                inject_result is not None
+                and inject_result.state == "verified_success"
+                and inject_result.target_verified
+                and injector.last_target_hwnd
+            )
+            if can_learn and silent_learning_enabled:
                 try:
                     silent_monitor.start(
                         history_id=str(history_id),

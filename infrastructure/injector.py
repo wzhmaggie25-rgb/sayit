@@ -596,6 +596,64 @@ class Injector:
             for name, vk in vks.items()
         }
 
+    def _snapshot_target_text(self, hwnd: int) -> tuple[bool, str]:
+        """Capture the current text from a Win32 child Edit control.
+
+        Returns ``(ok, text)``. ``ok=False`` means readback is not possible
+        for this target — caller should treat the injection as
+        ``attempted_unverified`` rather than ``injection_failed``.
+        """
+        if not hwnd:
+            return False, ""
+        try:
+            child = self._find_child_edit(hwnd) or hwnd
+        except Exception:
+            child = hwnd
+        try:
+            WM_GETTEXTLENGTH = 0x000E
+            WM_GETTEXT = 0x000D
+            user32 = ctypes.windll.user32
+            send_proto = ctypes.WINFUNCTYPE(
+                ctypes.c_ssize_t,
+                wintypes.HWND, wintypes.UINT,
+                wintypes.WPARAM, wintypes.LPARAM,
+            )
+            send = send_proto(("SendMessageW", user32))
+            length = int(send(child, WM_GETTEXTLENGTH, 0, 0))
+            if length < 0:
+                return False, ""
+            if length == 0:
+                return True, ""  # zero-length readback is still valid
+            buf = ctypes.create_unicode_buffer(length + 1)
+            send(child, WM_GETTEXT, length + 1,
+                 ctypes.cast(buf, ctypes.c_void_p).value or 0)
+            return True, buf.value or ""
+        except Exception:
+            return False, ""
+
+    def _verify_target_text(self, hwnd: int, expected: str,
+                             pre_text: str | None) -> str:
+        """Decide post-paste readback outcome.
+
+        Returns one of:
+          "verified"     — expected appears in post; safe to mark verified.
+          "unchanged"    — target text did not change at all (paste was
+                           confirmed-rejected). Caller should map to
+                           ``injection_failed``.
+          "no_readback"  — readback failed or returned ambiguous data.
+                           Caller maps to ``attempted_unverified``.
+        """
+        ok, post = self._snapshot_target_text(hwnd)
+        if not ok:
+            return "no_readback"
+        if pre_text is None:
+            return "verified" if expected and expected in post else "no_readback"
+        if post == pre_text:
+            return "unchanged"
+        if expected and expected in post:
+            return "verified"
+        return "no_readback"
+
     def inject(self, text: str, target: InjectionTarget | None = None) -> InjectionResult:
         """4-level waterfall injection.
 
@@ -641,6 +699,28 @@ class Injector:
                                     clipboard_restored=True,
                                     target_verified=verified,
                                     target_restored=target_restored)
+
+        def _attempted_unverified(method: str, reason: str = "") -> InjectionResult:
+            """Action dispatched but target readback was not possible.
+
+            Per ROUND5_CODE_REVIEW.md P0-3: the Ctrl+V/SendInput shortcut
+            was sent but we cannot prove the text reached the target. We
+            MUST NOT then try a second injection path — that risks
+            duplicating the text in a target that did accept the first
+            attempt. Clipboard is preserved; SilentMonitor must skip this
+            history.
+            """
+            return InjectionResult(
+                ok=True,  # treated as "no error" for pipeline flow purposes;
+                          # callers check `state` to gate SilentMonitor.
+                state="attempted_unverified",
+                verified=False,
+                method=method,
+                clipboard_preserved=True,
+                clipboard_restored=True,
+                target_verified=False,
+                reason=reason or "shortcut_sent_no_readback",
+            )
 
         self._release_modifiers(reason="inject_start")
         logger.info(
@@ -757,7 +837,17 @@ class Injector:
         if strategy == "uia" and cls not in UIA_UNRELIABLE_CLASSES:
             if self._inject_uia(text):
                 logger.info("[INJECT-POST] ok via=UIA")
+                # UIA path already does its own readback in _verify_uia_readback;
+                # if _inject_uia returned True we trust it as verified.
                 return _ok("uia", verified=True, target_restored=target_restored)
+
+        # Pre-paste target snapshot — used to differentiate
+        # verified / unchanged / no_readback after a paste shortcut.
+        readback_hwnd = (target.hwnd if target and target.hwnd else hwnd) or 0
+        pre_ok, pre_text = self._snapshot_target_text(readback_hwnd)
+        logger.info(
+            "[INJECT-READBACK] pre-snapshot hwnd=%s ok=%s len=%d",
+            readback_hwnd, pre_ok, len(pre_text) if pre_ok else -1)
 
         # Layer 2: Clipboard paste
         # New contract: paste() returns (paste_sent, snapshot_kind). It
@@ -769,10 +859,26 @@ class Injector:
             if paste_sent:
                 if is_terminal:
                     self._release_modifiers(force=True, reason="terminal_after_paste_ok")
-                logger.info("[INJECT-POST] ok via=Clipboard snapshot=%s", snap_kind)
-                # NOTE: this still claims verified=True for backwards
-                # compatibility; Phase 3 wires real target readback here.
-                return _ok("clipboard", verified=True, target_restored=target_restored)
+                # Readback to decide verified / unchanged / no_readback.
+                verdict = self._verify_target_text(
+                    readback_hwnd, text, pre_text if pre_ok else None)
+                logger.info(
+                    "[INJECT-POST] clipboard paste sent verdict=%s snapshot=%s",
+                    verdict, snap_kind)
+                if verdict == "verified":
+                    return _ok("clipboard", verified=True,
+                               target_restored=target_restored)
+                if verdict == "unchanged":
+                    # Paste shortcut sent but target text did not change —
+                    # the consumer refused our paste (admin window / IME /
+                    # UIPI / disabled control). DO NOT try SendInput on top:
+                    # we have no proof the paste was truly rejected vs
+                    # rendered elsewhere; chase will risk duplicate text.
+                    return _attempted_unverified(
+                        "clipboard", reason="paste_target_unchanged")
+                # no_readback — cannot prove anything either way.
+                return _attempted_unverified(
+                    "clipboard", reason="paste_no_readback")
             logger.info(
                 "[INJECT-PATH] clipboard skipped/failed snapshot=%s — "
                 "falling through", snap_kind)
@@ -786,8 +892,20 @@ class Injector:
             self._release_modifiers(force=True, reason="terminal_after_paste_failed")
             return _fail("terminal_clipboard_failed")
         if self._direct_input(text):
-            logger.info("[INJECT-POST] ok via=SendInput")
-            return _ok("sendinput", target_restored=target_restored)
+            verdict = self._verify_target_text(
+                readback_hwnd, text, pre_text if pre_ok else None)
+            logger.info("[INJECT-POST] sendinput verdict=%s", verdict)
+            if verdict == "verified":
+                return _ok("sendinput", verified=True,
+                           target_restored=target_restored)
+            if verdict == "unchanged":
+                # SendInput dispatched but target didn't budge — clear
+                # failure (control disabled, window inactive, etc.).
+                return _fail("sendinput_target_unchanged")
+            # no_readback after SendInput: text may be in the target but we
+            # cannot prove it. Don't fail (that would imply auto-copy under
+            # legacy behavior); don't retry either.
+            return _attempted_unverified("sendinput", reason="sendinput_no_readback")
 
         logger.info("[INJECT-POST] FAILED all=3")
         return _fail("all_three_layers_failed")

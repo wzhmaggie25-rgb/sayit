@@ -89,7 +89,8 @@ class InjectionResultTests(unittest.TestCase):
 
     def test_state_values_exist(self):
         """Known state values are recognized."""
-        valid_states = {"verified_success", "no_editable_target",
+        valid_states = {"verified_success", "attempted_unverified",
+                        "no_editable_target",
                         "injection_failed", "recognition_failed"}
         for s in valid_states:
             r = InjectionResult(ok=(s == "verified_success"), state=s)
@@ -241,14 +242,18 @@ class InjectorResultTests(unittest.TestCase):
             result = self.inj.inject("test text")
         self.assertIsInstance(result, InjectionResult)
         self.assertIn(result.state,
-                      {"verified_success", "no_editable_target",
-                       "injection_failed", "recognition_failed"})
+                      {"verified_success", "attempted_unverified",
+                       "no_editable_target", "injection_failed",
+                       "recognition_failed"})
 
     def test_inject_ok_truthy_with_state(self):
-        """When injection succeeds via clipboard, result has verified_success state."""
+        """When injection succeeds via clipboard with readback, result.state is verified_success."""
         from infrastructure import clipboard_snapshot as snapmod
+        # Make readback report the expected text in the post-paste snapshot.
         with patch.object(self.inj, "_direct_input", return_value=True), \
              patch.object(self.inj, "_lock", MagicMock()), \
+             patch.object(self.inj, "_snapshot_target_text",
+                          side_effect=[(True, ""), (True, "hello")]), \
              patch("infrastructure.clipboard_snapshot.read_snapshot",
                    return_value=snapmod.ClipboardSnapshot(kind="EMPTY")), \
              patch("infrastructure.clipboard_snapshot.restore_snapshot",
