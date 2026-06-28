@@ -96,6 +96,10 @@ class Events:
     # Payload: stage name (e.g. "transcribing", "injecting") for UI hint.
     TOGGLE_IGNORED = "toggle:ignored"            # stage: str
 
+    # Lightweight hint — for attempted_unverified or injection_failed with dispatch.
+    # Shows a brief toast on the float bar instead of a large result card.
+    LIGHT_HINT = "result_card:light-hint"        # message: str
+
     # Stop ACK — fired by orchestrator the moment a second RAlt press is
     # accepted as a stop request, BEFORE audio_capture.stop() returns or the
     # downstream ASR/AI/inject phases complete. UI subscribers should treat

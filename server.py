@@ -114,6 +114,7 @@ def wire_events():
         "state": s, "message": m,
     }))
     eb.on(Events.RESULT_CARD_CLOSE, lambda: _event_queue.put({"event": "result_card_close"}))
+    eb.on(Events.LIGHT_HINT, lambda m: _event_queue.put({"event": "light_hint", "message": str(m)}))
     eb.on(Events.SILENT_LEARNED, lambda c: _event_queue.put({"event": "silent_learned", "count": c}))
     eb.on(Events.AI_ERROR, lambda m: _event_queue.put({"event": "ai_error", "message": str(m)}))
     eb.on(Events.UIPI_WARNING, lambda: _event_queue.put({"event": "uipi_warning"}))

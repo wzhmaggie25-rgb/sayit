@@ -493,6 +493,11 @@ function connectWS() {
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnError)sayitOnError(' + JSON.stringify(evt.message) + ')');
           break;
+        case 'light_hint':
+          // Lightweight hint — show on float bar, not large result card
+          keepFloatOnTop();
+          pushToFloat('if(window.sayitOnLightHint)sayitOnLightHint(' + JSON.stringify(evt.message || '') + ')');
+          break;
         case 'tick':
           pushToFloat('if(window.sayitOnTick)sayitOnTick(' + evt.seconds + ')');
           break;

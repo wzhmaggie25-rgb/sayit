@@ -53,6 +53,9 @@ class InjectionResult:
         target_verified: Whether readback confirmed text in target.
         target_restored: Whether the original target window was restored
                          to foreground (may be False for child-edit injection).
+        injection_dispatched: Whether any inject action was actually
+                             dispatched (paste/SendInput/UIA/Win32 selection).
+                             Pure no_editable_target returns False.
     """
     ok: bool = False
     state: str = "recognition_failed"
@@ -63,6 +66,7 @@ class InjectionResult:
     clipboard_restored: bool = False
     target_verified: bool = False
     target_restored: bool = False
+    injection_dispatched: bool = False
 
     def __bool__(self) -> bool:
         """Backward compat: InjectionResult can be used as bool."""
@@ -918,6 +922,7 @@ class Injector:
             return InjectionResult(ok=False, state="injection_failed",
                                     clipboard_preserved=final_preserved,
                                     clipboard_restored=final_restored,
+                                    injection_dispatched=True,
                                     reason=reason or "all_injection_paths_failed")
 
         def _ok(method: str, verified: bool = False, target_restored: bool = False,
@@ -927,7 +932,8 @@ class Injector:
                                     clipboard_preserved=restore_ok,
                                     clipboard_restored=restore_ok,
                                     target_verified=verified,
-                                    target_restored=target_restored)
+                                    target_restored=target_restored,
+                                    injection_dispatched=True)
 
         def _attempted_unverified(method: str, reason: str = "", restore_ok: bool = True) -> InjectionResult:
             """Action dispatched but target readback was not possible.
@@ -948,6 +954,7 @@ class Injector:
                 clipboard_preserved=restore_ok,
                 clipboard_restored=restore_ok,
                 target_verified=False,
+                injection_dispatched=True,
                 reason=reason or "shortcut_sent_no_readback",
             )
 
