@@ -115,8 +115,10 @@ function Float(){
     window.sayitOnError=()=>{setErrType('');d('ERROR')};
     window.sayitOnAiError=()=>{setErrType('ai');d('ERROR')};
     window.sayitOnUipiWarn=()=>{setUipiWarn(true)};
-    window.sayitOnLightHint=(msg)=>{setHintMsg(msg||'');setTimeout(()=>setHintMsg(''),3000)};
-    window.sayitOnAiDegraded=(msg)=>{setHintMsg(msg||'');setTimeout(()=>setHintMsg(''),5000)};
+window.sayitOnLightHint=(msg)=>{setHintMsg(msg||'');setTimeout(()=>setHintMsg(''),3000)};
+window.sayitOnAiDegraded=(msg)=>{setHintMsg(msg||'');setTimeout(()=>setHintMsg(''),5000)};
+window.sayitOnBackendError=(msg)=>{setHintMsg(msg||'');setTimeout(()=>setHintMsg(''),8000)};
+window.sayitOnBackendRestored=()=>{setHintMsg('后台已恢复');setTimeout(()=>setHintMsg(''),3000)};
     window.__sayitDismiss=()=>{d('_RESET');window.sayit&&window.sayit.clearElementPositions()};
     window.sayitOnRmsLevel=v=>sv(v);window.sayitOnTick=()=>{};
     window.sayitOnAsrResult=(t,eng)=>{setAsrEngine(eng||'')};

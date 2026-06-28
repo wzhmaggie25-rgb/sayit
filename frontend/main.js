@@ -17,6 +17,22 @@ let pendingSessionId = '';            // session id for the pending payload — 
 let activeSessionId = '';             // current recording session — stale events are ignored
 let autoCloseTimer = null;            // result-card auto-close timer handle
 
+// ── Backend supervisor (Phase 6) ─────────────────
+const BACKEND_SUPERVISOR = {
+  // Did the user intentionally quit? Set in before-quit, prevents auto-restart.
+  userInitiatedExit: false,
+  // Has the auto-restart already been attempted? Only one restart per crash.
+  restartAttempted: false,
+  // The exit code from the last backend exit (null if still running).
+  lastExitCode: null,
+  // Monotonic timestamp of the last exit (for backoff calculation).
+  lastExitTime: 0,
+  // Minimum delay before restart (ms) — avoids crash-loop busy-spin.
+  restartBackoffMs: 2000,
+  // Maximum delay — caps the backoff.
+  maxBackoffMs: 10000,
+};
+
 // ── Result card geometry constants (Phase 1) ─────────
 const CARD_WIDTH = 360;
 const CARD_MIN_HEIGHT = 150;
@@ -626,29 +642,80 @@ async function waitForServer(retries=20) {
 
 app.whenReady().then(async () => {
   if (process.env.SAYIT_SKIP_BACKEND !== '1') {
-    const backend = getBackendLaunch();
-    console.log('[main] spawning backend:', backend.command, backend.args.join(' '));
-    backendProcess = spawn(backend.command, backend.args, {
-      cwd: backend.cwd,
-      stdio: 'pipe',
-      windowsHide: app.isPackaged,
-    });
-    backendProcess.stdout.on('data', d => process.stdout.write('[backend] ' + d.toString()));
-    backendProcess.stderr.on('data', d => process.stderr.write('[backend-err] ' + d.toString()));
-    backendProcess.on('exit', (code) => {
-      console.warn('[main] backend exited with code', code);
-      backendProcess = null;
-    });
-    backendProcess.on('error', (err) => {
-      console.error('[main] backend spawn error:', err.message);
-      backendProcess = null;
-    });
+    spawnBackend();
   }
   createMainWindow();
   preCreateFloat();
   await waitForServer();
   connectWS(); poll();
 });
+
+function spawnBackend() {
+  const backend = getBackendLaunch();
+  console.log('[main] spawning backend:', backend.command, backend.args.join(' '));
+  backendProcess = spawn(backend.command, backend.args, {
+    cwd: backend.cwd,
+    stdio: 'pipe',
+    windowsHide: app.isPackaged,
+  });
+  backendProcess.stdout.on('data', d => process.stdout.write('[backend] ' + d.toString()));
+  backendProcess.stderr.on('data', d => process.stderr.write('[backend-err] ' + d.toString()));
+  backendProcess.on('exit', (code) => {
+    const now = Date.now();
+    console.warn('[main] backend exited with code', code);
+    BACKEND_SUPERVISOR.lastExitCode = code;
+    BACKEND_SUPERVISOR.lastExitTime = now;
+    backendProcess = null;
+
+    // Distinguish: user-initiated vs abnormal
+    if (BACKEND_SUPERVISOR.userInitiatedExit) {
+      console.log('[main] backend exit was user-initiated — no restart');
+      return;
+    }
+
+    // Abnormal exit — restart once
+    if (BACKEND_SUPERVISOR.restartAttempted) {
+      console.error('[main] backend crashed again after restart — giving up');
+      // Notify float to exit "thinking" mode and show error
+      pushToFloat('if(window.sayitOnBackendError)sayitOnBackendError("后台异常，SayIt 正在恢复")');
+      return;
+    }
+
+    BACKEND_SUPERVISOR.restartAttempted = true;
+    console.log('[main] backend exited abnormally — scheduling restart with backoff');
+
+    // Backoff: start at 2s, scale by time-since-last (simple linear: min 2s, max 10s)
+    const elapsedSinceLastExit = now - BACKEND_SUPERVISOR.lastExitTime;
+    const backoff = Math.min(
+      BACKEND_SUPERVISOR.maxBackoffMs,
+      Math.max(BACKEND_SUPERVISOR.restartBackoffMs, elapsedSinceLastExit * 0.5)
+    );
+    console.log('[main] restart backoff', backoff, 'ms');
+
+    // Notify float to exit "thinking" mode
+    pushToFloat('if(window.sayitOnBackendError)sayitOnBackendError("后台异常，SayIt 正在恢复")');
+
+    setTimeout(() => {
+      console.log('[main] restarting backend');
+      spawnBackend();
+      waitForServer(60).then(ok => {
+        if (ok) {
+          console.log('[main] backend restarted successfully');
+          pushToFloat('if(window.sayitOnBackendRestored)sayitOnBackendRestored()');
+          // Restore idle state — close any stale result card
+          destroyResultCard();
+          connectWS();
+        } else {
+          console.error('[main] backend restart failed — server not reachable');
+        }
+      });
+    }, backoff);
+  });
+  backendProcess.on('error', (err) => {
+    console.error('[main] backend spawn error:', err.message);
+    backendProcess = null;
+  });
+}
 app.on('second-instance', (_event, _commandLine, _workingDirectory) => {
   // User clicked shortcut again — focus existing window
   if (mainWin) {
@@ -656,8 +723,13 @@ app.on('second-instance', (_event, _commandLine, _workingDirectory) => {
     mainWin.focus();
   }
 });
-app.on('window-all-closed', () => { if (backendProcess) backendProcess.kill(); app.quit(); });
+app.on('window-all-closed', () => {
+  BACKEND_SUPERVISOR.userInitiatedExit = true;
+  if (backendProcess) backendProcess.kill();
+  app.quit();
+});
 app.on('before-quit', () => {
+  BACKEND_SUPERVISOR.userInitiatedExit = true;
   if (backendProcess) backendProcess.kill();
   // Hotkey uninstall is handled by Python backend orchestrator.stop()
 });

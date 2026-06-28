@@ -1,7 +1,69 @@
 """FastAPI server — REST API + WebSocket for Electron frontend."""
-import asyncio, json, logging, os, sys, tempfile, threading, uuid
+import asyncio, json, logging, os, sys, tempfile, threading, uuid, io
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# ── Faulthandler: write crash dumps to rotating file ───────────
+import faulthandler
+from infrastructure.paths import APP_DATA_DIR
+_CRASH_DIR = os.path.join(APP_DATA_DIR, "crashes")
+os.makedirs(_CRASH_DIR, exist_ok=True)
+# Rotating crash files: keep last 5
+_existing_crashes = sorted(
+    [os.path.join(_CRASH_DIR, f) for f in os.listdir(_CRASH_DIR) if f.startswith("crash_")],
+    key=os.path.getmtime)
+while len(_existing_crashes) >= 5:
+    try:
+        os.remove(_existing_crashes.pop(0))
+    except OSError:
+        pass
+_crash_path = os.path.join(_CRASH_DIR, f"crash_{uuid.uuid4().hex[:8]}.txt")
+try:
+    with open(_crash_path, "w") as f:
+        f.write(f"Sayit backend crash dump — started at {__import__('datetime').datetime.now()}\n")
+        f.write(f"PID: {os.getpid()}\n")
+        f.write(f"Executable: {sys.executable}\n")
+        f.write("-" * 60 + "\n")
+    faulthandler.enable(file=open(_crash_path, "a"), all_threads=True)
+except Exception:
+    pass  # faulthandler is best-effort
+
+
+def _write_crash_report(exc_info, context: str = ""):
+    """Append an unhandled exception to the rotating crash report.
+    Does NOT record user text or API keys."""
+    try:
+        import traceback
+        with open(_crash_path, "a") as f:
+            f.write(f"\n--- Unhandled exception at {__import__('datetime').datetime.now()} ---\n")
+            if context:
+                f.write(f"Context: {context}\n")
+            f.write(f"PID: {os.getpid()}\n")
+            traceback.print_exception(*exc_info, file=f)
+            f.write("-" * 60 + "\n")
+    except Exception:
+        pass
+
+
+# Global excepthook: all unhandled exceptions go to crash report
+_original_excepthook = sys.excepthook
+def _crash_excepthook(exc_type, exc_value, exc_traceback):
+    try:
+        _write_crash_report((exc_type, exc_value, exc_traceback), "sys.excepthook")
+    except Exception:
+        pass
+    if _original_excepthook:
+        _original_excepthook(exc_type, exc_value, exc_traceback)
+sys.excepthook = _crash_excepthook
+
+# Thread exception hook: daemon thread crashes
+def _thread_excepthook(args):
+    try:
+        _write_crash_report((args.exc_type, args.exc_value, args.exc_traceback),
+                            f"thread={args.thread.name}")
+    except Exception:
+        pass
+threading.excepthook = _thread_excepthook
 
 from fastapi import FastAPI, File, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -119,6 +181,50 @@ def wire_events():
     eb.on(Events.AI_ERROR, lambda m: _event_queue.put({"event": "ai_error", "message": str(m)}))
     eb.on(Events.AI_DEGRADED, lambda m: _event_queue.put({"event": "ai_degraded", "message": str(m)}))
     eb.on(Events.UIPI_WARNING, lambda: _event_queue.put({"event": "uipi_warning"}))
+
+
+# ── Diagnostic / fault injection ──────────────────
+# These endpoints exist only for testing the backend supervisor.
+# They are NEVER called in normal operation.
+
+@app.post("/api/debug/exit")
+def debug_exit(data: dict | None = None):
+    """Fault injection: exit the backend process with a given code.
+
+    Only active when SAYIT_FAULT_INJECTION=1 is set in the environment.
+    Used by backend supervisor tests to verify crash detection + restart.
+    """
+    if os.environ.get("SAYIT_FAULT_INJECTION") != "1":
+        return {"ok": False, "error": "fault injection disabled"}
+    code = (data or {}).get("code", 1)
+    # Schedule exit on a 100ms timer so the HTTP response can be sent first
+    def _die():
+        import time as _t
+        _t.sleep(0.1)
+        os._exit(int(code))
+    threading.Thread(target=_die, daemon=True).start()
+    return {"ok": True, "exit_code": code}
+
+@app.get("/api/health")
+def health():
+    """Simple health check — no auth, no heavy work. Used by Electron backend
+    supervisor to verify the process is alive and accepting requests."""
+    return {"ok": True, "pid": os.getpid()}
+
+
+# ── Crash report (for diagnostics) ─────────────────
+
+@app.get("/api/crash-report")
+def get_crash_report():
+    """Return the latest crash report content (sanitized — no user text)."""
+    try:
+        if os.path.exists(_crash_path):
+            with open(_crash_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return {"ok": True, "path": _crash_path, "content": content[:10000]}
+        return {"ok": True, "path": _crash_path, "content": ""}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # ── REST API ─────────────────────────────────────
