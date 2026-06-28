@@ -1,5 +1,5 @@
 # Project State
-> 最后一次更新：2026-06-27 23:00（Round 8 最终安全收口完成 — BLOCKED_USER_VALIDATION）
+> 最后一次更新：2026-06-28（Round 9: 运行时稳定性修复完成 — BLOCKED_USER_VALIDATION）
 
 ## Overview
 
@@ -224,6 +224,12 @@ RecordingPipeline.run() Phase 6
     - **Phase 7 (Promotion sync-only, P0-8)**：`_maybe_promote_hotword()` 仅 HotwordsManager.add_word，无 `db.add_dictionary_word` fallback。
     - **Phase 8 (IPC sender, P0-9)**：`result-card:copy-pending` 和 `result-card:close` 校验 `event.sender.id === resultCardWin.webContents.id`。
     - **Phase 9 (Regression + gates)**：修复 3 个测试适配新 editability/foreground 门控。全量 338 passed 0 fail。代码门控全部通过。ROUND8_SELF_REVIEW.md 全 PASS。
+22. **结果卡片尺寸和位置（Round 9 Phase 1）** — 修复（2026-06-28）：默认宽度 360px（范围 340-380px），动态高度 150-260px（文本区域内部滚动），锚定 float bar 真实可见区域上方（14px gap），多显示器跟随 currentDisplay。
+23. **跨 session 污染（Round 9 Phase 0+2）** — 修复（2026-06-28）：新增 `recording_session_id` 贯穿所有事件；`recording_started` 时 destroyResultCard + clear payload/timer/session；Electron 端 `activeSessionId` 过滤 stale 事件（result_card_show/close/copy_done）。
+24. **大卡片反复弹出（Round 9 Phase 3）** — 修复（2026-06-28）：严格资格策略：`show_large_result_card = state==no_editable_target AND !injection_dispatched AND !inserted_verified AND !target_is_sayit_window`；`verified_success` 不弹，`attempted_unverified` 只做条形悬浮窗轻提示。
+25. **一次 Alt 停止（Round 9 Phase 4）** — 修复（2026-06-28）：`_stop_request_latched` 标志位：hook 和 fallback 先检查后设置，第一个停止请求胜出；`RAltStopWatcher` 改为 down-edge 触发（<100ms stop ACK）；`_pre_stop_focus_hwnd` 焦点快照 + finally 恢复（IsWindow + SayIt 守卫）。
+26. **AI 超时降级（Round 9 Phase 5）** — 修复（2026-06-28）：AI deadline default 25s，clamped 15-45s；daemon thread + `queue.Queue.get(timeout=deadline)`；超时/异常 → `AI_DEGRADED` 事件 + `locally_refined_text` fallback；前端 float bar 5s toast。
+27. **Backend 崩溃监管（Round 9 Phase 6）** — 修复（2026-06-28）：faulthandler + sys.excepthook + threading.excepthook；rotating crash report（keep last 5，无用户正文）；`/api/health` liveness check；BACKEND_SUPERVISOR（exit code 区分、最多重启一次、2-10s backoff、UI 恢复通知）。
 
 ## Round 6 Checkpoint commits
 
@@ -259,6 +265,18 @@ RecordingPipeline.run() Phase 6
 
 **Final Round 8 HEAD: `e98ad195f3639592e93124ba0e8fe15a537192ca`**
 
+## Round 9 Checkpoint commits
+
+- `0b1dd32` — feat(session): Phase 0 — recording_session_id, cross-session isolation, cleanup on recording_started
+- `f69c8d9` — fix(result-card): Phase 1 — size 360px, dynamic height 150-260px, position above float bar
+- `a743bb2` — fix(session): Phase 2 — cross-session pollution prevention
+- `539d0c8` — fix(eligibility): Phase 3 — strict result card eligibility with injection_dispatched
+- `c37a4f7` — fix(stop): Phase 4 — stop_request_latched, down-edge RAlt detection, focus snapshot/restore
+- `e3da602` — feat(ai): Phase 5 — AI deadline watchdog with locally_refined_text fallback and ai_degraded event
+- `dbcb6b0` — fix(backend): Phase 6 — backend crash supervision and recovery
+
+**Final Round 9 HEAD: `dbcb6b035603bf54feb8f6edea69c95aa1a13148`**
+
 ## 不允许随意修改的模块
 
 - **热键**：`infrastructure/keyboard_helper_dll.py`、`native/context_helper/src/keyboard_helper.cpp`
@@ -276,6 +294,13 @@ RecordingPipeline.run() Phase 6
   - 新建 AI 交接机制：AGENTS.md + .ai/ 目录
 - `0d69a98` — `backup: working local version after hotkey and lifecycle fixes`
   - 稳定备份点：第二次 Alt 失灵修复、UIA COM 修复、词库事件刷新、CoInitialize/CoUninitialize 保护
+- `0b1dd32` — `feat(session): Phase 0 — recording_session_id, cross-session isolation, cleanup on recording_started`
+- `f69c8d9` — `fix(result-card): Phase 1 — size 360px, dynamic height 150-260px, position above float bar`
+- `a743bb2` — `fix(session): Phase 2 — cross-session pollution prevention`
+- `539d0c8` — `fix(eligibility): Phase 3 — strict result card eligibility with injection_dispatched`
+- `c37a4f7` — `fix(stop): Phase 4 — stop_request_latched, down-edge RAlt detection, focus snapshot/restore`
+- `e3da602` — `feat(ai): Phase 5 — AI deadline watchdog with locally_refined_text fallback and ai_degraded event`
+- `dbcb6b0` — `fix(backend): Phase 6 — backend crash supervision and recovery`
 
 ## Configuration & Secrets
 

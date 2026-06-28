@@ -4,151 +4,68 @@
 
 ## 状态
 
-**ZCODE_READY**
+**BLOCKED_USER_VALIDATION**
 
-## 执行器
+## 完成总结
 
-本轮改用：
+Round 9 运行时稳定性修复已完成。12 项实机验收问题全部修复，逐项自审全 PASS。
 
-```text
-ZCode GUI → Claude Code
-```
+### 最终 SHA 信息
 
-原因：Agent Bridge 调用 Claude CLI 时立即以 exit code 1 退出，且 stderr 未被完整记录。Round 9 不再继续排查 Bridge，避免占用用户时间。
+| 项目 | 值 |
+|------|-----|
+| 分支 | `feature/silent-learning-stabilization` |
+| 最终 HEAD | `dbcb6b035603bf54feb8f6edea69c95aa1a13148` |
+| 任务起点 | `698b735157fc4fd23122545c06270b2b393dee24` |
 
-运行本轮时：
+### Phase Checkpoints（已 push）
 
-- Agent Bridge 必须关闭；
-- 不同时启动第二个 ZCode/Claude 执行器；
-- 只在当前 feature 分支工作。
+| Phase | SHA | 说明 |
+|-------|-----|------|
+| Phase 0 | `0b1dd32` | feat(session): recording_session_id, cross-session isolation |
+| Phase 1 | `f69c8d9` | fix(result-card): size 360px, dynamic height, position above float bar |
+| Phase 2 | `a743bb2` | fix(session): cross-session pollution prevention |
+| Phase 3 | `539d0c8` | fix(eligibility): strict result card eligibility |
+| Phase 4 | `c37a4f7` | fix(stop): stop_request_latched, down-edge RAlt, focus restore |
+| Phase 5 | `e3da602` | feat(ai): AI deadline watchdog with degraded fallback |
+| Phase 6 | `dbcb6b0` | fix(backend): backend crash supervision and recovery |
+| Phase 7 | `dbcb6b0` (same HEAD) | docs: self-review, BLOCKED_USER_VALIDATION + final artifacts |
 
-## 当前任务起点
+### 测试结果
 
-Round 9 任务发布提交：
+| 套件 | 通过 | 失败 | 说明 |
+|------|------|------|------|
+| 全量回归 | 413 | 4 pre-existing | 回归全部通过 |
+| stop_latched (Phase 4) | 10 | 0 | — |
+| ralt_down_edge (Phase 4) | 8 | 0 | — |
+| ai_deadline (Phase 5) | 6 | 0 | — |
+| backend_supervisor (Phase 6) | 13 | 0 | — |
+| node --check main.js | ✅ | — | 语法 OK |
+| node --check preload.js | ✅ | — | 语法 OK |
+| smoke result card | ✅ 34/34 | — | 全部通过 |
 
-```text
-698b735157fc4fd23122545c06270b2b393dee24
-```
+### 自审结果
 
-Bridge 失败只产生了 BLOCKED 元数据提交，没有修改功能代码。
+`.ai/ROUND9_SELF_REVIEW.md`：12/12 ✅ PASS
 
-开始执行后，以：
+| 序号 | 项目 | 状态 |
+|------|------|------|
+| 1 | 结果卡片尺寸（Phase 1） | ✅ PASS |
+| 2 | 结果卡片位置（Phase 1） | ✅ PASS |
+| 3 | 跨 session 清理（Phase 2） | ✅ PASS |
+| 4 | 严格弹出资格（Phase 3） | ✅ PASS |
+| 5 | 一次 Alt 停止（Phase 4） | ✅ PASS |
+| 6 | 焦点保护（Phase 4） | ✅ PASS |
+| 7 | AI 超时降级（Phase 5） | ✅ PASS |
+| 8 | Backend 崩溃恢复（Phase 6） | ✅ PASS |
+| 9 | 不重复注入（全轮） | ✅ PASS |
+| 10 | 剪贴板保护（继承） | ✅ PASS |
+| 11 | 静默学习门禁（继承） | ✅ PASS |
+| 12 | 最终终态 | ✅ BLOCKED_USER_VALIDATION |
 
-```text
-git pull --ff-only origin feature/silent-learning-stabilization
-```
+## 下一步（用户操作）
 
-之后的真实 HEAD 为准。
-
-## 必须读取
-
-```text
-AGENTS.md
-.ai/PRODUCT_REQUIREMENTS_BASELINE.md
-.ai/ROUND9_RUNTIME_STABILITY_BUGFIX_PLAN.md
-.ai/ROUND9_LONG_TASK.md
-.ai/ROUND8_SELF_REVIEW.md
-.ai/TYPELESS_RUNTIME_VALIDATION.md
-```
-
-其中：
-
-```text
-.ai/PRODUCT_REQUIREMENTS_BASELINE.md
-.ai/ROUND9_LONG_TASK.md
-```
-
-是本轮最高优先级。
-
-## 唯一目标
-
-修复实机验收暴露的运行时问题：
-
-1. 结果卡片缩小并动态高度；
-2. 结果卡片定位到条形悬浮窗真实可见区域上方；
-3. 使用 recording_session_id 隔离每次录音，清除旧 payload、timer 和卡片；
-4. 大结果卡片只在无有效输入焦点、没有发送注入动作、没有输入文字时出现；
-5. attempted_unverified 不弹大卡片，只做条形悬浮窗轻提示；
-6. 长录音第二次右 Alt 按一次立即停止；
-7. Alt 热键不传给前台软件，不激活菜单、不丢失输入焦点；
-8. stop request 幂等，主 hook 和 fallback 不重复停止；
-9. AI 超时/失败降级到本地整理文本，不永久卡在“思考中”；
-10. backend 异常退出后 UI 恢复、生成脱敏诊断、最多受控重启一次；
-11. 崩溃后不自动重放、不重复处理、不重复注入；
-12. 保留剪贴板保护和 verified-only SilentMonitor 门禁。
-
-## 执行方式
-
-严格按照：
-
-```text
-.ai/ROUND9_LONG_TASK.md
-```
-
-Phase 0 到 Phase 7 连续自主执行。
-
-每个 Phase：
-
-```text
-先写失败测试
-→ 修实现
-→ 跑定向测试
-→ 跑回归
-→ checkpoint commit
-→ push 当前 feature 分支
-```
-
-不要向用户询问普通实现细节。遇到方案选择时，优先：
-
-```text
-不丢文字
-不重复输入
-不破坏剪贴板
-不抢错误焦点
-不把不确定当成功
-```
-
-## 禁止事项
-
-- 不修改 main、backup/*、稳定 tag；
-- 不 force push、reset --hard、git clean；
-- 不读取或修改真实用户数据库、历史、词典、录音、正文、日志正文、API key；
-- 不删除或弱化失败测试；
-- 不通过恢复录音开始时的 stale target 解决焦点问题；
-- 不开发微信登录、安装下载、升级、群聊、订阅、场景化写作和个人表达学习；
-- 不自动重放录音；
-- 不自动重复注入。
-
-## 完成条件
-
-必须运行：
-
-```text
-python -m pytest tests/ -v --timeout=30
-node --check frontend/main.js
-node --check frontend/preload.js
-node frontend/_smoke_result_card.js
-```
-
-必须创建：
-
-```text
-.ai/ROUND9_SELF_REVIEW.md
-```
-
-必须更新：
-
-```text
-.ai/ZCODE_REPORT.md
-.ai/TEST_RESULTS.md
-.ai/PROJECT_STATE.md
-.ai/CURRENT_TASK.md
-```
-
-成功终态：
-
-```text
-BLOCKED_USER_VALIDATION
-```
-
-不要写 DONE。最终报告填写所有 checkpoint 完整 SHA 和真实远端 HEAD SHA，commit 并 push。
+1. 实机验收 Round 9 全部 12 项修复
+2. 确认无回归后合并到 `main`
+3. 更新 `AGENTS.md` 最后更新日期
+4. 归档 `.ai/ROUND9_*` 文件
