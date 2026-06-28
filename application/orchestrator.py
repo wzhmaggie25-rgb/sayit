@@ -4,6 +4,7 @@ Manages the lifecycle of: hotkey listening, audio capture, ASR, AI correction,
 text injection, silent learning, hotwords, and config hot-reload.
 """
 from __future__ import annotations
+import ctypes
 import logging
 import threading
 import time
@@ -79,6 +80,16 @@ class SayitOrchestrator:
         self._pipeline_thread: Optional[threading.Thread] = None
         self._pipeline_lock = threading.Lock()
         self._pipeline_active = False
+
+        # Stop request latch: hook and fallback race, first wins.
+        # Reset on next recording start. Guards RECORDING_STOPPING ACK
+        # to emit exactly once per session.
+        self._stop_request_latched = False
+
+        # Focus snapshot: captures the foreground hwnd just before the
+        # stop signal, so we can restore it after injection completes.
+        # Reset on next recording start; captured by _execute_stop_request.
+        self._pre_stop_focus_hwnd = 0
 
         # Config hot-reload
         self._reload_running = False
@@ -260,6 +271,10 @@ class SayitOrchestrator:
         except Exception:
             pass
 
+        # Reset stop latch for the new recording session.
+        # Allows the user to stop this new recording with the next RAlt press.
+        self._stop_request_latched = False
+
         with self._pipeline_lock:
             if self._pipeline_active:
                 logger.warning(
@@ -319,6 +334,12 @@ class SayitOrchestrator:
                         self._stop_watcher.disarm()
                 except Exception:
                     pass
+                # Focus restore: after pipeline completes, try to restore
+                # the focus that was captured at stop time. Only restores
+                # if the hwnd is still valid and is NOT a SayIt window.
+                if self._pre_stop_focus_hwnd:
+                    self._focus_window(self._pre_stop_focus_hwnd)
+                    self._pre_stop_focus_hwnd = 0
                 with self._pipeline_lock:
                     if self._pipeline is _my_pipeline:
                         self._pipeline_active = False
@@ -345,31 +366,64 @@ class SayitOrchestrator:
 
         return True
 
-    def _on_hotkey_stop(self):
-        """Called when the user wants to stop the current capture.
+    def _is_sayit_hwnd(self, hwnd: int) -> bool:
+        """Return True if hwnd belongs to one of SayIt's own windows."""
+        if not hwnd:
+            return False
+        try:
+            title_buf = ctypes.create_unicode_buffer(256)
+            ctypes.windll.user32.GetWindowTextW(hwnd, title_buf, 256)
+            title = title_buf.value or ""
+            cls_buf = ctypes.create_unicode_buffer(256)
+            ctypes.windll.user32.GetClassNameW(hwnd, cls_buf, 256)
+            cls = cls_buf.value or ""
+            # SayIt windows: main window, float bar, result card.
+            # Match by class prefix or known title patterns.
+            return any(kw in title for kw in ("SayIt", "sayit", "Sayit")) \
+                or "Chrome_WidgetWin_0" in cls and ("SayIt" in title or "sayit" in title)
+        except Exception:
+            return False
 
-        Only signals the pipeline's _stop_flag. We DO NOT detach the
-        pipeline here — that responsibility lives in _pipeline_wrapper's
-        finally clause, after ASR / AI / inject / history have completed.
-        Returning early from this method must not allow a second pipeline
-        to start while the first is still post-processing — that is the
-        root cause of "third RAlt only stops" in long dictations.
+    def _get_foreground_hwnd(self) -> int:
+        """Capture the current foreground window hwnd."""
+        try:
+            return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+        except Exception:
+            return 0
+
+    def _focus_window(self, hwnd: int) -> bool:
+        """Restore focus to a specific hwnd.
+
+        Only restores if the hwnd is still valid (window exists) and is
+        NOT a SayIt window. Returns True if focus was restored.
         """
-        with self._pipeline_lock:
-            pipeline = self._pipeline
-            active = self._pipeline_active
-        if not (pipeline and active):
-            logger.debug(
-                "[orchestrator] stop ignored — no active pipeline "
-                "(pipeline=%s active=%s)", pipeline is not None, active)
+        if not hwnd:
             return False
-        if pipeline.is_idle():
+        if self._is_sayit_hwnd(hwnd):
             return False
-        # Only stop while still in CAPTURING — any later state means the
-        # pipeline already moved past the user's control point and a stop
-        # signal would be a no-op anyway.
-        if pipeline.state != RecordingState.CAPTURING:
+        try:
+            if not ctypes.windll.user32.IsWindow(hwnd):
+                return False
+            cur = ctypes.windll.user32.GetForegroundWindow()
+            if cur == hwnd:
+                return True
+            ctypes.windll.user32.AllowSetForegroundWindow(0xFFFFFFFF)
+            ctypes.windll.user32.BringWindowToTop(hwnd)
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            time.sleep(0.05)
+            return True
+        except Exception:
             return False
+
+    def _execute_stop_request(self, pipeline):
+        """Shared stop execution: capture focus, emit ACK, signal pipeline, disarm watcher.
+
+        Caller must hold _stop_request_latched already and must have
+        validated the pipeline state. This method does NOT acquire locks.
+        """
+        # Capture foreground window hwnd BEFORE stopping the pipeline,
+        # so we can restore focus after injection completes.
+        self._pre_stop_focus_hwnd = self._get_foreground_hwnd()
         # Emit the visible "stopping" ACK BEFORE we call pipeline.stop().
         # This is the immediate UI feedback the user expects on the second
         # RAlt: don't make them stare at the recording indicator while
@@ -387,6 +441,42 @@ class SayitOrchestrator:
                 self._stop_watcher.disarm()
         except Exception:
             pass
+
+    def _on_hotkey_stop(self):
+        """Called when the user wants to stop the current capture.
+
+        Only signals the pipeline's _stop_flag. We DO NOT detach the
+        pipeline here — that responsibility lives in _pipeline_wrapper's
+        finally clause, after ASR / AI / inject / history have completed.
+        Returning early from this method must not allow a second pipeline
+        to start while the first is still post-processing — that is the
+        root cause of "third RAlt only stops" in long dictations.
+
+        stop_request_latched: the hook and fallback race; first wins.
+        Subsequent stop requests are no-ops; RECORDING_STOPPING ACK fires
+        exactly once per session.
+        """
+        if self._stop_request_latched:
+            logger.debug("[orchestrator] stop ignored — already latched")
+            return False
+        with self._pipeline_lock:
+            pipeline = self._pipeline
+            active = self._pipeline_active
+        if not (pipeline and active):
+            logger.debug(
+                "[orchestrator] stop ignored — no active pipeline "
+                "(pipeline=%s active=%s)", pipeline is not None, active)
+            return False
+        if pipeline.is_idle():
+            return False
+        # Only stop while still in CAPTURING — any later state means the
+        # pipeline already moved past the user's control point and a stop
+        # signal would be a no-op anyway.
+        if pipeline.state != RecordingState.CAPTURING:
+            return False
+        # Latch first — prevents any concurrent _fallback_stop from racing.
+        self._stop_request_latched = True
+        self._execute_stop_request(pipeline)
         # NB: we don't wait_for_stop / clear flags here. The pipeline
         # thread runs through to DONE/ERROR, and only then does its
         # _pipeline_wrapper.finally clear _pipeline_active. That is what
@@ -400,10 +490,16 @@ class SayitOrchestrator:
         This method is called from the watcher's polling thread (daemon).
         It must NOT hold _pipeline_lock to avoid deadlock with the pipeline
         thread (which may be in _on_hotkey_stop already if the hook just
-        barely processed the event). We acquire the lock only to read the
-        shared pipeline reference, then call _on_hotkey_stop (which itself
-        acquires the lock).
+        barely processed the event). We set the latch and do the stop work
+        directly, using the same _execute_stop_request shared path.
+
+        stop_request_latched prevents double-firing if the hook also
+        delivered a stop signal before the fallback runs.
         """
+        if self._stop_request_latched:
+            logger.debug(
+                "[orchestrator] fallback stop ignored — already latched")
+            return
         logger.warning(
             "[orchestrator] _fallback_stop invoked — RAlt hook miss detected, "
             "forcing stop via fallback path")
@@ -424,13 +520,16 @@ class SayitOrchestrator:
         except Exception as e:
             logger.debug("[orchestrator] fallback diagnostic error: %s", e)
 
-        # Delegate to the same stop logic the hook callback would use.
-        # _on_hotkey_stop is safe to call from any thread since it acquires
-        # _pipeline_lock internally.
-        try:
-            self._on_hotkey_stop()
-        except Exception as e:
-            logger.error("[orchestrator] _fallback_stop -> _on_hotkey_stop failed: %s", e)
+        # Fast path: latch ourselves and execute stop directly.
+        # We do NOT go through _on_hotkey_stop because that also checks
+        # _stop_request_latched and would return False if we set it.
+        self._stop_request_latched = True
+        with self._pipeline_lock:
+            pipeline = self._pipeline
+            active = self._pipeline_active
+        if pipeline and active and not pipeline.is_idle() \
+                and pipeline.state == RecordingState.CAPTURING:
+            self._execute_stop_request(pipeline)
 
     def _start_config_watcher(self):
         """Start background thread that watches config.json for changes."""

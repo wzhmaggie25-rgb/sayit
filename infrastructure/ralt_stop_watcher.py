@@ -8,18 +8,21 @@ Windows may silently unload the hook (LowLevelHooksTimeout), causing the
 *second* RAlt press to be lost entirely — no HookProc call, no EmitToggle, no
 Python callback, no stop.
 
-This module provides a polling-based fallback that detects a complete RAlt
-down→up cycle using GetAsyncKeyState and requests a stop when the main hook
-did NOT process the event. It is armed only during the CAPTURING phase of a
-pipeline and de-arms immediately after a single detection.
+This module provides a polling-based fallback that detects an RAlt down-edge
+using GetAsyncKeyState and requests a stop when the main hook did NOT process
+the event. It is armed only during the CAPTURING phase of a pipeline and
+de-arms immediately after a single detection.
 
 Design
 ------
 - arm() snapshots the current total_emitted count from the DLL.
 - A daemon thread polls GetAsyncKeyState(VK_RMENU) every 10 ms.
-- On detecting a complete down→up transition, it re-checks total_emitted:
-  - If the count increased → the hook processed it normally → do nothing.
-  - If the count stayed the same → hook miss → invoke fallback callback.
+- Phase 1: Wait for initial start-key RAlt to release (avoids false trigger).
+- Phase 2: Detect the NEXT RAlt down-edge (transition from not-down to down).
+  - On down-edge, IMMEDIATELY check if emitted count increased:
+    - If count increased → hook processed it → nothing to do.
+    - If count unchanged → hook miss → invoke fallback callback.
+  - No need to wait for up-edge: the down-edge is the user's intent to stop.
 - disarm() signals the thread to exit and joins it (1s timeout).
 - At most ONE detection per arm cycle (prevents runaway starts).
 
@@ -73,7 +76,7 @@ class RAltStopWatcher:
     # ── Public API ──────────────────────────────────────────────
 
     def arm(self, total_emitted: int | None = None):
-        """Start monitoring for the next RAlt down→up.
+        """Start monitoring for the next RAlt down-edge.
 
         Call after the pipeline enters CAPTURING. Snapshots the current
         emitted count for later comparison.
@@ -112,7 +115,7 @@ class RAltStopWatcher:
         self._armed = False
         self._stop_event.set()
         # Skip join when called from the polling thread itself
-        # (e.g. via _on_complete_cycle → disarm after cycle detection).
+        # (e.g. via down-edge detection → disarm after fire).
         # External callers (orchestrator) will join the thread normally.
         if (self._thread is not None and self._thread.is_alive()
                 and self._thread is not threading.current_thread()):
@@ -167,15 +170,18 @@ class RAltStopWatcher:
         return -1
 
     def _poll_loop(self):
-        """Daemon thread: detect RAlt down→up, then check hook processing.
+        """Daemon thread: detect RAlt down-edge, check hook processing.
 
         Phase 1: Wait for the initial RAlt to be fully released (the same
         press that started the recording). Without this, the watcher would
         immediately see a "down" from the start key itself and fire a false
         stop.
 
-        Phase 2: Detect the next complete down→up transition.
-        Phase 3: Compare emitted count. If hook didn't process it → fallback.
+        Phase 2: Detect the next RAlt down-edge (transition up→down).
+          - On detection, IMMEDIATELY check emitted count:
+            - If increased → hook handled it → nothing to do.
+            - If unchanged → hook miss → invoke fallback callback.
+          - Fires on the down-edge alone — no need to wait for up-edge.
         """
         # ── Phase 1: Wait for initial RAlt release ──────────
         # The user pressed RAlt to start; that key may still be down for a
@@ -195,23 +201,28 @@ class RAltStopWatcher:
         # Short stabilization pause after release
         time.sleep(0.050)
 
-        # ── Phase 2: Detect next RAlt down→up ──────────────
-        in_down = False
+        # ── Phase 2: Detect next RAlt down-edge ──────────────
+        # On down-edge: check emitted. If hook missed it, fire fallback.
+        was_down = False
         while not self._stop_event.is_set() and self._armed:
             down = self._is_ralt_down()
-            if down and not in_down:
-                in_down = True  # detected falling edge: RAlt went down
-            elif not down and in_down:
-                # Detected rising edge: RAlt went up → complete cycle
-                self._on_complete_cycle()
+            if down and not was_down:
+                # Detected down-edge (transition from not-down to down)
+                self._on_down_edge()
                 return
+            was_down = down
             time.sleep(0.010)
 
-    def _on_complete_cycle(self):
-        """Called when a complete RAlt down→up cycle was detected.
+    def _on_down_edge(self):
+        """Called when an RAlt down-edge is detected.
 
-        If the hook already processed this event (total_emitted increased),
-        we do nothing. Otherwise, it's a hook miss → fire fallback.
+        If the hook already processed this event (total_emitted increased
+        since arm), we do nothing. Otherwise, it's a hook miss — fire
+        fallback immediately, without waiting for the up-edge.
+
+        Note: there is a narrow race where both the hook and watcher fire
+        nearly simultaneously. The orchestrator's _stop_request_latched
+        flag ensures only one stop request is actually honored.
         """
         post = self._get_current_emitted()
         if post > self._initial_emitted:
@@ -220,10 +231,10 @@ class RAltStopWatcher:
                 "[RAltStopWatcher] hook handled it (emitted %s -> %s)",
                 self._initial_emitted, post)
         else:
-            # Hook missed the event!
+            # Hook missed the event! Fire fallback on down-edge.
             self._hook_misses += 1
             logger.info(
-                "[RAltStopWatcher] HOOK MISS detected! "
+                "[RAltStopWatcher] HOOK MISS detected on down-edge! "
                 "emitted=%s (unchanged from %s) — firing fallback stop",
                 post, self._initial_emitted)
             # Fire fallback stop once
