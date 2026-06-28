@@ -143,16 +143,49 @@ class DashScopeStreamingASRSession:
                 self._emit("error", message=str(e), engine="aliyun_streaming")
                 break
 
-    def finish(self, timeout: float = 45.0) -> str:
+    def _put_sentinel_safe(self):
+        """Put the None sentinel into _audio_queue without blocking.
+
+        Uses put_nowait; if the queue is full, drains one item to make room.
+        This guarantees finish() cannot hang on a full queue with a dead worker.
+        """
+        try:
+            self._audio_queue.put_nowait(None)
+        except queue.Full:
+            # Drain the oldest chunk to make room for the sentinel.
+            # This is safe: we're terminating, lost audio is acceptable.
+            try:
+                self._audio_queue.get_nowait()
+                self._audio_queue.put_nowait(None)
+            except (queue.Empty, queue.Full):
+                # Queue is wedged — set _complete so finish() can proceed.
+                self._complete.set()
+
+    def finish(self, timeout: float = 8.0) -> str:
         if not self._started or self._recognition is None:
             raise RuntimeError("DashScope streaming ASR was not started")
-        self._audio_queue.put(None)
+        # Safe sentinel: never blocking put(None) — the core P0-2 fix.
+        self._put_sentinel_safe()
         if self._worker:
-            self._worker.join(timeout=10.0)
-        try:
-            self._recognition.stop()
-        except Exception as e:
-            self._error = str(e)
+            self._worker.join(timeout=3.0)
+        # recognition.stop() wrapped in a watchdog to prevent wedging.
+        stop_ok = False
+        def _stop_watchdog():
+            nonlocal stop_ok
+            try:
+                self._recognition.stop()
+                stop_ok = True
+            except Exception as e:
+                self._error = str(e)
+                self._complete.set()
+        stop_thread = threading.Thread(target=_stop_watchdog, daemon=True)
+        stop_thread.start()
+        stop_thread.join(timeout=5.0)
+        if not stop_ok and self._complete.is_set() is False:
+            # stop() didn't complete — treat as error and set complete
+            self._complete.set()
+            if not self._error:
+                self._error = "recognition.stop() timed out"
         deadline = time.time() + timeout
         while not self._complete.is_set() and time.time() < deadline:
             time.sleep(0.05)
