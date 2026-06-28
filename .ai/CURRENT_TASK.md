@@ -4,99 +4,115 @@
 
 ## 状态
 
-**BLOCKED_USER_VALIDATION**
+**ZCODE_READY**
 
-## 独立审查结论
+## 结论
 
-Round 9.1 已完成并通过代码层独立抽查：
-
-```text
-396 passed
-1 skipped
-0 failures
-无 deselect
-timeout=30
-```
-
-上轮指出的生产路径问题已经进入真实实现：
-
-- 结果卡片 viewport 坐标转换为屏幕坐标；
-- ResultCardEligibility 位于生产模块并由 Pipeline调用；
-- RAlt native helper v4 在keydown单次emit；
-- stop latch原子化；
-- 删除处理结束后无条件抢回焦点；
-- session_id在事件入队时绑定；
-- backend正常退出/异常退出策略对齐；
-- AI timeout使用真实HTTP timeout，不遗留daemon请求线程；
-- 伪测试已改为生产函数/Node harness。
-
-当前仍不能合并main，因为物理键盘、真实输入框、真实多应用焦点和真实Windows剪贴板必须在用户机器上验收。
-
-## 当前唯一任务
-
-执行：
+Round 9.1 用户实机验收失败，确认存在P0主链路故障：
 
 ```text
-.ai/ROUND9_1_USER_VALIDATION_PLAN.md
+右Alt停止后长期停在“思考中”
+后台仍在识别/处理
+悬浮条不消失
+文字不注入
+结果卡片为空
+有输入框可能被误判为无输入目标
 ```
 
-验收期间：
+当前不得继续验收、不得合并main、不得创建release分支。
 
-- Agent Bridge关闭；
-- ZCode关闭；
-- 不修改代码；
-- 不合并main；
-- 不创建发布分支；
-- 发现问题只记录应用、步骤、时间、现象和日志。
+## 已确认根因
 
-## 验收重点
+1. Pipeline未捕获异常只写日志，不emit终态，Float永久STOPPING；
+2. Streaming ASR `finish()`使用无timeout的阻塞`queue.put(None)`，worker退出/queue满时可永久卡死；
+3. Result card首次加载前，`pipeline_done`会清空pending payload，导致空卡片；
+4. Editability gate只认Win32 Edit/ValuePattern，Chrome/Obsidian/微信/飞书等真实输入框可能误判`no_editable_target`；
+5. `target_is_sayit_window`被硬编码False；
+6. 缺少“每个session恰好一个terminal事件”的强制契约；
+7. Streaming + batch + AI多层timeout会叠加成很长等待。
+
+## 执行器
 
 ```text
-结果卡片尺寸和位置
-有输入框不弹大卡片
-无输入框才弹卡片
-连续10次无旧卡片污染
-一次右Alt停止
-长录音停止
-不激活Alt菜单
-不抢用户主动切换后的焦点
-剪贴板文本/图片/文件保护
-AI失败降级
-backend崩溃恢复
-不重复输入
+ZCode GUI → Claude Code
 ```
 
-## 验收通过后
+Agent Bridge保持关闭。
 
-1. 创建 `.ai/ROUND9_1_USER_VALIDATION_RESULT.md`；
-2. 固定稳定commit和tag；
-3. 用户单独决定是否合并main；
-4. 创建新分支：
+## 必须读取
 
 ```text
-feature/release-foundation
+AGENTS.md
+.ai/PRODUCT_REQUIREMENTS_BASELINE.md
+.ai/ROUND9_2_P0_RUNTIME_BUG_REVIEW.md
+.ai/ROUND9_2_P0_FIX_TASK.md
+.ai/ROUND9_1_SELF_REVIEW.md
 ```
 
-5. 下一阶段路线见：
+其中：
 
 ```text
-.ai/NEXT_DEVELOPMENT_ROADMAP.md
+.ai/ROUND9_2_P0_RUNTIME_BUG_REVIEW.md
+.ai/ROUND9_2_P0_FIX_TASK.md
 ```
 
-## 后续顺序
+优先级最高。
+
+## 唯一任务
+
+严格执行：
 
 ```text
-用户实机验收
-→ 固定稳定版本
-→ 对外发布基础（安装包、版本、手动升级、远程群二维码）
-→ 微信登录与账号系统
-→ 商业化授权
-→ 场景化写作与个人表达学习
+.ai/ROUND9_2_P0_FIX_TASK.md
 ```
 
-## 安全边界
+Phase A 到 Phase I 连续自主完成。
+
+必须：
+
+- 先建立真实失败复现；
+- 修Streaming finish无界阻塞；
+- 建立session terminal事件；
+- 任意Pipeline异常都让前端退出“思考中”；
+- 修复result-card show→done→load空文字竞态；
+- 修复真实contenteditable输入框误判；
+- 只有真正无焦点且零dispatch才弹大卡片；
+- 建立ASR总预算；
+- 记录脱敏stage/session/hotkey诊断；
+- 不重复注入、不自动重试。
+
+## 禁止事项
 
 - 不修改main、backup/*、稳定tag；
 - 不force push、reset --hard、git clean；
 - 不读取或修改真实用户数据库、历史、词典、录音、正文、API key；
-- 不在验收前继续开发新功能。
+- 不开发安装、更新、微信登录、群聊、订阅、场景写作；
+- 不用UI watchdog掩盖后端永久阻塞；
+- 不通过自动复制或重复注入掩盖失败；
+- 不盲目修改Alt状态机，先用运行时事件计数证明问题。
+
+## 完成门禁
+
+必须原样运行且0 failures：
+
+```text
+python -m pytest tests/ -v --timeout=30
+node --check frontend/main.js
+node --check frontend/preload.js
+node frontend/_smoke_result_card.js
+node frontend/_test_result_card_race.js
+```
+
+必须创建：
+
+```text
+.ai/ROUND9_2_SELF_REVIEW.md
+```
+
+成功终态：
+
+```text
+BLOCKED_USER_VALIDATION
+```
+
+不要写DONE。填写所有checkpoint完整SHA和最终远端HEAD，commit并push。
