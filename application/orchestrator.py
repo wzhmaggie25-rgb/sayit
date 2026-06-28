@@ -88,10 +88,7 @@ class SayitOrchestrator:
         self._stop_request_latched = False
         self._stop_latch_lock = threading.Lock()
 
-        # Focus snapshot: captures the foreground hwnd just before the
-        # stop signal, so we can restore focus after injection completes.
-        # Reset on next recording start; captured by _execute_stop_request.
-        self._pre_stop_focus_hwnd = 0
+        self._pre_stop_focus_hwnd = 0  # kept for future snapshot use
 
         # Config hot-reload
         self._reload_running = False
@@ -336,12 +333,13 @@ class SayitOrchestrator:
                         self._stop_watcher.disarm()
                 except Exception:
                     pass
-                # Focus restore: after pipeline completes, try to restore
-                # the focus that was captured at stop time. Only restores
-                # if the hwnd is still valid and is NOT a SayIt window.
-                if self._pre_stop_focus_hwnd:
-                    self._focus_window(self._pre_stop_focus_hwnd)
-                    self._pre_stop_focus_hwnd = 0
+                # Focus restore removed per Round 9.1 review: unconditional
+                # SetForegroundWindow after pipeline completion violates the
+                # requirement that user-initiated window switches during
+                # ASR/AI processing must not have focus stolen back.
+                # Focus protection now happens before injection (Phase D)
+                # in the injector layer, which uses current foreground
+                # rather than pre-stop hwnd restore.
                 with self._pipeline_lock:
                     if self._pipeline is _my_pipeline:
                         self._pipeline_active = False
