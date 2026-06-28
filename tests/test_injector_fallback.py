@@ -60,6 +60,8 @@ class InjectorFallbackTests(unittest.TestCase):
                           return_value=(42, "Edit", 99, "notepad.exe")), \
              patch.object(inj, "_assess_target_editability",
                           return_value="editable"), \
+             patch.object(inj, "_get_focused_edit_hwnd",
+                          return_value=0), \
              patch.object(inj, "_get_context_for_strategy", return_value={}), \
              patch.object(inj, "_strategy_for_context",
                           return_value="clipboard"), \
@@ -111,6 +113,8 @@ class InjectorFallbackTests(unittest.TestCase):
                           return_value=(42, "Edit", 99, "notepad.exe")), \
              patch.object(inj, "_assess_target_editability",
                           return_value="editable"), \
+             patch.object(inj, "_get_focused_edit_hwnd",
+                          return_value=0), \
              patch.object(inj, "_get_context_for_strategy", return_value={}), \
              patch.object(inj, "_strategy_for_context",
                           return_value="clipboard"), \
@@ -139,6 +143,8 @@ class InjectorFallbackTests(unittest.TestCase):
                           return_value=(42, "ConsoleWindowClass", 99, "cmd.exe")), \
              patch.object(inj, "_assess_target_editability",
                           return_value="editable"), \
+             patch.object(inj, "_get_focused_edit_hwnd",
+                          return_value=0), \
              patch.object(inj, "_get_context_for_strategy", return_value={}), \
              patch.object(inj, "_strategy_for_context",
                           return_value="clipboard_terminal"), \
@@ -165,6 +171,8 @@ class InjectorFallbackTests(unittest.TestCase):
                           return_value=(42, "Edit", 99, "notepad.exe")), \
              patch.object(inj, "_assess_target_editability",
                           return_value="editable"), \
+             patch.object(inj, "_get_focused_edit_hwnd",
+                          return_value=0), \
              patch.object(inj, "_get_context_for_strategy", return_value={}), \
              patch.object(inj, "_strategy_for_context",
                           return_value="uia"), \

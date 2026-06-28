@@ -1,7 +1,7 @@
-"""Phase 2: Unit tests for _assess_target_editability.
+"""Phase 2+6: Unit tests for _assess_target_editability.
 
 Covers GetGUIThreadInfo focus path, ValuePattern editable/read-only rejection,
-TextPattern-only rejection, and 0-hwnd conservative guard.
+TextPattern-only → editable_probable (Phase F), and 0-hwnd → no_editable_verified.
 
 All external API calls (GetForegroundWindow, GetGUIThreadInfo, GetClassNameW,
 comtypes.client.CreateObject, etc.) are mocked.
@@ -125,12 +125,12 @@ class AssessEditabilityWin32FocusTests(unittest.TestCase):
             result = self.inj._assess_target_editability(None)
         self.assertEqual(result, "unknown")
 
-    def test_no_foreground_window_returns_no_editable(self):
-        """No foreground window → no_editable."""
+    def test_no_foreground_window_returns_no_editable_verified(self):
+        """No foreground window → no_editable_verified (was no_editable pre-Phase F)."""
         with patch.object(ctypes.windll.user32, "GetForegroundWindow",
                           return_value=0):
             result = self.inj._assess_target_editability(None)
-        self.assertEqual(result, "no_editable")
+        self.assertEqual(result, "no_editable_verified")
 
 
 class AssessEditabilityUiaTests(unittest.TestCase):
@@ -213,12 +213,12 @@ class AssessEditabilityUiaTests(unittest.TestCase):
 
     # ── TextPattern-only tests ──
 
-    def test_textpattern_only_returns_no_editable(self):
-        """TextPattern but no ValuePattern → no_editable."""
+    def test_textpattern_only_returns_editable_probable(self):
+        """TextPattern but no ValuePattern → editable_probable (was no_editable pre-Phase F)."""
         uia = self._make_uia_mock(
             value_pattern_read_only=None, has_text_pattern=True)
         result = self._run_with_uia(uia)
-        self.assertEqual(result, "no_editable")
+        self.assertEqual(result, "editable_probable")
 
     def test_no_patterns_returns_no_editable(self):
         """No ValuePattern, no TextPattern → no_editable."""
@@ -267,8 +267,8 @@ class AssessEditabilityConservativeGateTests(unittest.TestCase):
     def setUp(self):
         self.inj = Injector(injection_mode="auto")
 
-    def test_unknown_hwnd_conservative_no_editable(self):
-        """Unknown/0 hwnd after full assessment → no_editable (conservative).
+    def test_unknown_hwnd_conservative_no_editable_verified(self):
+        """Unknown/0 hwnd after full assessment → no_editable_verified (conservative).
 
         This is the critical safety gate: when we cannot determine the
         editable target, we MUST NOT attempt injection into an unknown
@@ -277,7 +277,7 @@ class AssessEditabilityConservativeGateTests(unittest.TestCase):
         with patch.object(ctypes.windll.user32, "GetForegroundWindow",
                           return_value=0):
             result = self.inj._assess_target_editability(None)
-        self.assertEqual(result, "no_editable",
+        self.assertEqual(result, "no_editable_verified",
                          "Unknown/0 hwnd must be conservative")
 
     def test_exception_in_assessment_returns_unknown(self):

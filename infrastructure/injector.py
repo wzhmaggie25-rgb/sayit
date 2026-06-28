@@ -333,16 +333,22 @@ class Injector:
         Returns one of:
           "editable" — focused UIA element with ValuePattern and
                        CurrentIsReadOnly=False, or Win32 Edit/RichEdit focus.
-          "no_editable" — no focused element, foreground hwnd missing,
-                          UIA element is read-only, TextPattern-only (not enough),
-                          or unknown/0 hwnd.
+          "editable_probable" — TextPattern-only (no ValuePattern). Seen in
+                       Chromium contenteditable, Electron apps, WeChat,
+                       Obsidian, Feishu. Not guaranteed writable but should
+                       attempt clipboard/SendInput.
+          "no_editable_verified" — no foreground window (fg_hwnd == 0), true
+                       desktop, or zero hwnd. Definitely no editable target.
+          "no_editable" — read-only ValuePattern, no UIA focused element,
+                          no patterns at all, or conservative fallback when
+                          assessment is inconclusive.
           "unknown" — cannot determine (should fall through to injection attempt).
         """
         try:
             fg_hwnd = ctypes.windll.user32.GetForegroundWindow()
             if not fg_hwnd:
-                logger.info("[INJECT-EDITABILITY] no foreground window → no_editable")
-                return "no_editable"
+                logger.info("[INJECT-EDITABILITY] no foreground window → no_editable_verified")
+                return "no_editable_verified"
 
             # ── GetGUIThreadInfo: real focused control ──
             tid = ctypes.windll.user32.GetWindowThreadProcessId(fg_hwnd, None)
@@ -406,14 +412,16 @@ class Injector:
                     except Exception:
                         pass
 
-                    # TextPattern alone is NOT sufficient for editability
+                    # TextPattern alone → editable_probable (Chromium
+                    # contenteditable, Electron, WeChat, Obsidian, Feishu
+                    # all expose TextPattern without ValuePattern).
                     try:
                         tp = elem.GetCurrentPattern(10014)
                         if tp is not None:
                             logger.info(
                                 "[INJECT-EDITABILITY] TextPattern only "
-                                "(no ValuePattern) → no_editable")
-                            return "no_editable"
+                                "(no ValuePattern) → editable_probable")
+                            return "editable_probable"
                     except Exception:
                         pass
 
@@ -428,10 +436,10 @@ class Injector:
             except Exception as e:
                 logger.debug("[INJECT-EDITABILITY] UIA check failed: %s", e)
 
-            # ── No sensitive fallback: 0 hwnd / unknown → no_editable ──
+            # ── No sensitive fallback: 0 hwnd / unknown → no_editable_verified ──
             if not fg_hwnd:
-                logger.info("[INJECT-EDITABILITY] no foreground hwnd → no_editable")
-                return "no_editable"
+                logger.info("[INJECT-EDITABILITY] no foreground hwnd → no_editable_verified")
+                return "no_editable_verified"
 
             logger.info("[INJECT-EDITABILITY] cannot determine editability → "
                         "no_editable (conservative)")
@@ -969,10 +977,10 @@ class Injector:
         # If no editable element is focused, return no_editable_target
         # immediately (never touches clipboard).
         editability = self._assess_target_editability(target)
-        if editability == "no_editable":
+        if editability in ("no_editable", "no_editable_verified"):
             logger.info(
-                "[INJECT-POST] no editable target — "
-                "returning no_editable_target state")
+                "[INJECT-POST] no editable target (editability=%s) — "
+                "returning no_editable_target state", editability)
             return InjectionResult(ok=False, state="no_editable_target",
                                     clipboard_preserved=True,
                                     reason="no_editable_target")
