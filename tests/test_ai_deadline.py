@@ -8,6 +8,7 @@ Verifies the AI timeout requirements from ROUND9_LONG_TASK.md §Phase 5:
   - Provider HTTP error uses local text
   - Provider empty response uses local text
   - No duplicate injection
+  - No lingering daemon threads after timeout
 
 Test approach
 -------------
@@ -19,6 +20,8 @@ import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
+
+import httpx
 
 from application.eventbus import EventBus, Events
 from application.pipeline import RecordingPipeline
@@ -104,12 +107,9 @@ class AiDeadlineTests(unittest.TestCase):
 
     def test_ai_timeout_uses_local_text(self):
         """When AI correction times out, pipeline continues with locally_refined_text."""
-        # Make corrector.process block forever (simulate hang)
-        def _blocking_process(*args, **kwargs):
-            while True:
-                time.sleep(0.1)
-
-        self._corrector.process.side_effect = _blocking_process
+        # Make corrector.process raise httpx.TimeoutException (simulate HTTP timeout)
+        self._corrector.process.side_effect = httpx.TimeoutException(
+            "AI provider timed out")
 
         # Run pipeline with short timeout via config override
         with patch('application.pipeline.ConfigStore.get') as mock_config:
@@ -147,11 +147,8 @@ class AiDeadlineTests(unittest.TestCase):
 
     def test_ai_timeout_no_duplicate_inject(self):
         """After AI timeout, text is injected exactly once."""
-        def _blocking_process(*args, **kwargs):
-            while True:
-                time.sleep(0.1)
-
-        self._corrector.process.side_effect = _blocking_process
+        self._corrector.process.side_effect = httpx.TimeoutException(
+            "AI provider timed out")
 
         with patch('application.pipeline.ConfigStore.get') as mock_config:
             def _config_get(key, default=None):
@@ -318,6 +315,64 @@ class AiDeadlineTests(unittest.TestCase):
         # Inject should be called with corrected text
         injected_text = self._injector.inject.call_args[0][0]
         self.assertIn("Corrected", injected_text)
+
+    # ── 6: No lingering daemon threads after timeout ─────────
+
+    def test_ten_consecutive_timeouts_no_thread_leak(self):
+        """10 consecutive AI timeouts must NOT increase active thread count.
+
+        Phase G requirement: the synchronous call (httpx timeout) replaces
+        the daemon-thread+queue pattern. Every timeout is a clean exception,
+        no orphaned threads accumulate.
+        """
+        self._corrector.process.side_effect = httpx.TimeoutException(
+            "AI provider timed out")
+
+        # Baseline thread count
+        baseline = threading.active_count()
+
+        for i in range(10):
+            with patch('application.pipeline.ConfigStore.get') as mock_config:
+                def _config_get(key, default=None):
+                    if key == "organize_level":
+                        return "light"
+                    if key == "ai_timeout":
+                        return 1.0
+                    if key == "silent_learning":
+                        return True
+                    return default
+                mock_config.side_effect = _config_get
+
+                self._start_stop_trigger(0.05)
+                # Each run creates a fresh capture setup
+                self.pipeline.run(
+                    audio_capture=self._audio,
+                    asr_cascade=self._asr,
+                    corrector=self._corrector,
+                    hotwords_mgr=self._hotwords,
+                    injector=self._injector,
+                    silent_monitor=self._silent_monitor,
+                    db=self._db,
+                    injection_target=None,
+                )
+
+            # Reset repeatable mocks for next iteration
+            self._audio.stop.reset_mock()
+            self._audio.stop.return_value = b"\x00" * 100000
+            self._injector.inject.reset_mock()
+            self._captured_events.clear()
+
+        after = threading.active_count()
+
+        # Allow a small delta for Python's internal bookkeeping threads
+        # (e.g., cleanup, logging). Should never grow by more than 2.
+        # The critical assertion: we did NOT spawn a daemon thread per call.
+        thread_delta = after - baseline
+        self.assertLessEqual(
+            thread_delta, 2,
+            f"Active thread count grew by {thread_delta} after 10 timeouts "
+            f"(baseline={baseline}, after={after}). "
+            "Each timeout should not leak threads.")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import os
 import re
 from typing import TYPE_CHECKING
 
+import httpx
 from infrastructure.ai_providers import (
     AIProvider,
     PROVIDER_DISPLAY,
@@ -131,6 +132,7 @@ def correct_text(
     enable_disfluency_filter: bool = True,
     enable_auto_structuring: bool = True,
     enable_punctuation: bool = True,
+    timeout: float = 60.0,
 ) -> tuple[str, str | None, str | None]:
     """Run text through deterministic normalization and optional AI correction."""
     text = normalize_text(
@@ -178,7 +180,9 @@ def correct_text(
             logger.info("[AI-HOTWORD-GUARD] appending %d hotwords", len(hotwords_mgr.get_words()))
 
     try:
-        return call_provider(provider, system_prompt, text)
+        return call_provider(provider, system_prompt, text, timeout=timeout)
+    except httpx.TimeoutException:
+        raise  # re-raise so pipeline can distinguish timeout from other errors
     except Exception as e:
         logger.warning("[AI] correction failed: %s", e)
         return text, None, None
@@ -201,8 +205,14 @@ class Corrector:
         self._enable_auto_structuring = config.get("enable_auto_structuring", True)
         self._enable_punctuation = config.get("enable_punctuation", True)
 
-    def process(self, text: str, hotwords_mgr: "HotwordsManager | None" = None):
-        """Return (corrected_text, provider_id, model_name)."""
+    def process(self, text: str, hotwords_mgr: "HotwordsManager | None" = None,
+                timeout: float = 60.0):
+        """Return (corrected_text, provider_id, model_name).
+
+        Args:
+            timeout: HTTP request timeout seconds. httpx.TimeoutException is
+                     raised on expiry — caller should handle it.
+        """
         return correct_text(
             text,
             self._providers,
@@ -214,6 +224,7 @@ class Corrector:
             enable_disfluency_filter=self._enable_disfluency_filter,
             enable_auto_structuring=self._enable_auto_structuring,
             enable_punctuation=self._enable_punctuation,
+            timeout=timeout,
         )
 
 

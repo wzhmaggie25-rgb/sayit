@@ -262,7 +262,8 @@ def call_provider(provider: AIProvider, system_prompt: str, text: str,
     resp = client.post(
         provider.endpoint,
         headers={"Authorization": f"Bearer {provider.api_key}"},
-        json=body)
+        json=body,
+        timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
     result = data["choices"][0]["message"]["content"].strip()
