@@ -242,7 +242,8 @@ class RecordingPipeline:
                     return
                 try:
                     self._eb.emit(Events.ASR_PROGRESS, "fallback", "降级识别中", "cascade")
-                    raw_text, engine = asr_cascade.transcribe(pcm)
+                    remaining = max(0.0, asr_deadline - time.time()) if asr_deadline != float("inf") else None
+                    raw_text, engine = asr_cascade.transcribe(pcm, remaining=remaining)
                 except Exception as e:
                     logger.error("ASR failed: %s", e)
                     self._eb.emit(Events.ASR_ERROR, str(e))

@@ -117,10 +117,10 @@ class DashScopeASR:
     def set_vocabulary_id(self, vocabulary_id: str):
         self.vocabulary_id = vocabulary_id or ""
 
-    def transcribe(self, pcm_bytes: bytes) -> str:
-        return self._sync(pcm_bytes)
+    def transcribe(self, pcm_bytes: bytes, remaining: float | None = None) -> str:
+        return self._sync(pcm_bytes, remaining)
 
-    def _sync(self, pcm_bytes: bytes) -> str:
+    def _sync(self, pcm_bytes: bytes, remaining: float | None = None) -> str:
         from dashscope.audio.asr import Recognition, RecognitionCallback
         logger.info("[DashScopeASR] PCM: %s", _pcm_stats(pcm_bytes))
         path = _pcm_to_wav(pcm_bytes, "dashscope")
@@ -145,10 +145,15 @@ class DashScopeASR:
             # DashScope Recognition.call() is a synchronous HTTP request with no
             # built-in timeout. On long audio (>30s) it can block 60–120s,
             # freezing the pipeline thread and triggering cascade timeouts.
-            # We wrap it in a ThreadPoolExecutor with a hard 15s deadline.
-            # If it times out, RuntimeError propagates up → AsrCascade falls
-            # back to next engine (Volcengine → ONNX local).
+            # We wrap it in a ThreadPoolExecutor with a hard deadline.
+            # Phase D: cap by remaining budget if provided.
             DASHSCOPE_TIMEOUT = 15.0
+            if remaining is not None and remaining > 0:
+                DASHSCOPE_TIMEOUT = min(DASHSCOPE_TIMEOUT, remaining)
+            elif remaining is not None and remaining <= 0:
+                raise RuntimeError(
+                    f"DashScope ASR skipped — remaining budget exhausted "
+                    f"(remaining={remaining:.2f}s)")
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             future = executor.submit(
                 rec.call, file=path, phrase_id=self.vocabulary_id or None)
@@ -206,9 +211,17 @@ class VolcengineASR:
         self.endpoint = endpoint
         self.cluster = cluster
 
-    def transcribe(self, pcm_bytes: bytes) -> str:
+    def transcribe(self, pcm_bytes: bytes, remaining: float | None = None) -> str:
         import httpx
         logger.info("[VolcengineASR] PCM: %s", _pcm_stats(pcm_bytes))
+        # Phase D: cap HTTP timeout by remaining budget
+        volc_timeout = 30.0
+        if remaining is not None and remaining > 0:
+            volc_timeout = min(volc_timeout, remaining)
+        elif remaining is not None and remaining <= 0:
+            raise RuntimeError(
+                f"Volcengine ASR skipped — remaining budget exhausted "
+                f"(remaining={remaining:.2f}s)")
         path = _pcm_to_wav(pcm_bytes, "volcengine")
         try:
             with open(path, "rb") as f:
@@ -223,7 +236,7 @@ class VolcengineASR:
                     self.endpoint,
                     urlparse(self.endpoint).scheme if self.endpoint else "N/A",
                     urlparse(self.endpoint).hostname if self.endpoint else "N/A")
-                with httpx.Client(timeout=30.0, trust_env=False) as client:
+                with httpx.Client(timeout=volc_timeout, trust_env=False) as client:
                     resp = client.post(
                         self.endpoint, headers=headers, params=params, files=files)
                     resp.raise_for_status()
@@ -368,7 +381,12 @@ class OnnxLocalASR:
     def available(self) -> bool:
         return (self._session is not None or self._torch_model is not None) and self._tokens is not None
 
-    def transcribe(self, pcm_bytes: bytes) -> str:
+    def transcribe(self, pcm_bytes: bytes, remaining: float | None = None) -> str:
+        # Phase D: skip ONNX if budget is exhausted (cannot easily bound inference time)
+        if remaining is not None and remaining <= 0:
+            raise RuntimeError(
+                f"OnnxLocalASR skipped — remaining budget exhausted "
+                f"(remaining={remaining:.2f}s)")
         if self._session is not None:
             return self._sync_onnx(pcm_bytes)
         elif self._torch_model is not None:
@@ -583,15 +601,22 @@ class AsrCascade:
             logger.warning("AsrCascade: streaming session unavailable: %s", e)
             return None
 
-    def transcribe(self, pcm_bytes: bytes) -> tuple[str, str]:
-        """Transcribe PCM bytes. Returns (text, engine_name)."""
+    def transcribe(self, pcm_bytes: bytes, remaining: float | None = None) -> tuple[str, str]:
+        """Transcribe PCM bytes. Returns (text, engine_name).
+
+        Args:
+            pcm_bytes: Raw 16kHz 16-bit mono PCM audio.
+            remaining: Optional budget remaining in seconds. Each engine caps its
+                       internal timeout by this value. When exhausted, engines are
+                       skipped with a logged warning.
+        """
         errors = []
         for level_name in self._order:
             engine = self._get_engine(level_name)
             if engine is None:
                 continue
             try:
-                return engine.transcribe(pcm_bytes), level_name
+                return engine.transcribe(pcm_bytes, remaining=remaining), level_name
             except Exception as e:
                 logger.warning("Level (%s): %s: %s", level_name, type(e).__name__, e)
                 errors.append((level_name, f"{type(e).__name__}: {e}"))

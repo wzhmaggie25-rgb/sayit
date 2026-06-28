@@ -57,14 +57,23 @@ class VolcengineASR:
             if word.strip()
         ]
 
-    def transcribe(self, pcm_bytes: bytes) -> str:
+def transcribe(self, pcm_bytes: bytes, remaining: float | None = None) -> str:
         import websocket
         logger.info("[VolcengineASR] PCM: %s", _pcm_stats(pcm_bytes))
-        
+
+        # Phase D: cap WebSocket timeout by remaining budget
+        ws_timeout = 30.0
+        if remaining is not None and remaining > 0:
+            ws_timeout = min(ws_timeout, remaining)
+        elif remaining is not None and remaining <= 0:
+            raise RuntimeError(
+                f"VolcengineASR v3 skipped — remaining budget exhausted "
+                f"(remaining={remaining:.2f}s)")
+
         result_text = []
         error_msg = []
         ws = None
-        
+
         try:
             # Connect with auth headers
             headers = {
@@ -86,7 +95,8 @@ class VolcengineASR:
                     "If you configured volcengine.asr.access_token, note that the v3 WebSocket API "
                     "requires an IAM API key, not the v1 HTTP access_token.",
                     self.api_key[:12])
-            ws = websocket.create_connection(self.endpoint, header=headers, timeout=30)
+            ws = websocket.create_connection(self.endpoint, header=headers,
+                                              timeout=min(30.0, ws_timeout))
             
             # Send full client request
             request = {
@@ -137,7 +147,7 @@ class VolcengineASR:
             
             # Receive responses (with timeout)
             import time as _time
-            deadline = _time.time() + 15.0
+            deadline = _time.time() + min(15.0, ws_timeout)
             while _time.time() < deadline:
                 resp = self._recv_frame(ws)
                 if resp is None:
