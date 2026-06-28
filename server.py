@@ -98,10 +98,8 @@ _current_session_id: str = ""
 
 
 async def broadcast(data: dict):
-    global _current_session_id
-    # Attach current session_id to every broadcast unless already set
-    if "session_id" not in data and _current_session_id:
-        data["session_id"] = _current_session_id
+    # Session ID is already bound at enqueue time (see wire_events).
+    # broadcast just sends — no longer patches session_id.
     msg = json.dumps(data, ensure_ascii=False)
     for ws in ws_clients:
         try:
@@ -113,6 +111,19 @@ async def broadcast(data: dict):
 # ── Wire events to WebSocket ──────────────────────
 import queue, threading
 _event_queue = queue.Queue()
+
+def _enqueue(event: dict, include_session: bool = True):
+    """Enqueue an event for broadcast, binding session_id at enqueue time.
+
+    The session_id is captured NOW (from _current_session_id) and frozen
+    into the dict. This prevents late-arriving events from being tagged
+    with a later session_id at broadcast time.
+    """
+    global _current_session_id
+    if include_session and "session_id" not in event and _current_session_id:
+        event["session_id"] = _current_session_id
+    _event_queue.put(event)
+
 
 def _process_events():
     """Process events on the asyncio event loop (called from FastAPI startup)."""
@@ -141,46 +152,46 @@ def wire_events():
     def _on_recording_started(session_id=""):
         global _current_session_id
         _current_session_id = session_id or uuid.uuid4().hex[:12]
-        _event_queue.put({"event": "recording_started", "session_id": _current_session_id})
+        _enqueue({"event": "recording_started", "session_id": _current_session_id}, include_session=False)
 
     eb.on(Events.RECORDING_STARTED, _on_recording_started)
     eb.on(Events.RMS_LEVEL, lambda l: _state.update({"last_rms": l}))
-    eb.on(Events.RECORDING_STOPPED, lambda: _event_queue.put({"event": "recording_stopped"}))
-    eb.on(Events.RECORDING_STOPPING, lambda: _event_queue.put({"event": "recording_stopping"}))
-    eb.on(Events.RECORDING_TICK, lambda s: _event_queue.put({"event": "tick", "seconds": s}))
-    eb.on(Events.RMS_LEVEL, lambda l: _event_queue.put({"event": "rms_level", "level": l}))
-    eb.on(Events.ASR_RESULT, lambda t, e: _event_queue.put({"event": "asr_result", "text": t, "engine": e}))
-    eb.on(Events.ASR_PARTIAL, lambda t, e: _event_queue.put({"event": "asr_partial", "text": t, "engine": e}))
-    eb.on(Events.ASR_PROGRESS, lambda s, m, e="": _event_queue.put({
+    eb.on(Events.RECORDING_STOPPED, lambda: _enqueue({"event": "recording_stopped"}))
+    eb.on(Events.RECORDING_STOPPING, lambda: _enqueue({"event": "recording_stopping"}))
+    eb.on(Events.RECORDING_TICK, lambda s: _enqueue({"event": "tick", "seconds": s}))
+    eb.on(Events.RMS_LEVEL, lambda l: _enqueue({"event": "rms_level", "level": l}))
+    eb.on(Events.ASR_RESULT, lambda t, e: _enqueue({"event": "asr_result", "text": t, "engine": e}))
+    eb.on(Events.ASR_PARTIAL, lambda t, e: _enqueue({"event": "asr_partial", "text": t, "engine": e}))
+    eb.on(Events.ASR_PROGRESS, lambda s, m, e="": _enqueue({
         "event": "asr_progress", "stage": s, "message": m, "engine": e,
     }))
-    eb.on(Events.ASR_DEGRADED, lambda f, t, r: _event_queue.put({
+    eb.on(Events.ASR_DEGRADED, lambda f, t, r: _enqueue({
         "event": "asr_degraded", "from": f, "to": t, "reason": r,
     }))
-    eb.on(Events.AI_RESULT, lambda t, pid=None, mn=None: _event_queue.put({
+    eb.on(Events.AI_RESULT, lambda t, pid=None, mn=None: _enqueue({
         "event": "ai_result", "text": t, "provider": pid, "model": mn,
     }))
-    eb.on(Events.PIPELINE_DONE, lambda t: _event_queue.put({"event": "pipeline_done", "text": t}))
-    eb.on(Events.PIPELINE_ERROR, lambda m: _event_queue.put({"event": "error", "message": str(m)}))
-    eb.on(Events.RECORDING_ERROR, lambda m: _event_queue.put({"event": "error", "message": str(m)}))
-    eb.on(Events.ASR_ERROR, lambda m: _event_queue.put({"event": "error", "message": str(m)}))
-    eb.on(Events.INJECTION_DONE, lambda result: _event_queue.put({
+    eb.on(Events.PIPELINE_DONE, lambda t: _enqueue({"event": "pipeline_done", "text": t}))
+    eb.on(Events.PIPELINE_ERROR, lambda m: _enqueue({"event": "error", "message": str(m)}))
+    eb.on(Events.RECORDING_ERROR, lambda m: _enqueue({"event": "error", "message": str(m)}))
+    eb.on(Events.ASR_ERROR, lambda m: _enqueue({"event": "error", "message": str(m)}))
+    eb.on(Events.INJECTION_DONE, lambda result: _enqueue({
         "event": "injection_done", "ok": result.ok,
         "state": result.state, "verified": result.verified,
         "method": result.method, "reason": result.reason or "",
         "clipboard_restored": result.clipboard_restored,
     }))
-    eb.on(Events.NO_EDITABLE_TARGET, lambda t: _event_queue.put({"event": "no_editable_target", "text": t}))
-    eb.on(Events.RESULT_CARD_SHOW, lambda t, lt, s="", m="": _event_queue.put({
+    eb.on(Events.NO_EDITABLE_TARGET, lambda t: _enqueue({"event": "no_editable_target", "text": t}))
+    eb.on(Events.RESULT_CARD_SHOW, lambda t, lt, s="", m="": _enqueue({
         "event": "result_card_show", "text": t, "last_transcription": lt,
         "state": s, "message": m,
     }))
-    eb.on(Events.RESULT_CARD_CLOSE, lambda: _event_queue.put({"event": "result_card_close"}))
-    eb.on(Events.LIGHT_HINT, lambda m: _event_queue.put({"event": "light_hint", "message": str(m)}))
-    eb.on(Events.SILENT_LEARNED, lambda c: _event_queue.put({"event": "silent_learned", "count": c}))
-    eb.on(Events.AI_ERROR, lambda m: _event_queue.put({"event": "ai_error", "message": str(m)}))
-    eb.on(Events.AI_DEGRADED, lambda m: _event_queue.put({"event": "ai_degraded", "message": str(m)}))
-    eb.on(Events.UIPI_WARNING, lambda: _event_queue.put({"event": "uipi_warning"}))
+    eb.on(Events.RESULT_CARD_CLOSE, lambda: _enqueue({"event": "result_card_close"}))
+    eb.on(Events.LIGHT_HINT, lambda m: _enqueue({"event": "light_hint", "message": str(m)}))
+    eb.on(Events.SILENT_LEARNED, lambda c: _enqueue({"event": "silent_learned", "count": c}))
+    eb.on(Events.AI_ERROR, lambda m: _enqueue({"event": "ai_error", "message": str(m)}))
+    eb.on(Events.AI_DEGRADED, lambda m: _enqueue({"event": "ai_degraded", "message": str(m)}))
+    eb.on(Events.UIPI_WARNING, lambda: _enqueue({"event": "uipi_warning"}))
 
 
 # ── Diagnostic / fault injection ──────────────────
