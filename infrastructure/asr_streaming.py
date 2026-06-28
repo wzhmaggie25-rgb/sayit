@@ -1,10 +1,14 @@
 """Streaming ASR sessions for Typeless-style realtime transcription.
 
-Phase C: Shared bounded executor + monotonic deadline for finish/abort.
+Phase E (Round 9.4): Per-call executor for stop() — prevents a wedged
+recognition.stop() from permanently poisoning subsequent finish()/abort()
+calls. Each call creates a fresh ThreadPoolExecutor(max_workers=1) so a
+hung SDK never leaks across sessions.
 - finish() uses a single wall-clock budget: worker_join + stop + wait all
   share the caller's `timeout` budget, not fixed 3s+5s+timeout overhead.
 - abort() wraps recognition.stop() in a bounded future so it cannot hang.
-- No per-session daemon threads — shared ThreadPoolExecutor(max_workers=1).
+- No more shared ThreadPoolExecutor — every stop() call gets its own
+  isolated executor, guaranteeing no cross-session poisoning.
 """
 from __future__ import annotations
 
@@ -16,14 +20,6 @@ import time
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
-
-# Phase C: Shared bounded executor — at most 1 concurrent stop() operation.
-# This replaces the per-session daemon Thread(target=_stop_watchdog) pattern,
-# guaranteeing no leaked daemon threads mask an SDK wedge.
-_STOP_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1,
-    thread_name_prefix="asr-streaming-stop",
-)
 
 
 class DashScopeStreamingASRSession:
@@ -177,7 +173,29 @@ class DashScopeStreamingASRSession:
                 # Queue is wedged — set _complete so finish() can proceed.
                 self._complete.set()
 
-    # ── Phase C: Shared deadline for worker_join + stop + final wait ─────────
+    # ── Phase E: Per-call executor for stop() — no cross-session poisoning ──
+
+    def _exec_stop(self, timeout: float) -> None:
+        """Call recognition.stop() in a fresh executor with bounded timeout.
+
+        Each call creates its own ThreadPoolExecutor so a wedged stop()
+        in one session cannot block another session's finish()/abort().
+        """
+        if self._recognition is None:
+            return
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="asr-streaming-stop",
+        )
+        try:
+            stop_future = executor.submit(self._recognition.stop)
+            try:
+                stop_future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                stop_future.cancel()
+                raise
+        finally:
+            executor.shutdown(wait=False)
 
     def finish(self, timeout: float = 8.0) -> str:
         if not self._started or self._recognition is None:
@@ -192,15 +210,12 @@ class DashScopeStreamingASRSession:
             remaining = max(0.0, deadline - time.time())
             self._worker.join(timeout=min(remaining, timeout))
 
-        # recognition.stop() via shared bounded executor.
-        # This replaces the per-session daemon thread pattern.
+        # recognition.stop() via per-call executor.
         remaining = max(0.0, deadline - time.time())
-        stop_future = _STOP_EXECUTOR.submit(self._recognition.stop)
         try:
-            stop_future.result(timeout=remaining)
+            self._exec_stop(timeout=remaining)
         except concurrent.futures.TimeoutError:
             # stop() didn't complete within remaining budget — treat as error
-            stop_future.cancel()
             if not self._error:
                 self._error = "recognition.stop() timed out"
             self._complete.set()
@@ -223,7 +238,7 @@ class DashScopeStreamingASRSession:
         logger.info("[ASR-STREAM] final text(len=%d): %r", len(text), text[:200])
         return text
 
-    # ── Phase C: Bounded abort — no more blocked on recognition.stop() ──────
+    # ── Phase E: Per-call executor for abort too ──────────────────────────
 
     def abort(self):
         # Send sentinel so worker thread terminates.
@@ -231,11 +246,10 @@ class DashScopeStreamingASRSession:
             self._audio_queue.put_nowait(None)
         except Exception:
             pass
-        # recognition.stop() via shared executor with bounded timeout.
-        # This prevents abort() from hanging when the SDK wedges.
-        if self._recognition is not None:
-            stop_future = _STOP_EXECUTOR.submit(self._recognition.stop)
-            try:
-                stop_future.result(timeout=3.0)
-            except (concurrent.futures.TimeoutError, Exception):
-                stop_future.cancel()
+        # recognition.stop() via per-call executor with bounded timeout.
+        # This prevents abort() from hanging when the SDK wedges, without
+        # sharing an executor that another session might have poisoned.
+        try:
+            self._exec_stop(timeout=3.0)
+        except (concurrent.futures.TimeoutError, Exception):
+            pass

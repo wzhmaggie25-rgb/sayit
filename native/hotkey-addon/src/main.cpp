@@ -39,10 +39,13 @@ static void SendMaskKey() {
     keybd_event(VK_MASK, 0, KF_UP, 0);
 }
 
-static void ForceReleaseAlt() {
+static void ConditionalReleaseAlt() {
     UINT vks[] = {VK_RMENU, VK_LMENU, VK_MENU};
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 3; i++) {
+        if (!(GetAsyncKeyState(vks[i]) & 0x8000))
+            continue;
         keybd_event(vks[i], 0, KF_UP, 0);
+    }
     SendMaskKey();
 }
 
@@ -91,7 +94,7 @@ static LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam) {
             } else {
                 D("ERROR: TSFn not valid on BlockingCall!");
             }
-            ForceReleaseAlt();
+            ConditionalReleaseAlt();
             return 1; // eat the key
         }
         if (isMain && isDown) {
@@ -102,7 +105,7 @@ static LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam) {
             D("MATCHED: other key pressed, cancel match");
             // Another key pressed while RAlt held => cancel match
             g_matched = false;
-            ForceReleaseAlt();
+            ConditionalReleaseAlt();
         }
     }
 

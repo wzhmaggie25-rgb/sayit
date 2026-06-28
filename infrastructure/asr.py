@@ -611,12 +611,24 @@ class AsrCascade:
                        skipped with a logged warning.
         """
         errors = []
+        # Phase D: track the starting point so each engine gets a fair,
+        # recomputed slice of the remaining budget — prevents later engines
+        # from receiving a stale `remaining` value that was computed before
+        # earlier engines consumed time.
+        _cascade_start = time.monotonic() if remaining is not None else None
         for level_name in self._order:
             engine = self._get_engine(level_name)
             if engine is None:
                 continue
             try:
-                return engine.transcribe(pcm_bytes, remaining=remaining), level_name
+                # Recompute remaining per engine: subtract elapsed time since
+                # the original `remaining` was computed.
+                if _cascade_start is not None:
+                    elapsed = time.monotonic() - _cascade_start
+                    remaining_for_engine = max(0.0, remaining - elapsed)
+                else:
+                    remaining_for_engine = None
+                return engine.transcribe(pcm_bytes, remaining=remaining_for_engine), level_name
             except Exception as e:
                 logger.warning("Level (%s): %s: %s", level_name, type(e).__name__, e)
                 errors.append((level_name, f"{type(e).__name__}: {e}"))

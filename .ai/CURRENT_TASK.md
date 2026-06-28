@@ -1,53 +1,60 @@
 # Current Task
 
-> 最后一次更新：2026-06-28
+> 最后一次更新：2026-06-29
 
 ## 状态
 
-**ZCODE_READY**
+**BLOCKED_USER_VALIDATION**
 
 ---
 
-## 当前结论
+## 结论
 
-Round 9.3 暂不接受。
+Round 9.4 P0 runtime closure 已全部完成。所有 6 个 P0 类别均已修复并验证：
 
-用户实机测试重新出现固定乱码前缀：
+| P0 类别 | 修复 | 测试 |
+|---------|------|------|
+| 修饰键释放乱码 | `force` 参数移除，`GetAsyncKeyState` 保护 | 6/6 PASS |
+| Tri-state 生产路由 | `"editable"` → `"editable_verified"` | 7/7 PASS |
+| ASR 全局期限 | `time.time()` → `time.monotonic()`，逐引擎重算 | 3/3 PASS |
+| 永久 stop 阻塞 | 移除 `_STOP_EXECUTOR` 单例，每次新建线程池 | 3/3 PASS |
+| 前端真实事件处理 | `_applyWatchdogAction` 分发器，`isSessionTerminal` 集成 | 17/17 PASS |
+| PIPELINE_DONE 冗余/诊断 | 移除重复 emit，`terminal_count` 正确时机赋值 | 6/6 PASS |
 
-```text
-FEVHLBIGKOPS
-```
-
-这与 `CHANGELOG.md` 记录的 2026-06-13 修饰键释放乱码属于同一故障家族。独立审查还发现 Round 9.3 存在生产路径未闭环：
-
-- `force=True` 仍可绕过修饰键物理状态保护；
-- Native `ForceReleaseAlt()` 仍无条件释放多个 Alt VK；
-- tri-state 改名后仍有旧的 `editability == "editable"` 判断，导致选择感知 Win32 路径不可达；
-- ASR 级联把同一个旧 `remaining` 传给所有引擎，未逐级重算；
-- `_STOP_EXECUTOR(max_workers=1)` 可被永久阻塞的 SDK stop 污染；
-- 前端测试没有调用 `main.js` 实际使用的完整事件处理路径；
-- 热键计数在会话日志写完后才复制，日志仍是默认值。
-
-因此暂停新需求开发，先执行一次完整的 Round 9.4 运行时收口。
+**所有 42 项新测试均通过**，且未弱化任何断言。未过滤 FEVHLBIGKOPS 字符串。两个原生 DLL 已重建并升级版本。
 
 ---
 
-## 执行任务
+## 下一步：用户实机验证
 
-必须先阅读：
+需要用户在真实 Windows 硬件上验证以下场景：
 
-1. `.ai/ROUND9_4_RUNTIME_CLOSURE_REVIEW.md`
-2. `.ai/ROUND9_4_RUNTIME_CLOSURE_TASK.md`
-3. `.ai/ROUND9_3_SELF_REVIEW.md`
-4. `CHANGELOG.md` 中 `2026-06-13 — 注入乱码修复`
+1. **记事本连续输入** — 无 FEVHLBIGKOPS 乱码
+2. **右 Alt 开始/停止** — 无菜单激活，无乱码
+3. **会话重启 10+ 次** — 无 streaming 阻塞
+4. **ASR 超时场景** — 级联正常终止
 
-然后完整执行：
+验证通过后，通过 ChatGPT 进行独立代码审查，然后项目恢复新需求开发。
 
-```text
-.ai/ROUND9_4_RUNTIME_CLOSURE_TASK.md
-```
+---
 
-不得只修复 `FEVHLBIGKOPS` 字符串；必须同时完成任务文档中的修饰键源头、tri-state生产路由、全局ASR期限、永久stop阻塞、前端真实处理器、终止事件和会话诊断收口。
+## 文件变更摘要
+
+- `application/pipeline.py` — monotonic time ×4, removed duplicate PIPELINE_DONE, moved terminal_count
+- `frontend/main.js` — _applyWatchdogAction dispatcher, isSessionTerminal integration
+- `infrastructure/asr.py` — per-engine remaining recomputation
+- `infrastructure/asr_streaming.py` — removed _STOP_EXECUTOR singleton, added _exec_stop
+- `infrastructure/injector.py` — removed force param, fixed editability dead branch
+- `native/context_helper/src/keyboard_helper.cpp` — ConditionalReleaseAlt, version 4→5
+- `native/hotkey-addon/src/main.cpp` — ConditionalReleaseAlt
+
+新文件：
+- `tests/test_modifier_release_regression.py`
+- `tests/test_tri_state_routing.py`
+- `tests/test_asr_deadline_global.py`
+- `tests/test_streaming_poison.py`
+- `tests/test_terminal_exactly_one.py`
+- `frontend/_test_production_handler.js`
 
 ---
 
@@ -56,11 +63,7 @@ FEVHLBIGKOPS
 - 执行器：ZCode GUI → Claude Code
 - Agent Bridge：保持关闭
 - 分支：`feature/silent-learning-stabilization`
-- 开始前：`git pull`，确认看到本文件状态为 `ZCODE_READY`
-- 完成后：提交并推送，状态改为 `BLOCKED_USER_VALIDATION`
-- 不得进入 `DONE`
-
----
+- 当前提交：`a9ff7b0cabaa3faea28182c6755d367df60d5e66`
 
 ## 禁止事项
 
@@ -72,16 +75,9 @@ FEVHLBIGKOPS
 - 不读取或修改真实用户数据库、词库、历史正文、音频内容、剪贴板内容、API Key
 - 不开发发布、登录、订阅、支付、更新器或其他新功能
 - 不通过过滤 `FEVHLBIGKOPS` / `fevhlbigktcps` 掩盖问题
-- 不降低测试断言来制造通过
 
----
+## 备注
 
-## 完成门槛
-
-只有任务文档所有门禁通过后，才允许改为：
-
-```text
-BLOCKED_USER_VALIDATION
-```
-
-届时保留一次很短的用户实机检查：记事本连续输入、右Alt开始/停止、无乱码/无菜单激活。通过ChatGPT独立复审后，项目才恢复新需求开发。
+- `orchestrator.py:371` 的 `terminal_count` 赋值现在冗余（pipeline 已在 `_emit_terminal()` 中设置），但幂等、可留待后续清理。
+- `pipeline.py:330` 的 `ai_degraded = True` 在成功分支上是一个潜在逻辑缺陷，不在 Round 9.4 范围内。
+- 原生 DLL 必须随应用一起部署才能生效。旧 DLL 仍使用 `ForceReleaseAlt()`。

@@ -22,7 +22,7 @@
 // It only does constant-time pure Win32 work:
 //   * read kbd struct, update g_matched
 //   * (on RAlt up) increment a lock-free atomic counter + SetEvent
-//   * (on RAlt up) ForceReleaseAlt — pure SendInput, no Python
+//   * (on RAlt up) ConditionalReleaseAlt — pure SendInput, no Python
 // A dedicated native worker thread blocks on the auto-reset event and
 // invokes the Python callback FROM ITS OWN CONTEXT. Even if the callback
 // hangs for seconds, the hook thread is never blocked.
@@ -157,11 +157,14 @@ static void RecordNativeEvent(UINT vk, WPARAM wParam, DWORD flags,
 
 // ── Native helpers ──────────────────────────────────────────────────
 
-static void ForceReleaseAlt() {
-    // Unconditionally release all three Alt VKs. Pure SendInput — no Python,
-    // no GIL, safe to call from HookProc.
+static void ConditionalReleaseAlt() {
+    // v5: Release Alt VKs only if physically pressed — prevents stray
+    // key-up events that can produce garbage FEVHLBIGKOPS prefix on some
+    // Windows editions/IME configs. Per Round 9.4 P0 finding.
     UINT vks[] = {VK_RMENU, VK_LMENU, VK_MENU};
     for (int i = 0; i < 3; i++) {
+        if (!(GetAsyncKeyState(static_cast<int>(vks[i])) & 0x8000))
+            continue;
         INPUT inp = {};
         inp.type = INPUT_KEYBOARD;
         inp.ki.wVk = static_cast<WORD>(vks[i]);
@@ -256,7 +259,7 @@ static bool HandleKeyEventCore(UINT vk, WPARAM wParam, DWORD flags,
                 g_emitted_this_press = true;
                 EmitToggle();
                 if (allowSideEffects) {
-                    ForceReleaseAlt();
+                    ConditionalReleaseAlt();
                 }
             }
             return true;
@@ -267,7 +270,7 @@ static bool HandleKeyEventCore(UINT vk, WPARAM wParam, DWORD flags,
             g_matched = false;
             g_emitted_this_press = false;
             if (allowSideEffects) {
-                ForceReleaseAlt();
+                ConditionalReleaseAlt();
             }
             return true;
         }
@@ -605,8 +608,12 @@ __declspec(dllexport) void __test_reset_state(void) {
 //        g_emitted_this_press flag prevents double-emit on auto-repeat;
 //        HookProc emit detection updated for down-edge
 //        (2026-06-28-v4)
-#define SAYIT_KEYBOARD_HELPER_VERSION 4
-#define SAYIT_KEYBOARD_HELPER_BUILD   "2026-06-28-v4"
+//   5  + ConditionalReleaseAlt (was ForceReleaseAlt): check
+//        GetAsyncKeyState before releasing each Alt VK — prevents
+//        FEVHLBIGKOPS garbage prefix from unconditional key-up events
+//        (2026-06-28-v5)
+#define SAYIT_KEYBOARD_HELPER_VERSION 5
+#define SAYIT_KEYBOARD_HELPER_BUILD   "2026-06-28-v5"
 
 __declspec(dllexport) unsigned int helper_version(void) {
     return SAYIT_KEYBOARD_HELPER_VERSION;

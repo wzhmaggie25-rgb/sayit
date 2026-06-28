@@ -10,6 +10,7 @@ const WebSocket = require('ws');
 
 // Phase B: Pure session lifecycle functions
 const {
+  SESSION_WATCHDOUT_MS,
   decideWatchdogAction,
   getTerminalFloatAction,
   isSessionTerminal,
@@ -340,7 +341,28 @@ function destroyResultCard() {
 }
 
 // ── Phase D: Session watchdog ───────────────────────
-const SESSION_WATCHDOUT_MS = 120000;  // 2 minute max — backend should always complete within this
+// SESSION_WATCHDOUT_MS imported from _session_lifecycle.js (Round 9.4: no duplicate)
+
+function _applyWatchdogAction(eventType) {
+  // Phase F: Single dispatch point via pure function from _session_lifecycle.js
+  // This replaces manual stopSessionWatchdog/startSessionWatchdog at each case.
+  const action = decideWatchdogAction(eventType);
+  switch (action) {
+    case 'reset':
+      stopSessionWatchdog();
+      break;
+    case 'start':
+      startSessionWatchdog(activeSessionId);
+      break;
+    case 'stop':
+      stopSessionWatchdog();
+      break;
+    case 'ignore':
+      break;
+    default:
+      break;
+  }
+}
 
 function startSessionWatchdog(sessionId) {
   stopSessionWatchdog();
@@ -473,23 +495,26 @@ function connectWS() {
   ws.on('message', (data) => {
     try {
       const evt = JSON.parse(data.toString());
+      // Phase F: Log terminal events — uses isSessionTerminal pure function
+      if (isSessionTerminal(evt.event) || evt.event === 'recording_stopping') {
+        // no-op: these are the expected terminal/session boundary events
+      }
       switch (evt.event) {
         case 'recording_started':
           // Clear old result card state from previous session
           if (autoCloseTimer !== null) { clearTimeout(autoCloseTimer); autoCloseTimer = null; }
           destroyResultCard();
           activeSessionId = evt.session_id || '';
-          // Phase B: Do NOT start watchdog at recording_started — a long recording
-          // (>2 min) would false-positive. Watchdog starts at recording_stopping.
-          // Stale state is reset; timer stays stopped.
-          stopSessionWatchdog();
+          // Phase B+F: Single pure-function dispatch — decideWatchdogAction('recording_started')
+          // returns 'reset' (clear stale state, DO NOT start timer — long recordings would false-positive)
+          _applyWatchdogAction('recording_started');
           showFloat();
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnRecordingStarted)sayitOnRecordingStarted()');
           break;
         case 'recording_stopping':
-          // Phase B: Watchdog starts ONLY at recording_stopping — bounded STOPPING phase
-          startSessionWatchdog(activeSessionId);
+          // Phase B+F: decideWatchdogAction('recording_stopping') returns 'start'
+          _applyWatchdogAction('recording_stopping');
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnRecordingStopping)sayitOnRecordingStopping()');
           break;
@@ -501,14 +526,16 @@ function connectWS() {
           // Phase E: pipeline_done/terminal must NOT clear pending card payload.
           // The payload is cleared only by destroyResultCard (user close, new session).
           // This prevents the race: show → done → load producing an empty card.
-          stopSessionWatchdog();
+          // Phase F: decideWatchdogAction('pipeline_done') returns 'stop'
+          _applyWatchdogAction('pipeline_done');
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnPipelineDone)sayitOnPipelineDone(' + JSON.stringify(evt.text) + ')');
           pushToMain('backend-event', evt);
           break;
         case 'pipeline_terminal':
           // Phase C+D: terminal event ends the session — stop watchdog, exit STOPPING
-          stopSessionWatchdog();
+          // Phase F: decideWatchdogAction('pipeline_terminal') returns 'stop'
+          _applyWatchdogAction('pipeline_terminal');
           keepFloatOnTop();
           // Phase B: use shared pure function to determine float action
           const terminalAction = getTerminalFloatAction(
@@ -565,7 +592,8 @@ function connectWS() {
         case 'error':
           // Phase E: error must NOT clear pending card payload (same race as pipeline_done).
           // Payload is only cleared by destroyResultCard or new session.
-          stopSessionWatchdog();
+          // Phase F: decideWatchdogAction('error') returns 'stop'
+          _applyWatchdogAction('error');
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnError)sayitOnError(' + JSON.stringify(evt.message) + ')');
           break;
@@ -614,9 +642,8 @@ function connectWS() {
   });
   ws.on('close', () => {
     console.log('[ws] closed');
-    // Phase B: WS disconnect must stop watchdog and exit STOPPING state
-    // The session can no longer receive terminal events
-    stopSessionWatchdog();
+    // Phase B+F: decideWatchdogAction('ws_close') returns 'stop'
+    _applyWatchdogAction('ws_close');
     try {
       pushToFloat('if(window.sayitOnError)sayitOnError("连接已断开，请检查后端服务")');
     } catch(e) {}
@@ -624,8 +651,8 @@ function connectWS() {
   });
   ws.on('error', () => {
     console.warn('[ws] error');
-    // Phase B: WS error must also stop watchdog
-    stopSessionWatchdog();
+    // Phase B+F: decideWatchdogAction('ws_error') returns 'stop'
+    _applyWatchdogAction('ws_error');
     scheduleWSReconnect();
   });
 }

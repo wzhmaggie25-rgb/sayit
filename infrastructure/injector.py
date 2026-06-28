@@ -764,14 +764,21 @@ class Injector:
         except Exception:
             return False
 
-    def _release_modifiers(self, *, force: bool = False, reason: str = ""):
-        """Send synthetic keyup for modifiers to clear stuck hotkey/paste state."""
+    def _release_modifiers(self, reason: str = ""):
+        """Send synthetic keyup for modifiers to clear stuck hotkey/paste state.
+
+        Always checks GetAsyncKeyState before releasing each VK — never emits
+        a key-up event for an already-up key. This prevents the FEVHLBIGKOPS
+        garbage prefix (11 or 12 stray modifier key-up characters) that occurred
+        when force=True bypassed the physical state guard.
+        """
         before = self._get_modifier_states()
         for vk in self._MODIFIER_RELEASE_ORDER:
             # ── Guard: only release if the key is physically pressed ──
             # Sending keyup for an already-up modifier can produce stray
             # characters on some Windows editions/IME configurations.
-            if not force and not (ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000):
+            # Per Round 9.4: the force=True bypass is removed — always check.
+            if not (ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000):
                 continue
             inp = INPUT()
             inp.type = INPUT_KEYBOARD
@@ -783,8 +790,8 @@ class Injector:
             time.sleep(0.001)  # tiny gap between events
         time.sleep(0.03)  # let OS digest all keyup events
         logger.info(
-            "[INJECT-MODIFIERS] release force=%s reason=%s before=%s after=%s",
-            force, reason, before, self._get_modifier_states())
+            "[INJECT-MODIFIERS] release reason=%s before=%s after=%s",
+            reason, before, self._get_modifier_states())
 
     def _get_modifier_states(self):
         """Read current modifier key states via GetAsyncKeyState."""
@@ -1017,7 +1024,7 @@ class Injector:
         # If this succeeds (verified), return immediately; if it attempts
         # but can't verify, return attempted_unverified; if it can't read
         # the target, fall through to clipboard/SendInput.
-        if editability == "editable":
+        if editability == "editable_verified":
             focus_hwnd = self._get_focused_edit_hwnd()
             if focus_hwnd:
                 win32_result = self._inject_win32_selection_aware(
@@ -1039,7 +1046,7 @@ class Injector:
         strategy = self._strategy_for_context(proc, cls, context)
         is_terminal = self._is_terminal_target(proc, cls)
         if is_terminal:
-            self._release_modifiers(force=True, reason="terminal_before_paste")
+            self._release_modifiers(reason="terminal_before_paste")
 
         logger.info(
             "[INJECT-PATH] route strategy=%s terminal=%s text_len=%d "
@@ -1087,7 +1094,7 @@ class Injector:
             paste_sent, snap_kind, restore_ok = self.paste(text, terminal=is_terminal)
             if paste_sent:
                 if is_terminal:
-                    self._release_modifiers(force=True, reason="terminal_after_paste_ok")
+                    self._release_modifiers(reason="terminal_after_paste_ok")
                 # Readback to decide verified / unchanged / no_readback.
                 verdict = self._verify_target_text(
                     readback_hwnd, text, pre_text if pre_ok else None)
@@ -1121,7 +1128,7 @@ class Injector:
                 "[INJECT-PATH] terminal clipboard failed; no SendInput fallback "
                 "target_process=%s target_class=%s text_len=%d",
                 proc, cls, len(text))
-            self._release_modifiers(force=True, reason="terminal_after_paste_failed")
+            self._release_modifiers(reason="terminal_after_paste_failed")
             return _fail("terminal_clipboard_failed")
         if self._direct_input(text):
             verdict = self._verify_target_text(

@@ -201,7 +201,7 @@ class RecordingPipeline:
                 asr_total_budget = 30.0
             self._session_metrics["asr_budget_s"] = asr_total_budget
             if asr_total_budget > 0:
-                asr_deadline = time.time() + asr_total_budget
+                asr_deadline = time.monotonic() + asr_total_budget
             else:
                 asr_deadline = float("inf")
             logger.info(
@@ -212,7 +212,7 @@ class RecordingPipeline:
                 try:
                     self._eb.emit(Events.ASR_PROGRESS, "finalizing", "等待实时识别最终结果", "aliyun_streaming")
                     # Phase G: streaming finalization capped by remaining budget
-                    remaining = max(0.0, asr_deadline - time.time()) if asr_deadline != float("inf") else 8.0
+                    remaining = max(0.0, asr_deadline - time.monotonic()) if asr_deadline != float("inf") else 8.0
                     streaming_timeout = min(remaining, 8.0)  # never exceed 8s per call
                     raw_text = streaming_session.finish(timeout=streaming_timeout)
                     engine = "aliyun_streaming"
@@ -236,7 +236,7 @@ class RecordingPipeline:
                     engine = ""
             if not raw_text:
                 # Phase G: check remaining budget before batch fallback
-                if asr_deadline != float("inf") and time.time() >= asr_deadline:
+                if asr_deadline != float("inf") and time.monotonic() >= asr_deadline:
                     logger.warning("[ASR-BUDGET] total budget exhausted, skipping batch cascade")
                     self._eb.emit(Events.ASR_PROGRESS, "budget_exceeded",
                                   "ASR总预算超时，跳过降级识别", "cascade")
@@ -252,7 +252,7 @@ class RecordingPipeline:
                     return
                 try:
                     self._eb.emit(Events.ASR_PROGRESS, "fallback", "降级识别中", "cascade")
-                    remaining = max(0.0, asr_deadline - time.time()) if asr_deadline != float("inf") else None
+                    remaining = max(0.0, asr_deadline - time.monotonic()) if asr_deadline != float("inf") else None
                     raw_text, engine = asr_cascade.transcribe(pcm, remaining=remaining)
                 except Exception as e:
                     logger.error("ASR failed: %s", e)
@@ -503,7 +503,6 @@ class RecordingPipeline:
                 except Exception as e:
                     logger.warning("Silent monitor start failed: %s", e)
 
-            self._eb.emit(Events.PIPELINE_DONE, final_text)
             self.state = RecordingState.DONE
             # Determine terminal outcome based on injection result
             has_final_text = bool(final_text.strip())
@@ -590,6 +589,10 @@ class RecordingPipeline:
             return
         self._terminal_emitted = True
         self._session_metrics["terminal_outcome"] = outcome
+        # Phase G: set terminal_count here so the [SESSION] log (written in
+        # finally block) sees 1 instead of '?'. Previously this was set by
+        # the orchestrator AFTER run() returned — too late for the log.
+        self._session_metrics["terminal_count"] = 1
         self._eb.emit(Events.PIPELINE_TERMINAL, {
             "session_id": self._session_id,
             "outcome": outcome,
