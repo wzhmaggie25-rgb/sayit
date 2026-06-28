@@ -59,7 +59,7 @@ class AssessEditabilityWin32FocusTests(unittest.TestCase):
              patch.object(ctypes.windll.user32, "GetClassNameW",
                           side_effect=_fill_classname("Edit")):
             result = self.inj._assess_target_editability(None)
-        self.assertEqual(result, "editable")
+        self.assertEqual(result, "editable_verified")
 
     def test_richedit_class_focus_returns_editable(self):
         """GetGUIThreadInfo finds focused RichEdit control → editable."""
@@ -70,7 +70,7 @@ class AssessEditabilityWin32FocusTests(unittest.TestCase):
              patch.object(ctypes.windll.user32, "GetClassNameW",
                           side_effect=_fill_classname("RichEdit20W")):
             result = self.inj._assess_target_editability(None)
-        self.assertEqual(result, "editable")
+        self.assertEqual(result, "editable_verified")
 
     def test_non_edit_class_focus_falls_through(self):
         """Non-Edit/RichEdit class falls through to UIA check."""
@@ -88,7 +88,7 @@ class AssessEditabilityWin32FocusTests(unittest.TestCase):
              patch("comtypes.client.CreateObject", return_value=mock_uia):
             result = self.inj._assess_target_editability(None)
         # No patterns → no_editable
-        self.assertEqual(result, "no_editable")
+        self.assertEqual(result, "editable_probable")
 
     def test_no_focus_hwnd_falls_through_to_uia(self):
         """gui.hwndFocus == 0 → falls through to UIA check."""
@@ -103,7 +103,7 @@ class AssessEditabilityWin32FocusTests(unittest.TestCase):
                           side_effect=_set_gui_focus(0)), \
              patch("comtypes.client.CreateObject", return_value=mock_uia):
             result = self.inj._assess_target_editability(None)
-        self.assertEqual(result, "no_editable")
+        self.assertEqual(result, "editable_probable")
 
     def test_multiple_edits_only_focused_used(self):
         """Window with multiple Edit children — only the focused one is used."""
@@ -114,16 +114,16 @@ class AssessEditabilityWin32FocusTests(unittest.TestCase):
              patch.object(ctypes.windll.user32, "GetClassNameW",
                           side_effect=_fill_classname("Edit")):
             result = self.inj._assess_target_editability(None)
-        self.assertEqual(result, "editable")
+        self.assertEqual(result, "editable_verified")
 
     def test_getguithreadinfo_fails_returns_unknown(self):
-        """GetGUIThreadInfo returns False → unknown."""
+        """GetGUIThreadInfo returns False → editable_probable (Phase E)."""
         with patch.object(ctypes.windll.user32, "GetForegroundWindow",
                           return_value=4242), \
              patch.object(ctypes.windll.user32, "GetGUIThreadInfo",
                           return_value=False):
             result = self.inj._assess_target_editability(None)
-        self.assertEqual(result, "unknown")
+        self.assertEqual(result, "editable_probable")
 
     def test_no_foreground_window_returns_no_editable_verified(self):
         """No foreground window → no_editable_verified (was no_editable pre-Phase F)."""
@@ -188,13 +188,13 @@ class AssessEditabilityUiaTests(unittest.TestCase):
         """ValuePattern with CurrentIsReadOnly=False → editable."""
         uia = self._make_uia_mock(value_pattern_read_only=False)
         result = self._run_with_uia(uia)
-        self.assertEqual(result, "editable")
+        self.assertEqual(result, "editable_verified")
 
     def test_valuepattern_read_only_returns_no_editable(self):
         """ValuePattern with CurrentIsReadOnly=True → no_editable."""
         uia = self._make_uia_mock(value_pattern_read_only=True)
         result = self._run_with_uia(uia)
-        self.assertEqual(result, "no_editable")
+        self.assertEqual(result, "editable_probable")
 
     def test_no_uia_focused_element_returns_no_editable(self):
         """UIA GetFocusedElement() returns None → no_editable."""
@@ -209,7 +209,7 @@ class AssessEditabilityUiaTests(unittest.TestCase):
                           side_effect=_fill_classname("Button")), \
              patch("comtypes.client.CreateObject", return_value=mock_uia):
             result = self.inj._assess_target_editability(None)
-        self.assertEqual(result, "no_editable")
+        self.assertEqual(result, "editable_probable")
 
     # ── TextPattern-only tests ──
 
@@ -225,7 +225,7 @@ class AssessEditabilityUiaTests(unittest.TestCase):
         uia = self._make_uia_mock(
             value_pattern_read_only=None, has_text_pattern=False)
         result = self._run_with_uia(uia)
-        self.assertEqual(result, "no_editable")
+        self.assertEqual(result, "editable_probable")
 
     # ── Exception handling ──
 
@@ -244,7 +244,7 @@ class AssessEditabilityUiaTests(unittest.TestCase):
                           side_effect=_fill_classname("Button")), \
              patch("comtypes.client.CreateObject", return_value=mock_uia):
             result = self.inj._assess_target_editability(None)
-        self.assertEqual(result, "no_editable")
+        self.assertEqual(result, "editable_probable")
 
     def test_uia_create_object_failure_returns_conservative(self):
         """When comtypes.CreateObject fails → conservative no_editable."""
@@ -258,7 +258,7 @@ class AssessEditabilityUiaTests(unittest.TestCase):
                    side_effect=Exception("no COM")):
             result = self.inj._assess_target_editability(None)
         # Falls through to conservative no_editable
-        self.assertEqual(result, "no_editable")
+        self.assertEqual(result, "editable_probable")
 
 
 class AssessEditabilityConservativeGateTests(unittest.TestCase):

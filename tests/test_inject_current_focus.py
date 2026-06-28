@@ -66,7 +66,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_foreground_info",
                          return_value=self._foreground_info()),
             patch.object(self.inj, "_assess_target_editability",
-                         return_value="editable"),
+                         return_value="editable_verified"),
             patch.object(self.inj, "_get_focused_edit_hwnd",
                          return_value=0),
             patch.object(self.inj, "_get_context_for_strategy",
@@ -95,7 +95,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_foreground_info",
                          return_value=self._foreground_info(hwnd=8888)),
             patch.object(self.inj, "_assess_target_editability",
-                         return_value="editable"),
+                         return_value="editable_verified"),
             patch.object(self.inj, "_get_focused_edit_hwnd",
                          return_value=0),
             patch.object(self.inj, "_get_context_for_strategy",
@@ -135,7 +135,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_foreground_info",
                          return_value=self._foreground_info(hwnd=fg_hwnd)),
             patch.object(self.inj, "_assess_target_editability",
-                         return_value="editable"),
+                         return_value="editable_verified"),
             patch.object(self.inj, "_get_focused_edit_hwnd",
                          return_value=0),
             patch.object(self.inj, "_get_context_for_strategy",
@@ -172,7 +172,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_foreground_info",
                          return_value=self._foreground_info()),
             patch.object(self.inj, "_assess_target_editability",
-                         return_value="no_editable"),
+                         return_value="no_editable_verified"),
         ):
             result = self.inj._inject_locked("hello", target)
 
@@ -226,7 +226,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_foreground_info",
                          return_value=self._foreground_info(hwnd=fg_hwnd)),
             patch.object(self.inj, "_assess_target_editability",
-                         return_value="editable"),
+                         return_value="editable_verified"),
             patch.object(self.inj, "_get_focused_edit_hwnd",
                          return_value=0),
             patch.object(self.inj, "_get_context_for_strategy",
@@ -271,7 +271,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             # so we let it run its real logic. But since this is a mock test
             # we need to control it:
             patch.object(self.inj, "_assess_target_editability",
-                         return_value="no_editable"),
+                         return_value="no_editable_verified"),
         ):
             result = self.inj._inject_locked("hello", target)
 
@@ -295,7 +295,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_foreground_info",
                          return_value=(fg_hwnd, fg_cls, fg_pid, fg_proc)),
             patch.object(self.inj, "_assess_target_editability",
-                         return_value="editable"),
+                         return_value="editable_verified"),
             patch.object(self.inj, "_get_focused_edit_hwnd",
                          return_value=0),
             patch.object(self.inj, "_get_context_for_strategy",
@@ -328,7 +328,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_foreground_info",
                          return_value=self._foreground_info()),
             patch.object(self.inj, "_assess_target_editability",
-                         return_value="editable"),
+                         return_value="editable_verified"),
             patch.object(self.inj, "_get_focused_edit_hwnd",
                          return_value=0),
             patch.object(self.inj, "_get_context_for_strategy",
@@ -360,7 +360,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_foreground_info",
                          return_value=self._foreground_info()),
             patch.object(self.inj, "_assess_target_editability",
-                         return_value="editable"),
+                         return_value="editable_verified"),
             patch.object(self.inj, "_get_focused_edit_hwnd",
                          return_value=0),
             patch.object(self.inj, "_get_context_for_strategy",
@@ -388,7 +388,7 @@ class CurrentFocusInjectionTests(unittest.TestCase):
             patch.object(self.inj, "_foreground_info",
                          return_value=(0, "", 0, "")),
             patch.object(self.inj, "_assess_target_editability",
-                         return_value="no_editable"),
+                         return_value="no_editable_verified"),
         ):
             result = self.inj._inject_locked("hello", None)
 

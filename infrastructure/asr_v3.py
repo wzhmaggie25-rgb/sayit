@@ -57,7 +57,7 @@ class VolcengineASR:
             if word.strip()
         ]
 
-def transcribe(self, pcm_bytes: bytes, remaining: float | None = None) -> str:
+    def transcribe(self, pcm_bytes: bytes, remaining: float | None = None) -> str:
         import websocket
         logger.info("[VolcengineASR] PCM: %s", _pcm_stats(pcm_bytes))
 
