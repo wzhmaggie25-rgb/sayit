@@ -75,6 +75,12 @@ class RecordingPipeline:
             "inject_state": "",
             "terminal_outcome": "",
             "asr_budget_s": 0,
+            "hotkey_start_count": 0,
+            "hotkey_stop_count": 0,
+            "native_emitted_count": 0,
+            "fallback_stop_count": 0,
+            "toggle_ignored_count": 0,
+            "terminal_count": 0,
         }
         self._terminal_emitted = False  # Phase F: reset per session so reused pipeline instances work
 
@@ -534,7 +540,13 @@ class RecordingPipeline:
                     f"target_cls={self._session_metrics.get('target_cls', '?')} "
                     f"inject_state={self._session_metrics.get('inject_state', '?')} "
                     f"terminal={terminal_outcome} "
-                    f"budget_s={self._session_metrics.get('asr_budget_s', '?')}"
+                    f"budget_s={self._session_metrics.get('asr_budget_s', '?')} "
+                    f"hk_start={self._session_metrics.get('hotkey_start_count', '?')} "
+                    f"hk_stop={self._session_metrics.get('hotkey_stop_count', '?')} "
+                    f"hk_ignored={self._session_metrics.get('toggle_ignored_count', '?')} "
+                    f"native_emit={self._session_metrics.get('native_emitted_count', '?')} "
+                    f"fallback_stop={self._session_metrics.get('fallback_stop_count', '?')} "
+                    f"term_cnt={self._session_metrics.get('terminal_count', '?')}"
                 )
                 logger.info(session_log)
             except Exception:

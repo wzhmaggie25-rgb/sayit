@@ -98,6 +98,11 @@ class SayitOrchestrator:
         self._keyboard_helper = None
         self._stop_watcher: Optional[RAltStopWatcher] = None
 
+    # ── Phase G: RAlt diagnostic counters ───────────────────
+        self._hotkey_start_count = 0
+        self._hotkey_stop_count = 0
+        self._toggle_ignored_count = 0
+
     # ── Public API ──────────────────────────────────────────
 
     @property
@@ -172,6 +177,7 @@ class SayitOrchestrator:
         logger.info(
             "[orchestrator] toggle ignored — pipeline busy in stage=%s", stage)
         try:
+            self._toggle_ignored_count += 1
             self._eb.emit(Events.TOGGLE_IGNORED, stage)
         except Exception:
             pass
@@ -255,12 +261,15 @@ class SayitOrchestrator:
     # ── Internal ────────────────────────────────────────────
 
     def _on_hotkey_start(self):
-        """Called by hotkey manager when recording should start.
+        """Start a new recording pipeline.
 
         P0 mutex guard: silently rejects when a pipeline is already active.
         Two pipelines must never compete for injector._lock — that is the
         root cause of keyboard hijack and corruption on long recordings.
         """
+        # Phase G: count this start attempt
+        self._hotkey_start_count += 1
+
         # UIPI check: warn if foreground window is elevated (admin) and we are not
         try:
             from infrastructure.injector import is_uipi_blocked
@@ -344,6 +353,23 @@ class SayitOrchestrator:
                 try:
                     if self._stop_watcher is not None:
                         self._stop_watcher.disarm()
+                except Exception:
+                    pass
+                # Phase G: snapshot orchestrator-level counters into pipeline
+                # session metrics for structured diagnostics
+                try:
+                    if hasattr(_my_pipeline, '_session_metrics'):
+                        _my_pipeline._session_metrics["hotkey_start_count"] = self._hotkey_start_count
+                        _my_pipeline._session_metrics["hotkey_stop_count"] = self._hotkey_stop_count
+                        _my_pipeline._session_metrics["toggle_ignored_count"] = self._toggle_ignored_count
+                        if self._keyboard_helper:
+                            _my_pipeline._session_metrics["native_emitted_count"] = \
+                                self._keyboard_helper.get_total_emitted()
+                        if self._stop_watcher:
+                            _my_pipeline._session_metrics["fallback_stop_count"] = \
+                                self._stop_watcher.fallback_stops
+                        _my_pipeline._session_metrics["terminal_count"] = \
+                            1 if _my_pipeline._terminal_emitted else 0
                 except Exception:
                     pass
                 # Focus restore removed per Round 9.1 review: unconditional
@@ -482,6 +508,8 @@ class SayitOrchestrator:
         Subsequent stop requests are no-ops; RECORDING_STOPPING ACK fires
         exactly once per session.
         """
+        # Phase G: count this stop attempt
+        self._hotkey_stop_count += 1
         if not self._try_latch_stop():
             logger.debug("[orchestrator] stop ignored — already latched")
             return False
