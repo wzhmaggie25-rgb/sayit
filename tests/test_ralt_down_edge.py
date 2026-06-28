@@ -57,13 +57,14 @@ class RAltStopWatcherDownEdgeTests(unittest.TestCase):
         w.arm(total_emitted=0)
         time.sleep(0.07)
 
-        # Down — watcher fires fallback immediately
+        # Down — watcher fires fallback after grace period
         w._test_emitted_override = 0     # hook hasn't processed yet
         w._test_ralt_pressed = True
-        time.sleep(0.05)
+        # Need: poll interval (~10ms) + grace period (40ms) + slack
+        time.sleep(0.10)
 
         self.assertEqual(w.fallback_stops, 1,
-                         "fallback fires on down edge immediately")
+                         "fallback fires on down edge after grace")
 
         # Later the hook processes the up — emitted increases
         w._test_emitted_override = 1
@@ -146,7 +147,8 @@ class RAltStopWatcherDownEdgeTests(unittest.TestCase):
         time.sleep(0.07)
 
         w._test_ralt_pressed = True
-        time.sleep(0.05)
+        # Wait for: poll interval (~10ms) + grace period (40ms) + slack
+        time.sleep(0.12)
 
         self.assertFalse(w.is_armed,
                          "watcher must disarm after down-edge detection")
