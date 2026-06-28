@@ -67,9 +67,10 @@ class Events:
     AI_ERROR = "ai:error"                        # error_msg: str
     AI_DEGRADED = "ai:degraded"                  # message: str (e.g. "AI 整理超时，已使用识别结果")
 
-    # Pipeline
-    PIPELINE_DONE = "pipeline:done"              # final_text: str
-    PIPELINE_ERROR = "pipeline:error"            # error_msg: str
+    # Pipeline — terminal event for session lifecycle
+    PIPELINE_TERMINAL = "pipeline:terminal"          # session_id, outcome, stage, reason_code, final_text_available
+    PIPELINE_DONE = "pipeline:done"                  # final_text: str (legacy, kept for compatibility)
+    PIPELINE_ERROR = "pipeline:error"                # error_msg: str (legacy, kept for compatibility)
 
     # Injection
     INJECTION_DONE = "injection:done"            # result: InjectionResult (structured)

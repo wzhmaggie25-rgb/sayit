@@ -172,6 +172,13 @@ def wire_events():
         "event": "ai_result", "text": t, "provider": pid, "model": mn,
     }))
     eb.on(Events.PIPELINE_DONE, lambda t: _enqueue({"event": "pipeline_done", "text": t}))
+    eb.on(Events.PIPELINE_TERMINAL, lambda payload: _enqueue({
+        "event": "pipeline_terminal",
+        "session_id": payload.get("session_id", ""),
+        "outcome": payload.get("outcome", ""),
+        "stage": payload.get("stage", ""),
+        "reason_code": payload.get("reason_code", ""),
+    }))
     eb.on(Events.PIPELINE_ERROR, lambda m: _enqueue({"event": "error", "message": str(m)}))
     eb.on(Events.RECORDING_ERROR, lambda m: _enqueue({"event": "error", "message": str(m)}))
     eb.on(Events.ASR_ERROR, lambda m: _enqueue({"event": "error", "message": str(m)}))

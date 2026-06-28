@@ -29,6 +29,9 @@ class RecordingPipeline:
         self._state = RecordingState.IDLE
         self._lock = threading.Lock()
         self._stop_flag = False
+        self._session_id = ""
+        self._terminal_emitted = False  # Phase C: latch for exactly one terminal event
+        self._session_metrics = {}  # Phase H: structured per-session diagnostics
 
     @property
     def state(self) -> RecordingState:
@@ -61,6 +64,18 @@ class RecordingPipeline:
         """
         self._stop_flag = False
         self._session_id = uuid.uuid4().hex[:12]
+        self._session_metrics = {
+            "duration_s": 0,
+            "streaming_used": False,
+            "engine": "",
+            "ai_provider": "",
+            "ai_degraded": False,
+            "target_proc": "",
+            "target_cls": "",
+            "inject_state": "",
+            "terminal_outcome": "",
+            "asr_budget_s": 0,
+        }
 
         # ── COM apartment initialization (for UIA injector) ─────
         com_initialized = False
@@ -103,6 +118,7 @@ class RecordingPipeline:
                 if streaming_session:
                     streaming_session.start()
                     audio_capture.set_chunk_callback(streaming_session.enqueue_audio)
+                    self._session_metrics["streaming_used"] = True
             except Exception as e:
                 logger.warning("Streaming ASR start failed, will use batch cascade: %s", e)
                 streaming_session = None
@@ -117,6 +133,7 @@ class RecordingPipeline:
                 audio_capture.set_chunk_callback(None)
                 self._eb.emit(Events.RECORDING_ERROR, f"音频设备启动失败: {e}")
                 self.state = RecordingState.ERROR
+                self._emit_terminal("failed", "capturing", "audio_start_failed")
                 return
 
             # Tick timer thread
@@ -154,19 +171,41 @@ class RecordingPipeline:
                 self._eb.emit(Events.RECORDING_ERROR, "录音太短")
                 self.state = RecordingState.ERROR
                 self._eb.emit(Events.PIPELINE_ERROR, "录音太短")   # P0: always send final event so float exits STOPPING
+                self._emit_terminal("failed", "capturing", "too_short")
                 return
 
             self._eb.emit(Events.RECORDING_STOPPED)
             logger.info("Pipeline: captured %d PCM bytes in %ds", len(pcm), seconds)
 
+            self._session_metrics["duration_s"] = seconds
+
             # ── Phase 2: ASR ─────────────────────────────────────────
             self.state = RecordingState.TRANSCRIBING
             raw_text = ""
             engine = ""
+
+            # Phase G: total ASR budget (streaming + batch)
+            try:
+                from infrastructure.config_store import ConfigStore
+                asr_total_budget = ConfigStore().get("asr_total_budget_s", 30.0)
+            except Exception:
+                asr_total_budget = 30.0
+            self._session_metrics["asr_budget_s"] = asr_total_budget
+            if asr_total_budget > 0:
+                asr_deadline = time.time() + asr_total_budget
+            else:
+                asr_deadline = float("inf")
+            logger.info(
+                "[ASR-BUDGET] total_budget=%.1fs deadline=%.3f",
+                asr_total_budget, asr_deadline)
+
             if streaming_session:
                 try:
                     self._eb.emit(Events.ASR_PROGRESS, "finalizing", "等待实时识别最终结果", "aliyun_streaming")
-                    raw_text = streaming_session.finish(timeout=max(45.0, seconds * 0.35))
+                    # Phase G: streaming finalization capped by remaining budget
+                    remaining = max(0.0, asr_deadline - time.time()) if asr_deadline != float("inf") else 8.0
+                    streaming_timeout = min(remaining, 8.0)  # never exceed 8s per call
+                    raw_text = streaming_session.finish(timeout=streaming_timeout)
                     engine = "aliyun_streaming"
                     # ── Quality gate: if streaming output is too short for the
                     #     recording duration, fall back to batch cascade which has
@@ -187,6 +226,20 @@ class RecordingPipeline:
                     raw_text = ""
                     engine = ""
             if not raw_text:
+                # Phase G: check remaining budget before batch fallback
+                if asr_deadline != float("inf") and time.time() >= asr_deadline:
+                    logger.warning("[ASR-BUDGET] total budget exhausted, skipping batch cascade")
+                    self._eb.emit(Events.ASR_PROGRESS, "budget_exceeded",
+                                  "ASR总预算超时，跳过降级识别", "cascade")
+                    self._eb.emit(Events.ASR_ERROR, "ASR总预算超时")
+                    self._eb.emit(Events.RECORDING_ERROR, "ASR总预算超时")
+                    self._eb.emit(Events.ASR_RESULT, "", "")
+                    asr_raw_text = ""
+                    self._eb.emit(Events.RECORDING_ERROR, "ASR总预算超时")
+                    self.state = RecordingState.ERROR
+                    self._eb.emit(Events.PIPELINE_ERROR, "ASR总预算超时")
+                    self._emit_terminal("failed", "transcribing", "asr_total_budget_exceeded")
+                    return
                 try:
                     self._eb.emit(Events.ASR_PROGRESS, "fallback", "降级识别中", "cascade")
                     raw_text, engine = asr_cascade.transcribe(pcm)
@@ -196,15 +249,18 @@ class RecordingPipeline:
                     self._eb.emit(Events.RECORDING_ERROR, f"ASR失败: {e}")
                     self.state = RecordingState.ERROR
                     self._eb.emit(Events.PIPELINE_ERROR, f"ASR失败: {e}")
+                    self._emit_terminal("failed", "transcribing", "batch_asr_failed")
                     return
             logger.info("[ASR-RAW] provider=%s text=%r len=%d", engine, raw_text, len(raw_text))
             self._eb.emit(Events.ASR_RESULT, raw_text, engine)
             asr_raw_text = raw_text
+            self._session_metrics["engine"] = engine
 
             if not raw_text.strip():
                 self._eb.emit(Events.RECORDING_ERROR, "未识别到语音内容")
                 self.state = RecordingState.ERROR
                 self._eb.emit(Events.PIPELINE_ERROR, "未识别到语音内容")
+                self._emit_terminal("failed", "transcribing", "empty_asr_result")
                 return
 
             # ── Layer 2: Local correction (hotwords + learned rules) ───
@@ -254,14 +310,17 @@ class RecordingPipeline:
                         final_text = corrected
                         ai_provider_id = provider_id
                         ai_model_name = model_name
+                        self._session_metrics["ai_provider"] = provider_id or "unknown"
                     else:
                         logger.warning("AI correction returned empty, using raw text")
                         ai_degraded = True
+                    self._session_metrics["ai_degraded"] = True
                 except httpx.TimeoutException:
                     logger.warning(
                         "[AI] deadline %.0fs exceeded — falling back to locally_refined_text",
                         ai_deadline)
                     ai_degraded = True
+                    self._session_metrics["ai_degraded"] = True
                     self._eb.emit(Events.AI_DEGRADED,
                                   f"AI 整理超时（{ai_deadline:.0f}s），已使用识别结果")
                     try:
@@ -273,6 +332,7 @@ class RecordingPipeline:
                     logger.warning("AI correction failed: %s, using raw text", e)
                     self._eb.emit(Events.AI_ERROR, str(e))
                     ai_degraded = True
+                    self._session_metrics["ai_degraded"] = True
             self._eb.emit(Events.AI_RESULT, final_text, ai_provider_id, ai_model_name)
 
             # ── Post-processing: remove trailing period (对标闪电说 "去除结尾句号") ──
@@ -293,6 +353,11 @@ class RecordingPipeline:
                 logger.warning("Injection threw exception: %s", e)
 
             # Determine state and emit appropriate events
+            self._session_metrics["target_proc"] = injector.last_target_proc or ""
+            self._session_metrics["target_cls"] = injector.last_target_class or ""
+            if inject_result:
+                self._session_metrics["inject_state"] = inject_result.state
+
             if inject_result is None:
                 # Exception before InjectionResult was returned
                 synthetic = InjectionResult(ok=False, state="injection_failed",
@@ -326,11 +391,12 @@ class RecordingPipeline:
                 self._eb.emit(Events.INJECTION_DONE, inject_result)
                 self._eb.emit(Events.NO_EDITABLE_TARGET, final_text)
                 # Gate large result card through production eligibility
-                if should_show_large_result_card(
+                # Phase G: never create result card with empty text
+                if final_text and final_text.strip() and should_show_large_result_card(
                     state=inject_result.state,
                     injection_dispatched=inject_result.injection_dispatched,
                     inserted_verified=inject_result.verified if hasattr(inject_result, "verified") else False,
-                    target_is_sayit_window=False,
+                    target_is_sayit_window=self._is_sayit_target(injector),
                 ):
                     self._eb.emit(Events.RESULT_CARD_SHOW, final_text,
                                   locally_refined_text,
@@ -348,7 +414,7 @@ class RecordingPipeline:
                     state=inject_result.state,
                     injection_dispatched=inject_result.injection_dispatched if inject_result else False,
                     inserted_verified=inject_result.verified if (inject_result and hasattr(inject_result, "verified")) else False,
-                    target_is_sayit_window=False,
+                    target_is_sayit_window=self._is_sayit_target(injector),
                 ):
                     self._eb.emit(Events.RESULT_CARD_SHOW, final_text,
                                   locally_refined_text,
@@ -384,8 +450,12 @@ class RecordingPipeline:
                         "no_editable_target", "attempted_unverified"):
                     # no_editable_target / attempted_unverified: save history,
                     # show result card, but skip SilentMonitor.
-                    pass
+                    stage_label = inject_result.state
+                    self._emit_terminal("no_target" if stage_label == "no_editable_target"
+                                        else "attempted_unverified",
+                                        "injecting", stage_label)
                 else:
+                    self._emit_terminal("failed", "injecting", "injection_failed")
                     return  # already emitted PIPELINE_ERROR
 
             # ── Phase 6: Silent monitor ─────────────────────────────
@@ -420,12 +490,84 @@ class RecordingPipeline:
 
             self._eb.emit(Events.PIPELINE_DONE, final_text)
             self.state = RecordingState.DONE
+            # Determine terminal outcome based on injection result
+            if inject_result and inject_result.state == "verified_success":
+                self._emit_terminal("success", "done", "verified_success")
+            elif inject_result and inject_result.state == "attempted_unverified":
+                self._emit_terminal("attempted_unverified", "done", "attempted_unverified")
+            elif inject_result and inject_result.state == "no_editable_target":
+                self._emit_terminal("no_target", "done", "no_editable_target")
+            else:
+                self._emit_terminal("failed", "done", "injection_failed")
         finally:
             if com_initialized:
                 try:
                     comtypes.CoUninitialize()
                 except Exception:
                     pass
+
+            # Phase H: structured per-session diagnostics (no user text, no keys)
+            try:
+                terminal_outcome = self._session_metrics.get("terminal_outcome", "unknown")
+                session_log = (
+                    f"[SESSION] id={self._session_id} "
+                    f"duration={self._session_metrics.get('duration_s', '?')}s "
+                    f"streaming={self._session_metrics.get('streaming_used', '?')} "
+                    f"engine={self._session_metrics.get('engine', '?')} "
+                    f"ai={self._session_metrics.get('ai_provider', '?')} "
+                    f"ai_degraded={self._session_metrics.get('ai_degraded', '?')} "
+                    f"target_proc={self._session_metrics.get('target_proc', '?')} "
+                    f"target_cls={self._session_metrics.get('target_cls', '?')} "
+                    f"inject_state={self._session_metrics.get('inject_state', '?')} "
+                    f"terminal={terminal_outcome} "
+                    f"budget_s={self._session_metrics.get('asr_budget_s', '?')}"
+                )
+                logger.info(session_log)
+            except Exception:
+                pass
+
+    def _is_sayit_target(self, injector) -> bool:
+        """Determine if the last injection target was a SayIt-owned window.
+
+        Checks the injector's stored last_target_proc and last_target_title
+        against known SayIt window patterns (matches orchestrator._is_sayit_hwnd logic).
+        """
+        try:
+            title = injector.last_target_title or ""
+            cls = injector.last_target_class or ""
+            # SayIt windows: main window, float bar, result card.
+            # Match by title keywords or known class+title patterns.
+            if any(kw in title for kw in ("SayIt", "sayit", "Sayit")):
+                return True
+            if "Chrome_WidgetWin_0" in cls and ("SayIt" in title or "sayit" in title):
+                return True
+            return False
+        except Exception:
+            return False
+
+    def _emit_terminal(self, outcome: str, stage: str = "",
+                       reason_code: str = ""):
+        """Emit PIPELINE_TERMINAL exactly once per session (Phase C).
+
+        Uses a latch to guarantee exactly one terminal event per session,
+        preventing duplicate DONE/ERROR/TERMINAL dispatches.
+
+        Args:
+            outcome: 'success', 'no_target', 'attempted_unverified',
+                     'failed', 'aborted'
+            stage: The pipeline stage where the terminal occurred.
+            reason_code: Machine-readable reason code.
+        """
+        if self._terminal_emitted:
+            return
+        self._terminal_emitted = True
+        self._session_metrics["terminal_outcome"] = outcome
+        self._eb.emit(Events.PIPELINE_TERMINAL, {
+            "session_id": self._session_id,
+            "outcome": outcome,
+            "stage": stage,
+            "reason_code": reason_code,
+        })
 
     def stop(self):
         """Signal the pipeline to stop recording."""
