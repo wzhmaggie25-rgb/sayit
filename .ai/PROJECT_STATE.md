@@ -18,6 +18,51 @@
 - **Current branch:** feature/silent-learning-stabilization
 - **Base branch (stable):** backup/local-working-2026-06-25
 
+## Round 9.2 — P0 Runtime Recovery
+
+> **2026-06-28** — 完成 7 个 P0 主线故障修复。分支 `feature/silent-learning-stabilization`。
+> **状态**: `BLOCKED_USER_VALIDATION` — 等待实机验收。
+> **最终 HEAD**: `bc3f13b`
+
+### Round 9.2 修复的 P0 问题
+
+| # | 问题 | 根因 | 修复 |
+|---|------|------|------|
+| 1 | Streaming ASR finish() 永久卡死 | `queue.put(None)` 在 worker 退出/queue 满时阻塞 | Phase B: `_put_sentinel_safe()` + `recognition.stop()` 看门狗 |
+| 2 | 未捕获 Pipeline 异常 → Float 永久 STOPPING | Uncaught Exception 不 emit 终态事件 | Phase C: `PIPELINE_TERMINAL` 事件 + latch 确保恰好一次 |
+| 3 | Result card 空文字 | show → done → load 竞态清除 payload | Phase E: payload 只由 destroyResultCard/新 session 清除 |
+| 4 | Chrome/Obsidian/微信 误判无输入目标 | TextPattern-only 被认作 `no_editable` | Phase F: `editable_probable` 三态 + 内容可编辑元素放开 |
+| 5 | `target_is_sayit_window` 硬编码 False | 未实现 SayIt 窗口检测 | Phase F: `_is_sayit_target()` 按标题/类名匹配 |
+| 6 | 缺少"每 session 恰好一个 terminal"契约 | 部分 exit 点不 emit 事件 | Phase C: `_terminal_emitted` latch + 8 个出口全覆盖 |
+| 7 | Streaming + batch + AI 多层 timeout 叠加 | ASR 无总预算控制 | Phase G: `asr_total_budget_s` 30s 默认 + deadline 检查 |
+
+### Round 9.2 检查点 SHA
+
+| Phase | SHA | 说明 |
+|-------|-----|------|
+| A | `1c7fdfe` | 验证测试 (deadlock, terminal, editability, race) |
+| B | `386bad5` | Bounded streaming finish + 安全 sentinel + stop 看门狗 |
+| C | `51a2356` | Terminal 事件基础 + session metrics + SayIt 检测 |
+| D+E | `67d79ed` | Session 看门狗 (2min) + result-card 竞态修复 |
+| F | `0bb5b6a` | editable_probable 三态 + 测试 hwnd 补丁 |
+| G | `bc3f13b` | asr_total_budget_s 配置 (30s) |
+
+### Round 9.2 门禁验证
+
+```
+pytest tests/ -v --timeout=30       → 414 passed, 1 skipped, 0 failures
+node --check frontend/main.js       → OK
+node --check frontend/preload.js    → OK
+node frontend/_smoke_result_card.js → SMOKE TEST PASSED
+node frontend/_test_result_card_race.js → 19 TESTS PASSED
+```
+
+### Round 9.2 未解决的问题
+
+无遗留问题。所有门禁条件满足。等待用户实机验收。
+
+---
+
 ## Architecture
 
 ### 各层的职责

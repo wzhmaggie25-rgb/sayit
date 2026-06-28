@@ -4,7 +4,35 @@
 
 ## 状态
 
-**ZCODE_READY**
+**BLOCKED_USER_VALIDATION**
+
+---
+
+## 当前状态
+
+Round 9.2 P0 主线故障修复已完成。6 个检查点已提交，全量门禁通过：
+- 414 passed, 1 skipped, 0 failures (pytest -v --timeout=30)
+- 前端 4 个 Node 检查全部通过
+
+等待用户实机验收。
+
+## Round 9.2 完成项
+
+| Phase | 内容 | SHA |
+|-------|------|-----|
+| A | 验证测试 | `1c7fdfe` |
+| B | Bounded streaming finish | `386bad5` |
+| C | Terminal 事件 + metrics | `51a2356` |
+| D+E | Watchdog + race fix | `67d79ed` |
+| F | Editability 三态 | `0bb5b6a` |
+| G | ASR 总预算 | `bc3f13b` |
+
+## Round 9.2 备注
+
+- 所有 Phase A-G 变更已通过全量回归测试
+- 文档：`.ai/ROUND9_2_SELF_REVIEW.md` (已生成)
+- 状态文件：`PROJECT_STATE.md` 已追加 Round 9.2 章节
+- 分支已推送到 `origin/feature/silent-learning-stabilization`
 
 ## 结论
 

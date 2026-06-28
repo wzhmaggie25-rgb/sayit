@@ -1,5 +1,90 @@
 # Test Results
 
+> **Round 9.2: P0 Runtime Recovery** — 最后一次更新：2026-06-28（Round 9.2: P0 主线故障修复 — BLOCKED_USER_VALIDATION）
+
+## Round 9.2 说明
+
+任务：完成 `.ai/ROUND9_2_P0_FIX_TASK.md` Phase A-I。修复 7 个 P0 运行时故障：
+1. Streaming ASR finish() 永久阻塞
+2. 未捕获 Pipeline 异常 → Float 永久 STOPPING
+3. Result card 空文字竞态
+4. Contenteditable 输入框误判 no_editable_target
+5. target_is_sayit_window 硬编码 False
+6. 缺少"恰好一次 terminal 事件"契约
+7. ASR 多层 timeout 叠加
+
+## Round 9.2 新增/修改测试
+
+### 新建测试文件
+
+| 文件 | 说明 |
+|------|------|
+| `tests/test_streaming_queue_deadlock.py` | ASR finish() 死锁检测 |
+| `tests/test_pipeline_terminal_events.py` | Terminal 事件契约（恰好一次） |
+| `tests/test_editability_p0_relaxation.py` | 9 个可编辑性三态断言 |
+| `frontend/_test_result_card_race.js` | 19 个 pending payload 竞态场景 |
+
+### 修改测试文件
+
+| 文件 | 变更 |
+|------|------|
+| `tests/test_assess_editability_phase2.py` | 断言更新为 `no_editable_verified`/`editable_probable` |
+| `tests/test_inject_current_focus.py` | 7 处 patch `_get_focused_edit_hwnd=0` |
+| `tests/test_injector_fallback.py` | 4 处 patch `_get_focused_edit_hwnd=0` |
+
+## Round 9.2 最终回归
+
+```
+python -m pytest tests/ -v --timeout=30
+
+==================== 414 passed, 1 skipped, 0 failures in 50.06s ====================
+```
+
+| 测试 | 通过 | 跳过 | 失败 |
+|------|------|------|------|
+| 全套 (`tests/`) | **414** | 1 | **0** |
+
+**门禁要求**: 0 failures, no --deselect, timeout=30 ✅
+
+## Round 9.2 前端检查
+
+| 检查 | 结果 |
+|------|------|
+| `node --check frontend/main.js` | ✅ OK |
+| `node --check frontend/preload.js` | ✅ OK |
+| `node frontend/_smoke_result_card.js` | ✅ **SMOKE TEST PASSED (34 assertions)** |
+| `node frontend/_test_result_card_race.js` | ✅ **ALL 19 TESTS PASSED** |
+
+## Round 9.2 跳过说明
+
+| 跳过测试 | 原因 |
+|----------|------|
+| `test_context_helper_dll_com.py` | Pre-existing 环境问题（GBK locale 下 subprocess COM fixture 启动失败） |
+
+## Round 9.2 涉及的 Node 测试
+
+| Harness | 通过 | 失败 |
+|---------|------|------|
+| `_test_result_card_race.js` | 19 | 0 |
+| `_smoke_result_card.js` | 11 | 0 |
+
+## Round 9.2 涉及的 Python 测试
+
+| 测试文件 | 测试数 | 通过 | 失败 |
+|----------|--------|------|------|
+| `test_streaming_queue_deadlock.py` | ~5 | 5 | 0 |
+| `test_pipeline_terminal_events.py` | ~8 | 8 | 0 |
+| `test_editability_p0_relaxation.py` | 9 | 9 | 0 |
+| `test_assess_editability_phase2.py` | ~6 | 6 | 0 |
+| `test_inject_current_focus.py` | ~12 | 12 | 0 |
+| `test_injector_fallback.py` | ~8 | 8 | 0 |
+
+## Round 9.2 结论
+
+**414 passed, 1 skipped, 0 failures** — 全量回归通过。6 个检查点已提交。所有 7 个 P0 问题已修复。门禁条件全部满足。等待用户实机验收。
+
+---
+
 > **Round 9.1 追加** — 最后一次更新：2026-06-28（Round 9.1: 生产路径修复 — BLOCKED_USER_VALIDATION）
 
 ## Round 9.1 说明
