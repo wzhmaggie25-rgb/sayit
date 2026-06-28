@@ -15,6 +15,12 @@ let pendingResultCardPayload = null;  // {finalText, lastTranscription} — repl
 let pendingResultText = '';           // main-process source-of-truth for clipboard write
 let activeSessionId = '';             // current recording session — stale events are ignored
 let autoCloseTimer = null;            // result-card auto-close timer handle
+
+// ── Result card geometry constants (Phase 1) ─────────
+const CARD_WIDTH = 360;
+const CARD_MIN_HEIGHT = 150;
+const CARD_MAX_HEIGHT = 260;
+const CARD_GAP = 14;  // px between card bottom edge and float bar top edge
 let ws = null;
 
 // ── Single instance lock: prevent multiple Sayit windows ──
@@ -213,17 +219,59 @@ function destroyFloat() {
   floatReady = false;
 }
 
+// ── Result card geometry helpers (Phase 1) ──────────
+
+function calcResultCardPosition(cardHeight) {
+  // Determine anchor: prefer elementPositions (reported by float renderer),
+  // fall back to floatWin.getBounds().
+  const display = currentDisplay || screen.getPrimaryDisplay();
+  const wa = display.workArea;
+  let anchorTop, anchorLeft, anchorWidth;
+
+  if (Array.isArray(elementPositions) && elementPositions.length > 0) {
+    // Use the first element position from float renderer (visible bubble area)
+    const ep = elementPositions[0];
+    anchorTop = ep.top;
+    anchorLeft = ep.left;
+    anchorWidth = ep.right - ep.left;
+  } else if (isUsableWindow(floatWin)) {
+    // Fallback: estimate visible bar at bottom of float window
+    // Float window is 500x500; visible bubble is ~86px wide, ~34px tall, bottom-center
+    const fb = floatWin.getBounds();
+    const barHeight = 34;
+    const barWidth = 86;
+    anchorTop = fb.y + fb.height - barHeight;
+    anchorLeft = fb.x + Math.floor((fb.width - barWidth) / 2);
+    anchorWidth = barWidth;
+  } else {
+    // Last resort: center on primary display bottom
+    const ww = wa.width;
+    return {
+      x: Math.floor(wa.x + (ww - CARD_WIDTH) / 2),
+      y: Math.floor(wa.y + wa.height - cardHeight - CARD_GAP - 34),
+    };
+  }
+
+  // Horizontal center on anchor, then clamp to workArea
+  let cardX = Math.floor(anchorLeft + (anchorWidth / 2) - (CARD_WIDTH / 2));
+  cardX = Math.max(wa.x, Math.min(cardX, wa.x + wa.width - CARD_WIDTH));
+
+  // Vertical: card bottom edge sits CARD_GAP above anchor top, then clamp
+  let cardBottom = anchorTop - CARD_GAP;
+  let cardY = cardBottom - cardHeight;
+  cardY = Math.max(wa.y, Math.min(cardY, wa.y + wa.height - cardHeight));
+
+  return { x: cardX, y: cardY };
+}
+
 // ── Result card window ──────────────────────────
 
-function createResultCardWindow() {
+function createResultCardWindow(estimatedHeight) {
   if (isUsableWindow(resultCardWin)) return;
-  const d = screen.getPrimaryDisplay();
-  const { x, y, width, height } = d.workArea;
-  const cw = 420, ch = 320;
-  const cx = Math.floor(x + (width - cw) / 2);
-  const cy = Math.floor(y + (height - ch) / 2);
+  const h = Math.min(CARD_MAX_HEIGHT, Math.max(CARD_MIN_HEIGHT, estimatedHeight || 200));
+  const pos = calcResultCardPosition(h);
   resultCardWin = new BrowserWindow({
-    x: cx, y: cy, width: cw, height: ch,
+    x: pos.x, y: pos.y, width: CARD_WIDTH, height: h,
     type: 'panel', transparent: true, frame: false, hasShadow: true,
     maximizable: false, resizable: false, minimizable: false,
     focusable: false, skipTaskbar: true,
@@ -273,12 +321,19 @@ function showResultCard(finalText, lastTranscription, state, message) {
     state: String(state || ''),
     message: String(message || ''),
   };
+  // Estimate card height based on text length
+  const textLen = (payload.finalText.length + payload.lastTranscription.length);
+  // Rough: ~10 chars per line at 14px font in 360px width, plus padding + header + actions
+  const estimatedLines = Math.max(1, Math.ceil(textLen / 45));
+  const estimatedHeight = Math.min(CARD_MAX_HEIGHT, Math.max(CARD_MIN_HEIGHT,
+    60 + estimatedLines * 20  // base padding + line heights
+  ));
   // Always capture as the source of truth — newer payloads win if multiple
   // results arrive while the renderer is still mounting.
   pendingResultCardPayload = payload;
   pendingResultText = payload.finalText;
   if (!isUsableWindow(resultCardWin)) {
-    createResultCardWindow();
+    createResultCardWindow(estimatedHeight);
   }
   if (resultCardReady && isUsableWindow(resultCardWin)) {
     try {
