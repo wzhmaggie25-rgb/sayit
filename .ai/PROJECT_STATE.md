@@ -1,5 +1,5 @@
 # Project State
-> 最后一次更新：2026-06-28（Round 9: 运行时稳定性修复完成 — BLOCKED_USER_VALIDATION）
+> 最后一次更新：2026-06-28（Round 9.3: P0 主线修复完成 — BLOCKED_USER_VALIDATION）
 
 ## Overview
 
@@ -23,6 +23,37 @@
 > **2026-06-28** — 完成 7 个 P0 主线故障修复。分支 `feature/silent-learning-stabilization`。
 > **状态**: `BLOCKED_USER_VALIDATION` — 等待实机验收。
 > **最终 HEAD**: `bc3f13b`
+
+## Round 9.3 — P0 主线修复
+
+> **2026-06-28** — 完成 8 个 P0 主线故障修复。分支 `feature/silent-learning-stabilization`。
+> **状态**: `BLOCKED_USER_VALIDATION` — 等待实机验收。
+> **最终 HEAD**: `344b52f`
+
+### Round 9.3 修复的 P0 问题
+
+| # | 问题 | 根因 | 修复 |
+|---|------|------|------|
+| 1 | 长录音期间会话看门狗误报超时 | Watchdog 从 `recording_started` 启动，超过 2 分钟触发 | Phase B: watchdog 仅在 `recording_stopping` 启动 |
+| 2 | streaming finish/abort 边界清理不一致 | 两函数实现不同清理逻辑 | Phase C: 共享 `_STOP_EXECUTOR` + 单调 deadline |
+| 3 | ASR 总预算未传递到各个引擎 | 每个引擎有各自硬编码超时值 | Phase D: `remaining` 参数 + `min(engine_default, remaining)` |
+| 4 | 5 种编辑性状态过于复杂 | 5 个枚举值包含冗余的 `no_editable` | Phase E: 精简为 3 态 — `editable_verified` / `editable_probable` / `no_editable_verified` |
+| 5 | 终端事件 latch 跨 session 不重置 | `_terminal_emitted` 从未重置过 | Phase F: `run()` 内重置 + `final_text_available` 传播 |
+| 6 | RAlt 诊断缺乏结构化计数器 | 无统一位置记录事件数量 | Phase G: 6 个计数器并快照至 `_session_metrics` |
+| 7 | 测试断言未跟随三态重命名 | 旧值 `"editable"` / `"no_editable"` 仍然存在于测试中 | 更新 23 处断言 |
+| 8 | `asr_v3.py` transcribe 缩进错误 | Edit 操作导致方法缩进丢失 | 恢复 4 空格缩进 |
+
+### Round 9.3 Commit 链
+
+```
+344b52f fix: correct asr_v3.py indentation and update test assertions
+8a6ed4a task: Phase A1+B - frontend session_lifecycle module and watchdog fix
+c916257 task: Phase G - RAlt diagnostic counters in _session_metrics
+80b054a task: Phase F - terminal as sole frontend reset + final_text_available
+801dd2c task: Phase E - true tri-state editability
+c8abcfb task: Phase D - propagate remaining budget to all ASR engines
+4d4df37 task: Phase C - unify streaming finish/abort
+```
 
 ### Round 9.2 修复的 P0 问题
 
