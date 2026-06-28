@@ -277,6 +277,32 @@ RecordingPipeline.run() Phase 6
 
 **Final Round 9 HEAD: `dbcb6b035603bf54feb8f6edea69c95aa1a13148`**
 
+## Round 9.1 Checkpoint commits
+
+- `9afd788` — fix(Phase A+B): viewport→screen coord & production ResultCardEligibility
+- `920bed1` — feat(Phase C): RAlt single-event model (v4 down-edge emit) + atomic stop latch
+- `398d5dc` — feat(Phase D): remove unconditional focus restore after pipeline
+- `612fe89` — feat(Phase E): bind session_id at enqueue time, not broadcast
+- `94739ff` — feat(Phase F): backend supervisor signal handling + budget reset
+- `2399c06` — test(Phase F): rewrite backend supervisor tests with production logic
+- `807a425` — feat(Phase G): synchronous AI call with httpx timeout, no daemon thread leak
+- `db66a29` — test(Phase H): rewrite fake geometry/session tests + fix flaky ralt timing
+
+**Final Round 9.1 HEAD: `db66a29`**
+
+### Round 9.1 修复的问题
+
+1. **结果卡片 viewport→屏幕坐标转换**（Phase A）：`calcResultCardPosition()` 添加 `fb.x+y + ep.left/top` 将 viewport-relative 坐标转换为屏幕坐标。
+2. **严格弹卡资格引入生产代码**（Phase B）：`application/result_card_eligibility.py` 新建，Pipeline 导入并调用。
+3. **RAlt 单事件模型**（Phase C）：DLL v4 在 KEYDOWN 发 toggle + `g_emitted_this_press` 防重复。
+4. **原子 stop latch**（Phase C）：`_try_latch_stop()` 用 threading.Lock 原子测试+设置。
+5. **删除无条件焦点恢复**（Phase D）：去掉 pipeline 结束后 `SetForegroundWindow`。
+6. **Session ID 入队时绑定**（Phase E）：`_enqueue()` 冻结 `_current_session_id` 在入队时刻。
+7. **Backend supervisor 信号处理**（Phase F）：`code===0 && signal===null` 不重启；重启成功重置 budget。
+8. **AI timeout 无 daemon 线程泄漏**（Phase G）：同步 `corrector.process(timeout=...)` + `httpx.TimeoutException`。
+9. **删除/重写伪测试**（Phase H）：geometry/session/backend-supervisor 改用 Node harness 测试生产代码。
+10. **全量回归门禁**（Phase H）：`pytest tests/ -v --timeout=30` → 396 passed, 1 skipped, 0 failures，无 --deselect。
+
 ## 不允许随意修改的模块
 
 - **热键**：`infrastructure/keyboard_helper_dll.py`、`native/context_helper/src/keyboard_helper.cpp`

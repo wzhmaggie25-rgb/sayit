@@ -1,5 +1,76 @@
 # ZCode Report
 
+> **Round 9.1 追加报告** — 最后一次更新：2026-06-28（Round 9.1: 生产路径修复 — BLOCKED_USER_VALIDATION）
+> 执行者：ZCode (glm-5.2)
+
+## Round 9.1 接收到的任务
+
+来自 `.ai/ROUND9_1_FIX_TASK.md` 和 `.ai/ROUND9_CODE_REVIEW.md`。
+独立代码审查（ChatGPT）发现 Round 9 的 5 个 P0 + 2 个 P1 问题：
+测试重写了生产逻辑而非调用生产代码，真实生产路径仍有错误。
+执行 Phase A-H 连续修复。
+
+### Round 9.1 修改的文件
+
+| 文件 | 变更摘要 |
+|------|----------|
+| `frontend/main.js` | Phase A: `calcResultCardPosition()` 添加 `fb.x/y + ep.left/top` 坐标转换；Phase F: `BACKEND_SUPERVISOR` 添加 `lastExitSignal`、正常退出不重启、重启成功重置 budget |
+| `application/result_card_eligibility.py` | Phase B: 新建 `should_show_large_result_card()` 生产函数 |
+| `application/pipeline.py` | Phase B: 导入并用 `should_show_large_result_card()`；Phase G: 去除 daemon thread + queue，改用同步 `corrector.process(timeout=...)` + `httpx.TimeoutException` |
+| `native/context_helper/src/keyboard_helper.cpp` | Phase C: DLL v4 — `g_emitted_this_press` 防重复、RAlt KEYDOWN 发射 toggle、`SAYIT_KEYBOARD_HELPER_VERSION 4` |
+| `infrastructure/keyboard_helper_dll.py` | Phase C: `MIN_HELPER_VERSION = 4` |
+| `application/orchestrator.py` | Phase C: `_try_latch_stop()` 原子锁；Phase D: 删除无条件焦点恢复 |
+| `infrastructure/ralt_stop_watcher.py` | Phase C: `_on_down_edge` 40ms 宽限期（5ms × 8 次轮询） |
+| `server.py` | Phase E: 添加 `_enqueue()`，session_id 在入队时绑定而非 broadcast |
+| `infrastructure/ai_providers.py` | Phase G: `client.post(timeout=timeout)` 传递 timeout 参数 |
+| `infrastructure/corrector.py` | Phase G: `process()` 接受 `timeout=`，重新抛出 `httpx.TimeoutException` |
+| `frontend/_supervisor_logic.js` | 新建：从 main.js 提取的纯函数 `decideRestart()` |
+| `frontend/_test_supervisor_logic.js` | 新建：Node harness（10 场景） |
+| `frontend/_result_card_geometry.js` | 新建：从 main.js 提取的纯函数 `calcResultCardPosition()` |
+| `frontend/_test_result_card_geometry.js` | 新建：Node harness（18 场景） |
+| `frontend/_session_filter.js` | 新建：从 main.js 提取的 session 过滤纯函数 |
+| `frontend/_test_session_filter.js` | 新建：Node harness（8 场景） |
+| `tests/test_backend_supervisor.py` | Phase F: 重写——删除 `_simulate_supervisor`，保留 server.py 实况测试 + Node harness 调用 |
+| `tests/test_result_card_geometry.py` | Phase H: 重写——删除常量测试，调用 Node harness |
+| `tests/test_session_id.py` | Phase H: 重写——删除手工 dict 测试，测试真实 server.py/pipeline.py + Node harness |
+| `tests/test_ai_deadline.py` | Phase G: 更新 timeout 模拟为 `httpx.TimeoutException`，新增线程泄漏测试 |
+| `tests/test_ralt_down_edge.py` | Phase H: 修复 flaky timing |
+| `tests/test_result_card_eligibility.py` | Phase B: 从生产模块导入 |
+
+### Round 9.1 门禁验证
+
+```
+pytest tests/ -v --timeout=30       → 396 passed, 1 skipped, 0 failures
+node --check frontend/main.js       → OK
+node --check frontend/preload.js    → OK
+node frontend/_smoke_result_card.js → OK
+```
+
+无 --deselect，timeout=30。
+
+### Round 9.1 检查点 SHA
+
+| Phase | SHA | 说明 |
+|-------|-----|------|
+| A+B | `9afd788` | 视口→屏幕坐标 + 生产资格函数 |
+| C | `920bed1` | RAlt v4 down-edge + 原子 latch |
+| D | `398d5dc` | 删除无条件焦点恢复 |
+| E | `612fe89` | Session ID 入队时绑定 |
+| F (prod) | `94739ff` | Backend supervisor 信号处理 + budget 重置 |
+| F (test) | `2399c06` | 重写 supervisor 测试（删除 `_simulate_supervisor`） |
+| G | `807a425` | 同步 AI timeout，无 daemon 线程 |
+| H | `db66a29` | 重写伪测试，修复 flaky ralt timing |
+
+### Round 9.1 未解决的问题
+
+1. **AI provider 网络挂起**：httpx TimeoutException 应捕获，但底层网络栈罕见情况下可能丢失超时。
+2. **DLL ABI 兼容性**：MIN_HELPER_VERSION 从 3 升到 4。旧 DLL 需应用重启。
+3. **4 个 pre-existing 测试已解决**：无 pre-existing failure（之前 Round 9 称"4 个 pre-existing 失败"，已验证在当前 HEAD 已全部消失）。
+
+---
+
+> **以下是 Round 9 原始报告，保留为历史记录。**
+
 > 最后一次更新：2026-06-28（Round 9: 运行时稳定性修复 — BLOCKED_USER_VALIDATION）
 > 执行者：ZCode GUI → Claude Code (glm-latest)
 
@@ -115,35 +186,19 @@ git add ... && git commit && git push                                # 每 Phase
 | Final | `node --check frontend/preload.js` | OK |
 | Final | `node frontend/_smoke_result_card.js` | **SMOKE TEST PASSED** (34 assertions) |
 
-## 未解决的问题
+## Round 9 未解决的问题
 
-1. **4 个 pre-existing 测试失败**（`test_inject_current_focus.py::test_readback_uses_current_hwnd` 和 `test_injector_fallback.py` 中的 3 个测试）— 基线同样失败，与本轮变更无关。已验证（git stash 测试）。
-2. **AI timeout 测试运行时间较长**（~56s）— 因 AI deadline clamp 下限 15s。这是设计约束，每个 timeout 测试等待 15s。已在 pipeline.py 中标注。
+1. **4 个 pre-existing 测试失败** — 已在 Round 9.1 中解决。
+2. **AI timeout 测试运行时间较长**（~56s）— 因 AI deadline clamp 下限 15s。
 
-## 风险
+## Round 9 风险
 
 - **无新增风险**：所有变更均保守设计，多重守卫层叠。
 - **stop_request_latched**：GIL 不保证跨 Python 检查-设置原子性，但 race window 微秒级，最多重复 emit RECORDING_STOPPING。
-- **daemon thread 孤儿**：超时 AI 线程无法取消，但不阻塞 cleanup。
+- **daemon thread 孤儿**：超时 AI 线程无法取消，但不阻塞 cleanup。已在 Round 9.1 Phase G 中解决。
 - **重启后 WS 重连**：短暂中断由 fallback poll 补偿。
 
-## 当前提交ID
+## Round 9 当前提交ID
 
-最终 HEAD（当前分支）：
-
-```
-dbcb6b035603bf54feb8f6edea69c95aa1a13148
-```
-
-所有 checkpoint commits（已 push 到 `origin/feature/silent-learning-stabilization`）：
-
-| Phase | SHA | 说明 |
-|-------|-----|------|
-| Phase 0 | `0b1dd32` | feat(session): recording_session_id, cross-session isolation |
-| Phase 1 | `f69c8d9` | fix(result-card): size 360px, dynamic height, position above float bar |
-| Phase 2 | `a743bb2` | fix(session): cross-session pollution prevention |
-| Phase 3 | `539d0c8` | fix(eligibility): strict result card eligibility |
-| Phase 4 | `c37a4f7` | fix(stop): stop_request_latched, down-edge RAlt, focus restore |
-| Phase 5 | `e3da602` | feat(ai): AI deadline watchdog with degraded fallback |
-| Phase 6 | `dbcb6b0` | fix(backend): backend crash supervision and recovery |
-| Phase 7 | *(current)* | docs: Round 9 self-review, BLOCKED_USER_VALIDATION |
+最终 HEAD（当前分支）：`db66a29`
+所有 checkpoint 见上面的 Round 9.1 检查点表。

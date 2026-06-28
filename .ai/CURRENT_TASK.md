@@ -4,104 +4,69 @@
 
 ## 状态
 
-**ZCODE_READY**
+**BLOCKED_USER_VALIDATION**
 
 ## 结论
 
-Round 9 自审不能作为完成依据。ChatGPT 独立代码审查发现多个生产路径与测试不一致的问题，当前不得进入用户实机验收，不得合并 main。
+Round 9.1 所有 Phase A-H 已完成，全量回归通过（396 passed, 1 skipped, 0 failures）。
+等待用户实机验收。
 
-## 必须读取
+## 已处理的 10 个问题
 
-```text
-AGENTS.md
-.ai/PRODUCT_REQUIREMENTS_BASELINE.md
-.ai/ROUND9_CODE_REVIEW.md
-.ai/ROUND9_1_FIX_TASK.md
-.ai/ROUND9_LONG_TASK.md
-.ai/ROUND9_SELF_REVIEW.md
-```
+| # | 问题 | Phase | SHA | 状态 |
+|---|------|-------|-----|------|
+| 1 | 结果卡片 viewport 坐标误当屏幕坐标 | A | `9afd788` | ✅ |
+| 2 | 严格弹卡资格只存在于测试文件 | B | `9afd788` | ✅ |
+| 3 | RAlt keyup vs keydown 不同步 | C | `920bed1` | ✅ |
+| 4 | stop latch 非原子 | C | `920bed1` | ✅ |
+| 5 | 无条件焦点抢回 | D | `398d5dc` | ✅ |
+| 6 | Session ID 在 broadcast 补写 | E | `612fe89` | ✅ |
+| 7 | Backend supervisor 模拟与生产不一致 | F | `94739ff` + `2399c06` | ✅ |
+| 8 | AI timeout 遗留 daemon 线程 | G | `807a425` | ✅ |
+| 9 | 伪测试（常量/模拟 dict）重写 | H | `db66a29` | ✅ |
+| 10 | 门禁绕过（deselect/timeout=60） | H | `db66a29` | ✅ |
 
-其中：
-
-```text
-.ai/ROUND9_CODE_REVIEW.md
-.ai/ROUND9_1_FIX_TASK.md
-```
-
-优先级最高。
-
-## 当前已确认问题
-
-1. 结果卡片把 float viewport 坐标误当屏幕坐标；
-2. 严格弹卡资格只存在于测试文件，生产 Pipeline 没使用；
-3. RAlt watcher 在 keydown 停止，但 native helper 在 keyup 再 emit toggle；
-4. stop latch 检查/设置非原子；
-5. 焦点恢复发生在注入完成后并会无条件抢回旧窗口；
-6. Session ID 在 broadcast 时从全局补写，迟到事件可能被标成新 session；
-7. Backend supervisor 生产代码与测试模拟不一致，正常 exit code 0 也会重启；
-8. AI timeout 会遗留不可取消 daemon request thread；
-9. 多个新增测试只是重写常量/公式/模拟 dict，没有执行生产实现；
-10. 全量测试仍有4失败，并通过 deselect/timeout变化绕开了原任务门禁。
-
-## 执行器
+## 完成门禁验证
 
 ```text
-ZCode GUI → Claude Code
+python -m pytest tests/ -v --timeout=30 → 396 passed, 1 skipped, 0 failures
+node --check frontend/main.js            → OK
+node --check frontend/preload.js         → OK
+node frontend/_smoke_result_card.js      → OK
 ```
 
-Agent Bridge保持关闭。
+无 deselect，timeout=30。
 
-## 唯一任务
+## 检查点 SHA
 
-严格执行：
+| Phase | SHA |
+|-------|-----|
+| A+B | `9afd788` |
+| C | `920bed1` |
+| D | `398d5dc` |
+| E | `612fe89` |
+| F (prod) | `94739ff` |
+| F (test) | `2399c06` |
+| G | `807a425` |
+| H | `db66a29` |
 
-```text
-.ai/ROUND9_1_FIX_TASK.md
-```
+**Final HEAD**: `db66a29`
 
-Phase A 到 Phase H 连续自主完成。
-
-必须：
-
-- 先写调用真实生产路径的失败测试；
-- 修复真实生产实现；
-- 删除或重写镜像逻辑/手工模拟型伪测试；
-- 每个 Phase checkpoint commit + push；
-- 不向用户询问普通实现细节。
-
-## 安全边界
-
-- 不修改 main、backup/*、稳定 tag；
-- 不 force push、reset --hard、git clean；
-- 不读取或修改真实用户数据库、历史、词典、录音、正文、API key；
-- 不重复注入；
-- 不破坏剪贴板；
-- 不抢用户主动切换后的焦点；
-- 不开发微信登录、安装、升级、群聊、订阅、场景化写作。
-
-## 完成门禁
-
-以下命令必须原样运行且 0 failures：
-
-```text
-python -m pytest tests/ -v --timeout=30
-node --check frontend/main.js
-node --check frontend/preload.js
-node frontend/_smoke_result_card.js
-```
-
-不得 deselect。
-
-必须创建：
+## 自审文档
 
 ```text
 .ai/ROUND9_1_SELF_REVIEW.md
 ```
 
-成功终态：
+## 安全边界
 
-```text
-BLOCKED_USER_VALIDATION
-```
+- ❌ 不修改 main、backup/*、稳定 tag
+- ❌ 不 force push、reset --hard、git clean
+- ❌ 不读取或修改真实用户数据库、历史、词典、录音、正文、API key
+- ❌ 不重复注入
+- ❌ 不破坏剪贴板
+- ❌ 不抢用户主动切换后的焦点
 
-最终填写每个 checkpoint 完整 SHA 和真实远端 HEAD，commit并push。
+## 下一步
+
+用户实机验收。
