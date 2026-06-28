@@ -13,6 +13,7 @@ let floatReady = false;
 let resultCardReady = false;
 let pendingResultCardPayload = null;  // {finalText, lastTranscription} — replayed on did-finish-load
 let pendingResultText = '';           // main-process source-of-truth for clipboard write
+let pendingSessionId = '';            // session id for the pending payload — must match activeSessionId to replay
 let activeSessionId = '';             // current recording session — stale events are ignored
 let autoCloseTimer = null;            // result-card auto-close timer handle
 
@@ -289,6 +290,7 @@ function createResultCardWindow(estimatedHeight) {
     resultCardReady = false;
     pendingResultCardPayload = null;
     pendingResultText = '';
+    pendingSessionId = '';
   });
   resultCardWin.setAlwaysOnTop(true, 'screen-saver', 1);
   resultCardWin.setVisibleOnAllWorkspaces(true);
@@ -304,11 +306,14 @@ function destroyResultCard() {
   resultCardReady = false;
   pendingResultCardPayload = null;
   pendingResultText = '';
+  pendingSessionId = '';
 }
 
 function flushPendingResultCardPayload() {
   if (!isUsableWindow(resultCardWin) || !resultCardReady) return;
   if (!pendingResultCardPayload) return;
+  // Only replay payload from the matching session — prevents cross-session pollution
+  if (pendingSessionId && activeSessionId && pendingSessionId !== activeSessionId) return;
   try {
     resultCardWin.webContents.send('result-card:show', pendingResultCardPayload);
   } catch (e) { /* ignore */ }
@@ -332,6 +337,7 @@ function showResultCard(finalText, lastTranscription, state, message) {
   // results arrive while the renderer is still mounting.
   pendingResultCardPayload = payload;
   pendingResultText = payload.finalText;
+  pendingSessionId = activeSessionId;  // tag with current session for replay guard
   if (!isUsableWindow(resultCardWin)) {
     createResultCardWindow(estimatedHeight);
   }
@@ -428,6 +434,12 @@ function connectWS() {
           pushToFloat('if(window.sayitOnRecordingStopped)sayitOnRecordingStopped()');
           break;
         case 'pipeline_done':
+          // Pipeline finished — clear pending card state for this session
+          if (evt.session_id && activeSessionId && evt.session_id === activeSessionId) {
+            pendingResultCardPayload = null;
+            pendingResultText = '';
+            pendingSessionId = '';
+          }
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnPipelineDone)sayitOnPipelineDone(' + JSON.stringify(evt.text) + ')');
           pushToMain('backend-event', evt);
@@ -472,6 +484,12 @@ function connectWS() {
           pushToMain('backend-event', evt);
           break;
         case 'error':
+          // Pipeline/session error — clear pending card state
+          if (evt.session_id && activeSessionId && evt.session_id === activeSessionId) {
+            pendingResultCardPayload = null;
+            pendingResultText = '';
+            pendingSessionId = '';
+          }
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnError)sayitOnError(' + JSON.stringify(evt.message) + ')');
           break;

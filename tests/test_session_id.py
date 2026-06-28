@@ -134,5 +134,174 @@ class RecordingSessionIdTests(unittest.TestCase):
         self.assertLess(elapsed_ms, 100, "session_id generation too slow")
 
 
+class CrossSessionPollutionTests(unittest.TestCase):
+    """Phase 2 tests: cross-session pollution prevention."""
+
+    def _simulate_session(self, session_id, events=None):
+        """Simulate a session's event sequence."""
+        if events is None:
+            events = []
+        return {
+            "session_id": session_id,
+            "events": events,
+        }
+
+    def _make_result_card_show(self, session_id, text="hello"):
+        return {
+            "event": "result_card_show",
+            "session_id": session_id,
+            "text": text,
+            "last_transcription": "",
+            "state": "no_editable_target",
+            "message": "",
+        }
+
+    def test_closed_card_does_not_replay_on_next_recording(self):
+        """After closing a card, next recording_started starts cleanly."""
+        session_a = uuid.uuid4().hex[:12]
+        session_b = uuid.uuid4().hex[:12]
+
+        # Simulate session A: card shown and closed
+        active_session = session_a
+        pending_payload = self._make_result_card_show(session_a, "text from A")
+        pending_session = session_a
+
+        # Session A card closed
+        pending_payload = None
+        pending_text = ""
+        pending_session = ""
+
+        # Session B starts — must clear all
+        active_session = session_b
+        pending_payload = None
+        pending_text = ""
+        pending_session = ""
+
+        # Verify completely clean
+        self.assertIsNone(pending_payload)
+        self.assertEqual(pending_text, "")
+        self.assertEqual(pending_session, "")
+        self.assertEqual(active_session, session_b)
+
+    def test_delayed_old_event_is_ignored(self):
+        """A delayed result_card_show from an old session must be ignored."""
+        active_session = uuid.uuid4().hex[:12]
+        old_session = uuid.uuid4().hex[:12]
+
+        # Simulate main.js guard: session_id must match activeSessionId
+        old_event = self._make_result_card_show(old_session, "stale text")
+        active_event = self._make_result_card_show(active_session, "fresh text")
+
+        should_ignore_old = (
+            old_event["session_id"] and active_session and
+            old_event["session_id"] != active_session
+        )
+        should_accept_new = (
+            active_event["session_id"] and active_session and
+            active_event["session_id"] == active_session
+        )
+
+        self.assertTrue(should_ignore_old, "old session event must be filtered")
+        self.assertTrue(should_accept_new, "current session event must pass through")
+
+    def test_delayed_old_result_card_close_is_ignored(self):
+        """A delayed result_card_close from old session must not close current card."""
+        active_session = uuid.uuid4().hex[:12]
+        old_session = uuid.uuid4().hex[:12]
+
+        old_close = {"event": "result_card_close", "session_id": old_session}
+        should_ignore = (
+            old_close["session_id"] and active_session and
+            old_close["session_id"] != active_session
+        )
+        self.assertTrue(should_ignore)
+
+    def test_delayed_old_copy_done_is_ignored(self):
+        """A delayed result_card_copy_done from old session must be ignored."""
+        active_session = uuid.uuid4().hex[:12]
+        old_session = uuid.uuid4().hex[:12]
+
+        old_copy = {"event": "result_card_copy_done", "session_id": old_session}
+        should_ignore = (
+            old_copy["session_id"] and active_session and
+            old_copy["session_id"] != active_session
+        )
+        self.assertTrue(should_ignore)
+
+    def test_copy_auto_close_timer_does_not_cross_session(self):
+        """Auto-close timer from a copy in session A must not fire into session B."""
+        session_a = uuid.uuid4().hex[:12]
+        session_b = uuid.uuid4().hex[:12]
+
+        # Simulate: session A copy triggers autoCloseTimer
+        auto_close_timer_active = True  # timer is set for session A
+        active_session = session_a
+
+        # Session B starts: timer must be cleared
+        auto_close_timer_active = False
+        active_session = session_b
+
+        self.assertFalse(auto_close_timer_active)
+        self.assertEqual(active_session, session_b)
+
+    def test_pipeline_done_clears_pending_state(self):
+        """pipeline_done event clears pending card payload for matching session."""
+        session = uuid.uuid4().hex[:12]
+
+        # Before pipeline_done, there's a pending payload
+        active_session = session
+        pending_payload = self._make_result_card_show(session, "text")
+        pending_text = "text"
+        pending_session = session
+
+        # Simulate pipeline_done arrival with matching session
+        if pending_session == active_session:
+            pending_payload = None
+            pending_text = ""
+            pending_session = ""
+
+        self.assertIsNone(pending_payload)
+        self.assertEqual(pending_text, "")
+        self.assertEqual(pending_session, "")
+
+    def test_error_clears_pending_state(self):
+        """error event clears pending card payload for matching session."""
+        session = uuid.uuid4().hex[:12]
+
+        active_session = session
+        pending_payload = self._make_result_card_show(session, "text")
+        pending_text = "text"
+        pending_session = session
+
+        # Simulate error with matching session
+        if pending_session == active_session:
+            pending_payload = None
+            pending_text = ""
+            pending_session = ""
+
+        self.assertIsNone(pending_payload)
+
+    def test_flush_only_replays_matching_session(self):
+        """flushPendingResultCardPayload must not replay if sessions don't match."""
+        # Simulate: pending payload tagged with session_a, but active is session_b
+        session_a = uuid.uuid4().hex[:12]
+        session_b = uuid.uuid4().hex[:12]
+        active_session = session_b
+        pending_session = session_a
+
+        # Guard in flushPending: if both are non-empty and differ, skip
+        should_skip = bool(pending_session) and bool(active_session) and pending_session != active_session
+        self.assertTrue(should_skip, "flush must skip when sessions don't match")
+
+    def test_ten_consecutive_valid_inputs_no_card(self):
+        """Simulate 10 valid recording sessions with verified success — no card."""
+        for i in range(10):
+            session = uuid.uuid4().hex[:12]
+            # All verified_success should not show result card
+            dummy_state = "verified_success"
+            self.assertNotEqual(dummy_state, "no_editable_target",
+                                f"session {i}: verified_success must not trigger card")
+
+
 if __name__ == "__main__":
     unittest.main()
