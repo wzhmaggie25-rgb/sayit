@@ -116,6 +116,7 @@ static std::thread          g_workerThread;
 static DWORD                g_workerThreadId = 0;
 static std::atomic<bool>    g_running{false};
 static bool                 g_matched = false;
+static bool                 g_emitted_this_press = false;
 
 // Worker-thread synchronization (HookProc -> worker -> Python)
 // ---------------------------------------------------------
@@ -207,6 +208,12 @@ static bool HandleKeyEventCore(UINT vk, WPARAM wParam, DWORD flags,
     if (!g_matched) {
         if (isMain && isDown) {
             g_matched = true;
+            g_emitted_this_press = true;
+            // v4: Emit on EVERY RAlt down — including the first press that
+            // starts recording. The watcher also detects down-edge, so the
+            // hook must increment total_emitted on the down-edge to let the
+            // watcher verify the hook processed the event.
+            EmitToggle();
             if (allowSideEffects) {
                 // Preemptive release: when the hook eats RAlt, the driver may
                 // have already armed VK_MENU / VK_LMENU async state. Release
@@ -228,18 +235,40 @@ static bool HandleKeyEventCore(UINT vk, WPARAM wParam, DWORD flags,
             return true; // eat stray RAlt up
         }
     } else {
-        if (isMain && isUp) {
-            g_matched = false;
-            // Emit toggle on the rising edge of release. The HookProc returns
-            // immediately; the worker thread will run the Python callback.
-            EmitToggle();
-            if (allowSideEffects) {
-                ForceReleaseAlt();
+        if (isMain && isDown) {
+            // v4: Emit toggle on the DOWN edge (keydown) instead of up (keyup).
+            //
+            // Rationale: the HookProc processes the down event ~0-5ms after
+            // the physical press. The up event can be delayed by the user
+            // holding the key much longer (100-500ms). By emitting on down,
+            // we give the RAltStopWatcher (which also detects the down-edge)
+            // a clear signal to compare against: if the hook fired, total_emitted
+            // is already incremented before the watcher's grace window expires.
+            // This eliminates the race where watcher fired on down before the
+            // hook's up-edge emit.
+            //
+            // Auto-repeat keydown while held: the first down already set
+            // g_matched=true, so subsequent downs (auto-repeat) enter the
+            // else (g_matched==true) branch. We only emit once per match
+            // cycle — guard with a flag that tracks whether we've already
+            // emitted for this press.
+            if (!g_emitted_this_press) {
+                g_emitted_this_press = true;
+                EmitToggle();
+                if (allowSideEffects) {
+                    ForceReleaseAlt();
+                }
             }
             return true;
         }
-        if (isMain && isDown) {
-            // Auto-repeat keydown while held: swallow but never duplicate.
+        if (isMain && isUp) {
+            // v4: UP only clears state and swallows. No EmitToggle — that
+            // already happened on the down edge.
+            g_matched = false;
+            g_emitted_this_press = false;
+            if (allowSideEffects) {
+                ForceReleaseAlt();
+            }
             return true;
         }
     }
@@ -263,13 +292,11 @@ static LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     bool eaten = HandleKeyEventCore(static_cast<UINT>(kbd.vkCode), wParam, kbd.flags, true);
 
     uint32_t ma = g_matched ? 1 : 0;
-    // Determine if this event triggered an emit: compare total_emitted
-    // before/after. Since we just called HandleKeyEventCore, we check
-    // whether g_matched flipped from matched(true) to unmatched(false)
-    // AND the event was main+up — that's the only emit path.
+    // v4: emit happens on the down-edge (unmatched→matched transition with down event)
     uint32_t emitted = 0;
-    if (mb == 1 && ma == 0 && (kbd.vkCode == VK_RMENU ||
-        (kbd.vkCode == VK_MENU && (kbd.flags & LLKHF_EXTENDED)))) {
+    if (mb == 0 && ma == 1 && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) &&
+        (kbd.vkCode == VK_RMENU ||
+         (kbd.vkCode == VK_MENU && (kbd.flags & LLKHF_EXTENDED)))) {
         emitted = 1;
     }
 
@@ -360,6 +387,7 @@ __declspec(dllexport) int install_hook(void* callback_ptr) {
     }
 
     g_matched = false;
+    g_emitted_this_press = false;
     g_callback = reinterpret_cast<void(*)()>(callback_ptr);
     g_pending.store(0);
     g_total_emitted.store(0);
@@ -536,9 +564,12 @@ __declspec(dllexport) int __test_handle_event(
     uint32_t ma = g_matched ? 1 : 0;
     // Record native diagnostics for the test event too (helps verify the
     // ring in unit tests). Determine emitted based on state flip.
+    // v4: emit happens on unmatched→matched transition with down event.
     uint32_t emitted = 0;
-    if (mb == 1 && ma == 0 && (static_cast<UINT>(vkCode) == VK_RMENU ||
-        (static_cast<UINT>(vkCode) == VK_MENU && (flags & LLKHF_EXTENDED)))) {
+    if (mb == 0 && ma == 1 && (static_cast<UINT>(wParam) == WM_KEYDOWN ||
+        static_cast<UINT>(wParam) == WM_SYSKEYDOWN) &&
+        (static_cast<UINT>(vkCode) == VK_RMENU ||
+         (static_cast<UINT>(vkCode) == VK_MENU && (flags & LLKHF_EXTENDED)))) {
         emitted = 1;
     }
     RecordNativeEvent(static_cast<UINT>(vkCode), static_cast<WPARAM>(wParam),
@@ -552,6 +583,7 @@ __declspec(dllexport) int __test_handle_event(
 // reinstalling the hook (which is expensive and changes thread identity).
 __declspec(dllexport) void __test_reset_state(void) {
     g_matched = false;
+    g_emitted_this_press = false;
 }
 
 // ── ABI version / build identity ────────────────────────────────────
@@ -569,8 +601,12 @@ __declspec(dllexport) void __test_reset_state(void) {
 //   3  + native diagnostics ring (NativeEventRecord, native_event_count,
 //        native_events exports); HookProc records before/after each event
 //        (2026-06-26-v3)
-#define SAYIT_KEYBOARD_HELPER_VERSION 3
-#define SAYIT_KEYBOARD_HELPER_BUILD   "2026-06-26-v3"
+//   4  + emit on DOWN edge (keydown) instead of UP edge (keyup);
+//        g_emitted_this_press flag prevents double-emit on auto-repeat;
+//        HookProc emit detection updated for down-edge
+//        (2026-06-28-v4)
+#define SAYIT_KEYBOARD_HELPER_VERSION 4
+#define SAYIT_KEYBOARD_HELPER_BUILD   "2026-06-28-v4"
 
 __declspec(dllexport) unsigned int helper_version(void) {
     return SAYIT_KEYBOARD_HELPER_VERSION;

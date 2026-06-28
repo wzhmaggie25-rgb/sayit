@@ -220,16 +220,26 @@ class RAltStopWatcher:
         since arm), we do nothing. Otherwise, it's a hook miss — fire
         fallback immediately, without waiting for the up-edge.
 
-        Note: there is a narrow race where both the hook and watcher fire
-        nearly simultaneously. The orchestrator's _stop_request_latched
-        flag ensures only one stop request is actually honored.
+        In DLL v4, both the hook and watcher fire on the down-edge.
+        We apply a short grace period after detecting the down-edge to
+        let the hook's WM_KEYDOWN processing complete and increment
+        total_emitted before we check it.
+
+        Note: the orchestrator's _try_latch_stop() atomic flag ensures
+        only one stop request is actually honored even in a narrow race.
         """
-        post = self._get_current_emitted()
-        if post > self._initial_emitted:
-            # Hook already processed the toggle — nothing to do.
-            logger.debug(
-                "[RAltStopWatcher] hook handled it (emitted %s -> %s)",
-                self._initial_emitted, post)
+        # Grace period: wait up to 40ms for the hook to emit its toggle
+        # on the down-edge. Check every 5ms.
+        for _ in range(8):  # 8 * 5ms = 40ms max
+            post = self._get_current_emitted()
+            if post > self._initial_emitted:
+                # Hook already processed the toggle — nothing to do.
+                logger.debug(
+                    "[RAltStopWatcher] hook handled it (emitted %s -> %s)",
+                    self._initial_emitted, post)
+                self.disarm()
+                return
+            time.sleep(0.005)
         else:
             # Hook missed the event! Fire fallback on down-edge.
             self._hook_misses += 1

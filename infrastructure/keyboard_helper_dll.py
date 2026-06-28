@@ -64,7 +64,7 @@ _CALLBACK_HANDLE = None  # keep ctypes thunk alive while installed
 # export `helper_version` and return >= MIN_HELPER_VERSION; otherwise the
 # loader logs a clear error and disables the hook rather than silently
 # binding to a stale build.
-MIN_HELPER_VERSION = 3
+MIN_HELPER_VERSION = 4
 
 # Diagnostic ring buffer size. Each toggle records ~80 bytes of metadata
 # (sequence numbers + monotonic timestamps + thread ids) — bounded so the

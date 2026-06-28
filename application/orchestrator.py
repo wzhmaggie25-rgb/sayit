@@ -81,13 +81,15 @@ class SayitOrchestrator:
         self._pipeline_lock = threading.Lock()
         self._pipeline_active = False
 
-        # Stop request latch: hook and fallback race, first wins.
+# Stop request latch: hook and fallback race, first wins.
         # Reset on next recording start. Guards RECORDING_STOPPING ACK
         # to emit exactly once per session.
+        # Protected by _stop_latch_lock for atomic try_latch_stop().
         self._stop_request_latched = False
+        self._stop_latch_lock = threading.Lock()
 
         # Focus snapshot: captures the foreground hwnd just before the
-        # stop signal, so we can restore it after injection completes.
+        # stop signal, so we can restore focus after injection completes.
         # Reset on next recording start; captured by _execute_stop_request.
         self._pre_stop_focus_hwnd = 0
 
@@ -391,6 +393,19 @@ class SayitOrchestrator:
         except Exception:
             return 0
 
+    def _try_latch_stop(self) -> bool:
+        """Atomically try to obtain the stop latch.
+
+        Returns True if this caller wins the latch (first to acquire it).
+        Only the latch winner may proceed with _execute_stop_request.
+        Thread-safe via _stop_latch_lock.
+        """
+        with self._stop_latch_lock:
+            if self._stop_request_latched:
+                return False
+            self._stop_request_latched = True
+            return True
+
     def _focus_window(self, hwnd: int) -> bool:
         """Restore focus to a specific hwnd.
 
@@ -456,7 +471,7 @@ class SayitOrchestrator:
         Subsequent stop requests are no-ops; RECORDING_STOPPING ACK fires
         exactly once per session.
         """
-        if self._stop_request_latched:
+        if not self._try_latch_stop():
             logger.debug("[orchestrator] stop ignored — already latched")
             return False
         with self._pipeline_lock:
@@ -466,16 +481,18 @@ class SayitOrchestrator:
             logger.debug(
                 "[orchestrator] stop ignored — no active pipeline "
                 "(pipeline=%s active=%s)", pipeline is not None, active)
+            # Release latch since we didn't actually stop
+            self._stop_request_latched = False
             return False
         if pipeline.is_idle():
+            self._stop_request_latched = False
             return False
         # Only stop while still in CAPTURING — any later state means the
         # pipeline already moved past the user's control point and a stop
         # signal would be a no-op anyway.
         if pipeline.state != RecordingState.CAPTURING:
+            self._stop_request_latched = False
             return False
-        # Latch first — prevents any concurrent _fallback_stop from racing.
-        self._stop_request_latched = True
         self._execute_stop_request(pipeline)
         # NB: we don't wait_for_stop / clear flags here. The pipeline
         # thread runs through to DONE/ERROR, and only then does its
@@ -496,7 +513,7 @@ class SayitOrchestrator:
         stop_request_latched prevents double-firing if the hook also
         delivered a stop signal before the fallback runs.
         """
-        if self._stop_request_latched:
+        if not self._try_latch_stop():
             logger.debug(
                 "[orchestrator] fallback stop ignored — already latched")
             return
@@ -520,10 +537,10 @@ class SayitOrchestrator:
         except Exception as e:
             logger.debug("[orchestrator] fallback diagnostic error: %s", e)
 
-        # Fast path: latch ourselves and execute stop directly.
-        # We do NOT go through _on_hotkey_stop because that also checks
-        # _stop_request_latched and would return False if we set it.
-        self._stop_request_latched = True
+        # Fast path: we already atomically latched ourselves above.
+        # Now capture the pipeline snapshot under _pipeline_lock and execute stop.
+        # This is intentionally NOT acquired for the whole stop — we must avoid
+        # deadlock with the pipeline thread which may hold the injector lock.
         with self._pipeline_lock:
             pipeline = self._pipeline
             active = self._pipeline_active
