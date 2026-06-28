@@ -49,7 +49,7 @@ class EventBus:
 class Events:
     """Well-known event names for type-safety."""
     # Recording pipeline
-    RECORDING_STARTED = "recording:started"
+    RECORDING_STARTED = "recording:started"            # session_id: str
     RECORDING_STOPPED = "recording:stopped"
     RECORDING_TICK = "recording:tick"           # seconds: int
     RECORDING_ERROR = "recording:error"          # error_msg: str

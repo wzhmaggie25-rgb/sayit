@@ -13,6 +13,8 @@ let floatReady = false;
 let resultCardReady = false;
 let pendingResultCardPayload = null;  // {finalText, lastTranscription} — replayed on did-finish-load
 let pendingResultText = '';           // main-process source-of-truth for clipboard write
+let activeSessionId = '';             // current recording session — stale events are ignored
+let autoCloseTimer = null;            // result-card auto-close timer handle
 let ws = null;
 
 // ── Single instance lock: prevent multiple Sayit windows ──
@@ -248,6 +250,7 @@ function createResultCardWindow() {
 }
 
 function destroyResultCard() {
+  if (autoCloseTimer !== null) { clearTimeout(autoCloseTimer); autoCloseTimer = null; }
   if (isUsableWindow(resultCardWin)) resultCardWin.destroy();
   resultCardWin = null;
   resultCardReady = false;
@@ -353,6 +356,10 @@ function connectWS() {
       const evt = JSON.parse(data.toString());
       switch (evt.event) {
         case 'recording_started':
+          // Clear old result card state from previous session
+          if (autoCloseTimer !== null) { clearTimeout(autoCloseTimer); autoCloseTimer = null; }
+          destroyResultCard();
+          activeSessionId = evt.session_id || '';
           showFloat();
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnRecordingStarted)sayitOnRecordingStarted()');
@@ -375,6 +382,10 @@ function connectWS() {
           pushToMain('backend-event', evt);
           break;
         case 'result_card_show':
+          // Ignore stale events from previous sessions
+          if (evt.session_id && activeSessionId && evt.session_id !== activeSessionId) {
+            break;
+          }
           // Show/hide float as needed — this shouldn't show the small bubble
           // Keep float hidden; show result card instead
           hideFloat();
@@ -382,17 +393,24 @@ function connectWS() {
                          evt.state || '', evt.message || '');
           break;
         case 'result_card_close':
+          if (evt.session_id && activeSessionId && evt.session_id !== activeSessionId) {
+            break;
+          }
           if (isUsableWindow(resultCardWin)) {
             try { resultCardWin.webContents.send('result-card:reset'); } catch(e) {}
           }
           destroyResultCard();
           break;
         case 'result_card_copy_done':
+          if (evt.session_id && activeSessionId && evt.session_id !== activeSessionId) {
+            break;
+          }
           if (isUsableWindow(resultCardWin)) {
             try { resultCardWin.webContents.send('result-card:copy-done'); } catch(e) {}
           }
           // Auto-close shortly after — give renderer time to show ✓.
-          setTimeout(() => { destroyResultCard(); }, 700);
+          if (autoCloseTimer !== null) { clearTimeout(autoCloseTimer); }
+          autoCloseTimer = setTimeout(() => { destroyResultCard(); }, 700);
           break;
         case 'injection_done':
         case 'silent_learned':

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from typing import Optional
 
 from domain.models import RecordingState
@@ -57,6 +58,7 @@ class RecordingPipeline:
             enable_correction: Whether to run AI correction
         """
         self._stop_flag = False
+        self._session_id = uuid.uuid4().hex[:12]
 
         # ── COM apartment initialization (for UIA injector) ─────
         com_initialized = False
@@ -70,7 +72,7 @@ class RecordingPipeline:
         try:
             # ── Phase 1: Recording ───────────────────────────────────
             self.state = RecordingState.CAPTURING
-            self._eb.emit(Events.RECORDING_STARTED)
+            self._eb.emit(Events.RECORDING_STARTED, self._session_id)
             seconds = 0
 
             def _on_rms(level: float):

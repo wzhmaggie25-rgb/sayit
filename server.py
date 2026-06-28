@@ -1,5 +1,5 @@
 """FastAPI server — REST API + WebSocket for Electron frontend."""
-import asyncio, json, logging, os, sys, tempfile, threading
+import asyncio, json, logging, os, sys, tempfile, threading, uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -31,8 +31,15 @@ hotwords = orchestrator.get_hotwords_manager()
 usecases = UseCases(db, config, hotwords)
 ws_clients: list[WebSocket] = []
 
+# ── Current recording session ─────────────────────
+_current_session_id: str = ""
+
 
 async def broadcast(data: dict):
+    global _current_session_id
+    # Attach current session_id to every broadcast unless already set
+    if "session_id" not in data and _current_session_id:
+        data["session_id"] = _current_session_id
     msg = json.dumps(data, ensure_ascii=False)
     for ws in ws_clients:
         try:
@@ -68,7 +75,13 @@ async def startup_event():
 
 def wire_events():
     eb = orchestrator.eventbus
-    eb.on(Events.RECORDING_STARTED, lambda: _event_queue.put({"event": "recording_started"}))
+
+    def _on_recording_started(session_id=""):
+        global _current_session_id
+        _current_session_id = session_id or uuid.uuid4().hex[:12]
+        _event_queue.put({"event": "recording_started", "session_id": _current_session_id})
+
+    eb.on(Events.RECORDING_STARTED, _on_recording_started)
     eb.on(Events.RMS_LEVEL, lambda l: _state.update({"last_rms": l}))
     eb.on(Events.RECORDING_STOPPED, lambda: _event_queue.put({"event": "recording_stopped"}))
     eb.on(Events.RECORDING_STOPPING, lambda: _event_queue.put({"event": "recording_stopping"}))
