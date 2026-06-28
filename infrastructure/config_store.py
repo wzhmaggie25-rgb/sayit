@@ -69,6 +69,7 @@ DEFAULT_CONFIG = {
     "text_postprocess": {"punctuation": True, "formatting": False, "style": "light"},
     "silent_learning": True,
     "copy_result_to_clipboard": False,
+    "asr_total_budget_s": 30.0,  # Phase G: total ASR budget (streaming + batch), 0 = unlimited
     "ai_providers": [],
     "onboarding": {"version": 1, "completed": False},
 }
