@@ -178,6 +178,7 @@ def wire_events():
         "outcome": payload.get("outcome", ""),
         "stage": payload.get("stage", ""),
         "reason_code": payload.get("reason_code", ""),
+        "final_text_available": payload.get("final_text_available", False),
     }))
     eb.on(Events.PIPELINE_ERROR, lambda m: _enqueue({"event": "error", "message": str(m)}))
     eb.on(Events.RECORDING_ERROR, lambda m: _enqueue({"event": "error", "message": str(m)}))

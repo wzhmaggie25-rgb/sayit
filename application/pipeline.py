@@ -76,6 +76,7 @@ class RecordingPipeline:
             "terminal_outcome": "",
             "asr_budget_s": 0,
         }
+        self._terminal_emitted = False  # Phase F: reset per session so reused pipeline instances work
 
         # ── COM apartment initialization (for UIA injector) ─────
         com_initialized = False
@@ -133,7 +134,8 @@ class RecordingPipeline:
                 audio_capture.set_chunk_callback(None)
                 self._eb.emit(Events.RECORDING_ERROR, f"音频设备启动失败: {e}")
                 self.state = RecordingState.ERROR
-                self._emit_terminal("failed", "capturing", "audio_start_failed")
+                self._emit_terminal("failed", "capturing", "audio_start_failed",
+                                    final_text_available=False)
                 return
 
             # Tick timer thread
@@ -171,7 +173,8 @@ class RecordingPipeline:
                 self._eb.emit(Events.RECORDING_ERROR, "录音太短")
                 self.state = RecordingState.ERROR
                 self._eb.emit(Events.PIPELINE_ERROR, "录音太短")   # P0: always send final event so float exits STOPPING
-                self._emit_terminal("failed", "capturing", "too_short")
+                self._emit_terminal("failed", "capturing", "too_short",
+                                    final_text_available=False)
                 return
 
             self._eb.emit(Events.RECORDING_STOPPED)
@@ -238,7 +241,8 @@ class RecordingPipeline:
                     self._eb.emit(Events.RECORDING_ERROR, "ASR总预算超时")
                     self.state = RecordingState.ERROR
                     self._eb.emit(Events.PIPELINE_ERROR, "ASR总预算超时")
-                    self._emit_terminal("failed", "transcribing", "asr_total_budget_exceeded")
+                    self._emit_terminal("failed", "transcribing", "asr_total_budget_exceeded",
+                                    final_text_available=False)
                     return
                 try:
                     self._eb.emit(Events.ASR_PROGRESS, "fallback", "降级识别中", "cascade")
@@ -250,7 +254,8 @@ class RecordingPipeline:
                     self._eb.emit(Events.RECORDING_ERROR, f"ASR失败: {e}")
                     self.state = RecordingState.ERROR
                     self._eb.emit(Events.PIPELINE_ERROR, f"ASR失败: {e}")
-                    self._emit_terminal("failed", "transcribing", "batch_asr_failed")
+                    self._emit_terminal("failed", "transcribing", "batch_asr_failed",
+                                    final_text_available=False)
                     return
             logger.info("[ASR-RAW] provider=%s text=%r len=%d", engine, raw_text, len(raw_text))
             self._eb.emit(Events.ASR_RESULT, raw_text, engine)
@@ -261,7 +266,8 @@ class RecordingPipeline:
                 self._eb.emit(Events.RECORDING_ERROR, "未识别到语音内容")
                 self.state = RecordingState.ERROR
                 self._eb.emit(Events.PIPELINE_ERROR, "未识别到语音内容")
-                self._emit_terminal("failed", "transcribing", "empty_asr_result")
+                self._emit_terminal("failed", "transcribing", "empty_asr_result",
+                                    final_text_available=False)
                 return
 
             # ── Layer 2: Local correction (hotwords + learned rules) ───
@@ -454,9 +460,11 @@ class RecordingPipeline:
                     stage_label = inject_result.state
                     self._emit_terminal("no_target" if stage_label == "no_editable_target"
                                         else "attempted_unverified",
-                                        "injecting", stage_label)
+                                        "injecting", stage_label,
+                                        final_text_available=bool(asr_raw_text.strip()))
                 else:
-                    self._emit_terminal("failed", "injecting", "injection_failed")
+                    self._emit_terminal("failed", "injecting", "injection_failed",
+                                    final_text_available=bool(asr_raw_text.strip() if asr_raw_text else False))
                     return  # already emitted PIPELINE_ERROR
 
             # ── Phase 6: Silent monitor ─────────────────────────────
@@ -492,14 +500,19 @@ class RecordingPipeline:
             self._eb.emit(Events.PIPELINE_DONE, final_text)
             self.state = RecordingState.DONE
             # Determine terminal outcome based on injection result
+            has_final_text = bool(final_text.strip())
             if inject_result and inject_result.state == "verified_success":
-                self._emit_terminal("success", "done", "verified_success")
+                self._emit_terminal("success", "done", "verified_success",
+                                    final_text_available=has_final_text)
             elif inject_result and inject_result.state == "attempted_unverified":
-                self._emit_terminal("attempted_unverified", "done", "attempted_unverified")
+                self._emit_terminal("attempted_unverified", "done", "attempted_unverified",
+                                    final_text_available=has_final_text)
             elif inject_result and inject_result.state == "no_editable_target":
-                self._emit_terminal("no_target", "done", "no_editable_target")
+                self._emit_terminal("no_target", "done", "no_editable_target",
+                                    final_text_available=has_final_text)
             else:
-                self._emit_terminal("failed", "done", "injection_failed")
+                self._emit_terminal("failed", "done", "injection_failed",
+                                    final_text_available=has_final_text)
         finally:
             if com_initialized:
                 try:
@@ -547,7 +560,8 @@ class RecordingPipeline:
             return False
 
     def _emit_terminal(self, outcome: str, stage: str = "",
-                       reason_code: str = ""):
+                       reason_code: str = "",
+                       final_text_available: bool = False):
         """Emit PIPELINE_TERMINAL exactly once per session (Phase C).
 
         Uses a latch to guarantee exactly one terminal event per session,
@@ -558,6 +572,7 @@ class RecordingPipeline:
                      'failed', 'aborted'
             stage: The pipeline stage where the terminal occurred.
             reason_code: Machine-readable reason code.
+            final_text_available: Whether the pipeline produced usable ASR text.
         """
         if self._terminal_emitted:
             return
@@ -568,6 +583,7 @@ class RecordingPipeline:
             "outcome": outcome,
             "stage": stage,
             "reason_code": reason_code,
+            "final_text_available": final_text_available,
         })
 
     def stop(self):

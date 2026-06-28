@@ -316,14 +316,16 @@ class SayitOrchestrator:
                 )
             except Exception as e:
                 logger.error("[orchestrator] pipeline crashed: %s", e, exc_info=True)
-                # Phase C: emit terminal event for uncaught pipeline exceptions
+                # Phase F: use pipeline's _emit_terminal() so the latch is
+                # respected and final_text_available is populated consistently.
                 try:
-                    self._eb.emit(Events.PIPELINE_TERMINAL, {
-                        "session_id": _my_pipeline._session_id if hasattr(_my_pipeline, "_session_id") else "",
-                        "outcome": "failed",
-                        "stage": "unknown",
-                        "reason_code": "uncaught_pipeline_exception",
-                    })
+                    if hasattr(_my_pipeline, "_emit_terminal"):
+                        _my_pipeline._emit_terminal(
+                            outcome="failed",
+                            stage="unknown",
+                            reason_code="uncaught_pipeline_exception",
+                            final_text_available=False,
+                        )
                     self._eb.emit(Events.PIPELINE_ERROR, f"流水线异常: {e}")
                 except Exception:
                     pass
