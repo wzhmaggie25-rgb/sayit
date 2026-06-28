@@ -65,6 +65,7 @@ class Events:
     # AI Correction
     AI_RESULT = "ai:result"                      # text: str
     AI_ERROR = "ai:error"                        # error_msg: str
+    AI_DEGRADED = "ai:degraded"                  # message: str (e.g. "AI 整理超时，已使用识别结果")
 
     # Pipeline
     PIPELINE_DONE = "pipeline:done"              # final_text: str

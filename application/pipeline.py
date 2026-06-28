@@ -9,6 +9,7 @@ from typing import Optional
 from domain.models import RecordingState
 from application.eventbus import EventBus, Events
 from infrastructure.injector import InjectionResult
+from infrastructure.config_store import ConfigStore
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +220,7 @@ class RecordingPipeline:
                     db.update_rules_apply_counts(applied_rule_ids)
             locally_refined_text = raw_text
 
-            # ── Phase 3: AI Correction ───────────────────────────────
+            # ── Phase 3: AI Correction with deadline watchdog ─────────────
             self.state = RecordingState.CORRECTING
             self._eb.emit(Events.ASR_PROGRESS, "correcting", "AI 整理中", engine)
             final_text = raw_text
@@ -228,24 +229,74 @@ class RecordingPipeline:
             # 对标闪电说 organize_level="none": 原话模式 → 跳过 AI 纠错
             organize_skip = False
             try:
-                from infrastructure.config_store import ConfigStore
                 organize_skip = ConfigStore().get("organize_level", "light") == "none"
             except Exception:
                 pass
+            ai_degraded = False
             if enable_correction and not organize_skip:
+                # Read configurable AI deadline (default 25s, range 15-45)
+                ai_deadline = 25.0
                 try:
-                    # P1: pass hotwords_mgr for Layer 3 hotword bodyguard
-                    corrected, ai_provider_id, ai_model_name = corrector.process(
-                        raw_text, hotwords_mgr=hotwords_mgr)
-                    if corrected and corrected.strip():
-                        final_text = corrected
-                        if ai_provider_id is None:
-                            self._eb.emit(Events.AI_ERROR, "No AI provider available for correction")
+                    ai_deadline = float(ConfigStore().get("ai_timeout", 25.0))
+                    ai_deadline = max(15.0, min(45.0, ai_deadline))
+                except Exception:
+                    pass
+                # Run AI correction on a daemon thread with deadline.
+                # We use a raw thread (not ThreadPoolExecutor) so a hang
+                # never blocks cleanup — the daemon thread is orphaned.
+                import queue
+                ai_result_box: queue.Queue = queue.Queue(maxsize=1)
+                ai_result: tuple | None = None  # prevent UnboundLocalError
+
+                def _ai_task():
+                    """Wrap corrector.process to catch exceptions
+                    in the daemon thread and propagate them via the queue."""
+                    try:
+                        result = corrector.process(raw_text, hotwords_mgr=hotwords_mgr)
+                        ai_result_box.put(("ok", result))
+                    except Exception as e:
+                        ai_result_box.put(("error", str(e)))
+
+                ai_thread = threading.Thread(
+                    target=_ai_task,
+                    daemon=True, name="ai-correction")
+                ai_thread.start()
+                try:
+                    status, payload = ai_result_box.get(timeout=ai_deadline)
+                    if status == "error":
+                        logger.warning("AI correction failed: %s, using raw text", payload)
+                        self._eb.emit(Events.AI_ERROR, str(payload))
+                        ai_degraded = True
                     else:
-                        logger.warning("AI correction returned empty, using raw text")
+                        ai_result = payload
+                except queue.Empty:
+                    logger.warning(
+                        "[AI] deadline %.0fs exceeded — falling back to locally_refined_text",
+                        ai_deadline)
+                    ai_degraded = True
+                    self._eb.emit(Events.AI_DEGRADED,
+                                  f"AI 整理超时（{ai_deadline:.0f}s），已使用识别结果")
+                    try:
+                        self._eb.emit(Events.ASR_PROGRESS,
+                                      "degrading", "AI 整理超时，已使用识别结果", engine)
+                    except Exception:
+                        pass
                 except Exception as e:
                     logger.warning("AI correction failed: %s, using raw text", e)
                     self._eb.emit(Events.AI_ERROR, str(e))
+                    ai_degraded = True
+                if ai_result is not None:
+                    corrected, provider_id, model_name = ai_result
+                    if corrected and corrected.strip():
+                        final_text = corrected
+                        ai_provider_id = provider_id
+                        ai_model_name = model_name
+                    else:
+                        logger.warning("AI correction returned empty, using raw text")
+                        ai_degraded = True
+                elif not ai_degraded:
+                    # No result and no timeout/error — treat as degraded
+                    ai_degraded = True
             self._eb.emit(Events.AI_RESULT, final_text, ai_provider_id, ai_model_name)
 
             # ── Post-processing: remove trailing period (对标闪电说 "去除结尾句号") ──

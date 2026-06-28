@@ -116,6 +116,7 @@ function Float(){
     window.sayitOnAiError=()=>{setErrType('ai');d('ERROR')};
     window.sayitOnUipiWarn=()=>{setUipiWarn(true)};
     window.sayitOnLightHint=(msg)=>{setHintMsg(msg||'');setTimeout(()=>setHintMsg(''),3000)};
+    window.sayitOnAiDegraded=(msg)=>{setHintMsg(msg||'');setTimeout(()=>setHintMsg(''),5000)};
     window.__sayitDismiss=()=>{d('_RESET');window.sayit&&window.sayit.clearElementPositions()};
     window.sayitOnRmsLevel=v=>sv(v);window.sayitOnTick=()=>{};
     window.sayitOnAsrResult=(t,eng)=>{setAsrEngine(eng||'')};

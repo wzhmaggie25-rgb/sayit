@@ -528,6 +528,11 @@ function connectWS() {
           pushToFloat('if(window.sayitOnAiResult)sayitOnAiResult(' +
             JSON.stringify(evt.text) + ',' + JSON.stringify(evt.provider || '') + ',' + JSON.stringify(evt.model || '') + ')');
           break;
+        case 'ai_degraded':
+          // AI deadline exceeded or AI failure — show hint on float bar
+          keepFloatOnTop();
+          pushToFloat('if(window.sayitOnAiDegraded)sayitOnAiDegraded(' + JSON.stringify(evt.message || '') + ')');
+          break;
       }
     } catch(e) {}
   });
