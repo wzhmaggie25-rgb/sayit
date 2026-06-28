@@ -331,18 +331,15 @@ class Injector:
         foreground thread (works across processes without AttachThreadInput).
 
         Returns one of:
-          "editable" — focused UIA element with ValuePattern and
+          "editable_verified" — focused UIA element with ValuePattern and
                        CurrentIsReadOnly=False, or Win32 Edit/RichEdit focus.
-          "editable_probable" — TextPattern-only (no ValuePattern). Seen in
-                       Chromium contenteditable, Electron apps, WeChat,
-                       Obsidian, Feishu. Not guaranteed writable but should
-                       attempt clipboard/SendInput.
+          "editable_probable" — TextPattern-only (no ValuePattern), no UIA
+                       element, read-only ValuePattern, no editable pattern,
+                       or conservative fallback. Seen in Chromium contenteditable,
+                       Electron apps, WeChat, Obsidian, Feishu, and read-only
+                       controls. Injection should be attempted.
           "no_editable_verified" — no foreground window (fg_hwnd == 0), true
                        desktop, or zero hwnd. Definitely no editable target.
-          "no_editable" — read-only ValuePattern, no UIA focused element,
-                          no patterns at all, or conservative fallback when
-                          assessment is inconclusive.
-          "unknown" — cannot determine (should fall through to injection attempt).
         """
         try:
             fg_hwnd = ctypes.windll.user32.GetForegroundWindow()
@@ -355,8 +352,8 @@ class Injector:
             gui = GUITHREADINFO()
             gui.cbSize = ctypes.sizeof(GUITHREADINFO)
             if not ctypes.windll.user32.GetGUIThreadInfo(tid, ctypes.byref(gui)):
-                logger.info("[INJECT-EDITABILITY] GetGUIThreadInfo failed → unknown")
-                return "unknown"
+                logger.info("[INJECT-EDITABILITY] GetGUIThreadInfo failed → editable_probable")
+                return "editable_probable"
             focus_hwnd = int(gui.hwndFocus) if gui.hwndFocus else 0
 
             if focus_hwnd:
@@ -366,8 +363,8 @@ class Injector:
                 if "edit" in cls or "richedit" in cls:
                     logger.info(
                         "[INJECT-EDITABILITY] GetGUIThreadInfo focus is "
-                        "Edit/RichEdit (hwnd=%d) → editable", focus_hwnd)
-                    return "editable"
+                        "Edit/RichEdit (hwnd=%d) → editable_verified", focus_hwnd)
+                    return "editable_verified"
 
             # ── UIA focused element — require ValuePattern AND !read-only ──
             try:
@@ -382,8 +379,8 @@ class Injector:
                     if elem is None:
                         logger.info(
                             "[INJECT-EDITABILITY] no UIA focused element → "
-                            "no_editable")
-                        return "no_editable"
+                            "editable_probable")
+                        return "editable_probable"
 
                     # ValuePattern + IsReadOnly check
                     try:
@@ -397,18 +394,18 @@ class Injector:
                                 if read_only:
                                     logger.info(
                                         "[INJECT-EDITABILITY] ValuePattern "
-                                        "is read-only → no_editable")
-                                    return "no_editable"
+                                        "is read-only → editable_probable")
+                                    return "editable_probable"
                                 logger.info(
                                     "[INJECT-EDITABILITY] ValuePattern "
-                                    "editable → editable")
-                                return "editable"
+                                    "editable → editable_verified")
+                                return "editable_verified"
                             except Exception:
                                 # Can't determine read-only — assume editable
                                 logger.info(
                                     "[INJECT-EDITABILITY] ValuePattern "
-                                    "read-only check failed → editable")
-                                return "editable"
+                                    "read-only check failed → editable_verified")
+                                return "editable_verified"
                     except Exception:
                         pass
 
@@ -427,8 +424,8 @@ class Injector:
 
                     logger.info(
                         "[INJECT-EDITABILITY] UIA element has no editable "
-                        "pattern → no_editable")
-                    return "no_editable"
+                        "pattern → editable_probable")
+                    return "editable_probable"
                 finally:
                     comtypes.CoUninitialize()
             except ImportError:
@@ -442,8 +439,8 @@ class Injector:
                 return "no_editable_verified"
 
             logger.info("[INJECT-EDITABILITY] cannot determine editability → "
-                        "no_editable (conservative)")
-            return "no_editable"
+                        "editable_probable (conservative)")
+            return "editable_probable"
         except Exception as e:
             logger.debug("[INJECT-EDITABILITY] assessment error: %s", e)
             return "unknown"
@@ -974,10 +971,11 @@ class Injector:
 
         # ── Stage 0: Assess current foreground editability ──
         # Do NOT restore captured target — inject into current foreground.
-        # If no editable element is focused, return no_editable_target
-        # immediately (never touches clipboard).
+        # Only no_editable_verified (no foreground window at all, true desktop)
+        # blocks injection. All other states (editable_verified, editable_probable)
+        # proceed to injection attempt.
         editability = self._assess_target_editability(target)
-        if editability in ("no_editable", "no_editable_verified"):
+        if editability == "no_editable_verified":
             logger.info(
                 "[INJECT-POST] no editable target (editability=%s) — "
                 "returning no_editable_target state", editability)

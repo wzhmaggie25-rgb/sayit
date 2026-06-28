@@ -144,7 +144,7 @@ class TestEditabilityP0Relaxation(unittest.TestCase):
              patch.object(ctypes.windll.user32, "GetClassNameW",
                           side_effect=_fill_classname("Edit")):
             result = self.inj._assess_target_editability(None)
-            self.assertEqual(result, "editable")
+            self.assertEqual(result, "editable_verified")
 
     def test_win32_richedit_still_editable(self):
         """Win32 RichEdit still returns editable."""
@@ -155,7 +155,7 @@ class TestEditabilityP0Relaxation(unittest.TestCase):
              patch.object(ctypes.windll.user32, "GetClassNameW",
                           side_effect=_fill_classname("RichEdit20W")):
             result = self.inj._assess_target_editability(None)
-            self.assertEqual(result, "editable")
+            self.assertEqual(result, "editable_verified")
 
     def test_uia_valuepattern_editable_still_editable(self):
         """UIA ValuePattern non-read-only still returns editable."""
@@ -174,7 +174,7 @@ class TestEditabilityP0Relaxation(unittest.TestCase):
             mock_create.return_value = uia_instance
 
             result = self.inj._assess_target_editability(None)
-            self.assertEqual(result, "editable")
+            self.assertEqual(result, "editable_verified")
 
     def test_no_editable_with_dispatch_does_not_show_large_card(self):
         """no_editable_verified with injection_dispatched=False shows card.
