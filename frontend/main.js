@@ -8,6 +8,13 @@ const path = require('path');
 const fs = require('fs');
 const WebSocket = require('ws');
 
+// Phase B: Pure session lifecycle functions
+const {
+  decideWatchdogAction,
+  getTerminalFloatAction,
+  isSessionTerminal,
+} = require('./_session_lifecycle.js');
+
 let mainWin = null, floatWin = null, resultCardWin = null, backendProcess = null;
 let floatReady = false;
 let resultCardReady = false;
@@ -472,13 +479,17 @@ function connectWS() {
           if (autoCloseTimer !== null) { clearTimeout(autoCloseTimer); autoCloseTimer = null; }
           destroyResultCard();
           activeSessionId = evt.session_id || '';
-          // Phase D: start session watchdog
-          startSessionWatchdog(activeSessionId);
+          // Phase B: Do NOT start watchdog at recording_started — a long recording
+          // (>2 min) would false-positive. Watchdog starts at recording_stopping.
+          // Stale state is reset; timer stays stopped.
+          stopSessionWatchdog();
           showFloat();
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnRecordingStarted)sayitOnRecordingStarted()');
           break;
         case 'recording_stopping':
+          // Phase B: Watchdog starts ONLY at recording_stopping — bounded STOPPING phase
+          startSessionWatchdog(activeSessionId);
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnRecordingStopping)sayitOnRecordingStopping()');
           break;
@@ -499,10 +510,16 @@ function connectWS() {
           // Phase C+D: terminal event ends the session — stop watchdog, exit STOPPING
           stopSessionWatchdog();
           keepFloatOnTop();
-          if (evt.outcome === 'failed' || evt.outcome === 'aborted') {
-            pushToFloat('if(window.sayitOnError)sayitOnError("处理异常，请查看历史记录")');
-          } else if (evt.outcome === 'success') {
+          // Phase B: use shared pure function to determine float action
+          const terminalAction = getTerminalFloatAction(
+            evt.outcome,
+            !!evt.final_text_available
+          );
+          if (terminalAction.command === 'pipeline_done') {
             pushToFloat('if(window.sayitOnPipelineDone)sayitOnPipelineDone("")');
+          } else {
+            pushToFloat('if(window.sayitOnError)sayitOnError(' +
+              JSON.stringify(terminalAction.args[0]) + ')');
           }
           pushToMain('backend-event', evt);
           break;
@@ -597,10 +614,18 @@ function connectWS() {
   });
   ws.on('close', () => {
     console.log('[ws] closed');
+    // Phase B: WS disconnect must stop watchdog and exit STOPPING state
+    // The session can no longer receive terminal events
+    stopSessionWatchdog();
+    try {
+      pushToFloat('if(window.sayitOnError)sayitOnError("连接已断开，请检查后端服务")');
+    } catch(e) {}
     scheduleWSReconnect();
   });
   ws.on('error', () => {
     console.warn('[ws] error');
+    // Phase B: WS error must also stop watchdog
+    stopSessionWatchdog();
     scheduleWSReconnect();
   });
 }
