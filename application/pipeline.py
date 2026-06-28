@@ -8,6 +8,7 @@ from typing import Optional
 
 from domain.models import RecordingState
 from application.eventbus import EventBus, Events
+from application.result_card_eligibility import should_show_large_result_card
 from infrastructure.injector import InjectionResult
 from infrastructure.config_store import ConfigStore
 
@@ -347,14 +348,19 @@ class RecordingPipeline:
                 history_error = inject_result.reason or "attempted_unverified"
             elif inject_result.state == "no_editable_target":
                 ok = True  # Not a failure — user needs result card
-                self._eb.emit(Events.INJECTION_DONE, inject_result)  # False means "not in target"
+                self._eb.emit(Events.INJECTION_DONE, inject_result)
                 self._eb.emit(Events.NO_EDITABLE_TARGET, final_text)
-                # Show large result card only when no dispatch was made
-                # (no_editable_target + injection_dispatched=False)
-                self._eb.emit(Events.RESULT_CARD_SHOW, final_text,
-                              locally_refined_text,
-                              inject_result.state,
-                              "未找到可输入的目标窗口")
+                # Gate large result card through production eligibility
+                if should_show_large_result_card(
+                    state=inject_result.state,
+                    injection_dispatched=inject_result.injection_dispatched,
+                    inserted_verified=inject_result.verified if hasattr(inject_result, "verified") else False,
+                    target_is_sayit_window=False,
+                ):
+                    self._eb.emit(Events.RESULT_CARD_SHOW, final_text,
+                                  locally_refined_text,
+                                  inject_result.state,
+                                  "未找到可输入的目标窗口")
                 history_pasted = False
                 history_status = "completed_no_target"
                 history_error = ""
@@ -362,16 +368,21 @@ class RecordingPipeline:
                 # injection_failed or recognition_failed
                 ok = False
                 self._eb.emit(Events.INJECTION_DONE, inject_result)
-                # If any inject action was dispatched, show lightweight hint
-                # instead of large result card
-                if inject_result is not None and inject_result.injection_dispatched:
-                    self._eb.emit(Events.LIGHT_HINT, "文本未能输入，请查看历史记录")
-                else:
-                    self._eb.emit(Events.PIPELINE_ERROR, "文本已保存到历史，但未能注入目标输入窗口")
+                # Gate large result card through production eligibility
+                if should_show_large_result_card(
+                    state=inject_result.state,
+                    injection_dispatched=inject_result.injection_dispatched if inject_result else False,
+                    inserted_verified=inject_result.verified if (inject_result and hasattr(inject_result, "verified")) else False,
+                    target_is_sayit_window=False,
+                ):
                     self._eb.emit(Events.RESULT_CARD_SHOW, final_text,
                                   locally_refined_text,
                                   inject_result.state,
                                   "未能将文本注入目标窗口")
+                else:
+                    self._eb.emit(Events.LIGHT_HINT, "文本未能输入，请查看历史记录")
+                if not (inject_result and inject_result.injection_dispatched):
+                    self._eb.emit(Events.PIPELINE_ERROR, "文本已保存到历史，但未能注入目标输入窗口")
                 history_pasted = False
                 history_status = "error"
                 history_error = inject_result.reason or "injection_failed"

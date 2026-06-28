@@ -246,10 +246,13 @@ function calcResultCardPosition(cardHeight) {
   let anchorTop, anchorLeft, anchorWidth;
 
   if (Array.isArray(elementPositions) && elementPositions.length > 0) {
-    // Use the first element position from float renderer (visible bubble area)
+    // Use the first element position from float renderer (visible bubble area).
+    // Float renderer reports getBoundingClientRect() — viewport-relative coords.
+    // Convert to screen coordinates by adding the float window's screen origin.
+    const fb = floatWin.getBounds();
     const ep = elementPositions[0];
-    anchorTop = ep.top;
-    anchorLeft = ep.left;
+    anchorTop = fb.y + ep.top;
+    anchorLeft = fb.x + ep.left;
     anchorWidth = ep.right - ep.left;
   } else if (isUsableWindow(floatWin)) {
     // Fallback: estimate visible bar at bottom of float window

@@ -1,6 +1,6 @@
 """Phase 3 tests: strict result card eligibility.
 
-Verifies the eligibility pure function:
+Verifies the eligibility pure function from the production module:
 
 show_large_result_card =
   state == no_editable_target
@@ -21,31 +21,8 @@ from __future__ import annotations
 
 import unittest
 
+from application.result_card_eligibility import should_show_large_result_card
 from infrastructure.injector import InjectionResult
-
-
-def should_show_large_result_card(
-    state: str,
-    injection_dispatched: bool = False,
-    inserted_verified: bool = False,
-    target_is_sayit_window: bool = False,
-) -> bool:
-    """Pure function: determine if a large result card should be shown.
-
-    Large card only appears when:
-    - state is no_editable_target
-    - NO inject action was dispatched
-    - NO verified insertion occurred
-    - target is NOT a SayIt window
-    """
-    if target_is_sayit_window:
-        return False
-    if inserted_verified:
-        return False
-    if state == "no_editable_target" and not injection_dispatched:
-        return True
-    # All other cases: no large card
-    return False
 
 
 class ResultCardEligibilityTests(unittest.TestCase):
