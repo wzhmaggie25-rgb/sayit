@@ -6,20 +6,22 @@ Verifies the Phase 6 requirements from ROUND9_LONG_TASK.md:
   - Crash report writing + rotation
   - Faulthandler enabled on start
   - Fault injection endpoint (exit with code)
-  - Supervisor restart decision (exit code != 0)
+  - Supervisor restart decision (pure logic tested via Node harness)
   - UI exits "thinking" mode on crash
 
 Test approach
 -------------
 Unit-test the server.py crash report machinery, health endpoint,
-and diagnostic exit endpoint. The Electron-side supervisor
-(BACKEND_SUPERVISOR in main.js) is validated via syntax check
-and its pure-logic decisions are tested below without Electron.
+and diagnostic exit endpoint. The Electron-side supervisor decision
+logic (BACKEND_SUPERVISOR in main.js) is extracted as a pure function
+in frontend/_supervisor_logic.js and tested via Node harness — no
+simulation in Python that would diverge from real production code.
 """
 from __future__ import annotations
 import os
 import sys
 import json
+import subprocess
 import time
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -156,90 +158,38 @@ class BackendSupervisorTests(unittest.TestCase):
         self.assertIn("api test error", result.get("content", ""))
         self.assertIn("path", result)
 
-    # ── 3: Supervisor pure logic (Node.js port) ────────
+    # ── 3: Supervisor pure logic (Node harness tests production function) ────
 
-    def _simulate_supervisor(self, events):
-        """Simulate the Electron BACKEND_SUPERVISOR logic in Python.
+    def test_supervisor_logic_via_node_harness(self):
+        """Supervisor restart decision logic is tested via Node harness.
 
-        Args:
-            events: list of dicts with keys:
-                - 'type': 'exit' | 'restart' | 'user_quit'
-                - 'code': exit code (for 'exit')
-        Returns:
-            list of decisions made: 'restart', 'give_up', 'ignore'
+        The production code lives in frontend/_supervisor_logic.js
+        (extracted from main.js BACKEND_SUPERVISOR). The Node harness
+        _test_supervisor_logic.js exercises all 10 decision scenarios.
+
+        This test verifies the harness passes — ensuring the logic
+        matches what BACKEND_SUPERVISOR uses in production.
         """
-        decisions = []
-        user_initiated = False
-        restart_attempted = False
-
-        for ev in events:
-            if ev['type'] == 'user_quit':
-                user_initiated = True
-            elif ev['type'] == 'exit':
-                code = ev.get('code', 0)
-                if user_initiated:
-                    decisions.append('ignore')
-                elif restart_attempted:
-                    decisions.append('give_up')
-                elif code == 0:
-                    decisions.append('ignore')  # normal exit
-                else:
-                    restart_attempted = True
-                    decisions.append('restart')
-            elif ev['type'] == 'restart':
-                # Restart happened
-                decisions.append('restarted')
-        return decisions
-
-    def test_normal_exit_no_restart(self):
-        """Exit code 0 should not trigger restart."""
-        decisions = self._simulate_supervisor([
-            {'type': 'exit', 'code': 0},
-        ])
-        self.assertEqual(decisions, ['ignore'])
-
-    def test_exit_code_nonzero_triggers_restart(self):
-        """Exit code != 0 should trigger exactly one restart."""
-        decisions = self._simulate_supervisor([
-            {'type': 'exit', 'code': 1},
-        ])
-        self.assertIn('restart', decisions)
-
-    def test_second_crash_no_restart_loop(self):
-        """Second crash after restart must NOT restart again."""
-        decisions = self._simulate_supervisor([
-            {'type': 'exit', 'code': 1},   # first crash → restart
-            {'type': 'exit', 'code': 1},   # second crash → give up
-        ])
-        self.assertEqual(decisions, ['restart', 'give_up'])
-
-    def test_user_quit_ignores_crash(self):
-        """User-initiated exit must suppress auto-restart."""
-        decisions = self._simulate_supervisor([
-            {'type': 'user_quit'},
-            {'type': 'exit', 'code': 1},
-        ])
-        self.assertEqual(decisions, ['ignore'])
-
-    def test_normal_exit_after_crash_does_not_restart(self):
-        """After restart succeeds, a subsequent normal exit does not trigger
-        another restart (restartAttempted is still true, so it gives up).
-        This is conservative — better to not restart than to crash-loop."""
-        decisions = self._simulate_supervisor([
-            {'type': 'exit', 'code': 1},   # first crash → restart
-            {'type': 'restart'},
-            {'type': 'exit', 'code': 0},   # normal exit after restart → give_up
-        ])
-        self.assertEqual(decisions, ['restart', 'restarted', 'give_up'])
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        harness = os.path.join(repo_root, "frontend", "_test_supervisor_logic.js")
+        self.assertTrue(os.path.exists(harness),
+                        "Supervisor logic test harness must exist")
+        result = subprocess.run(
+            ["node", harness],
+            capture_output=True, text=True, cwd=repo_root, timeout=30)
+        self.assertEqual(
+            result.returncode, 0,
+            f"Supervisor logic harness failed:\n{result.stdout}\n{result.stderr}")
 
     # ── 4: main.js syntax check ─────────────────────────
 
     def test_main_js_syntax(self):
         """frontend/main.js must pass Node.js syntax check."""
         import subprocess
+        repo_root = os.path.dirname(os.path.dirname(__file__))
         result = subprocess.run(
             ['node', '--check', 'frontend/main.js'],
-            capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(__file__)))
+            capture_output=True, text=True, cwd=repo_root)
         self.assertEqual(result.returncode, 0,
                          f"main.js syntax error: {result.stderr}")
 
