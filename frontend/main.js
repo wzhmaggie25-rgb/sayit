@@ -25,6 +25,8 @@ const BACKEND_SUPERVISOR = {
   restartAttempted: false,
   // The exit code from the last backend exit (null if still running).
   lastExitCode: null,
+  // The signal that killed the backend, if any.
+  lastExitSignal: null,
   // Monotonic timestamp of the last exit (for backoff calculation).
   lastExitTime: 0,
   // Minimum delay before restart (ms) — avoids crash-loop busy-spin.
@@ -663,10 +665,11 @@ function spawnBackend() {
   });
   backendProcess.stdout.on('data', d => process.stdout.write('[backend] ' + d.toString()));
   backendProcess.stderr.on('data', d => process.stderr.write('[backend-err] ' + d.toString()));
-  backendProcess.on('exit', (code) => {
+  backendProcess.on('exit', (code, signal) => {
     const now = Date.now();
-    console.warn('[main] backend exited with code', code);
+    console.warn('[main] backend exited with code', code, 'signal', signal);
     BACKEND_SUPERVISOR.lastExitCode = code;
+    BACKEND_SUPERVISOR.lastExitSignal = signal;
     BACKEND_SUPERVISOR.lastExitTime = now;
     backendProcess = null;
 
@@ -676,11 +679,16 @@ function spawnBackend() {
       return;
     }
 
+    // code === 0 and no signal → normal (graceful) shutdown — no restart
+    if (code === 0 && signal === null) {
+      console.log('[main] backend exited normally — no restart');
+      return;
+    }
+
     // Abnormal exit — restart once
     if (BACKEND_SUPERVISOR.restartAttempted) {
       console.error('[main] backend crashed again after restart — giving up');
-      // Notify float to exit "thinking" mode and show error
-      pushToFloat('if(window.sayitOnBackendError)sayitOnBackendError("后台异常，SayIt 正在恢复")');
+      pushToFloat('if(window.sayitOnBackendError)sayitOnBackendError("后台恢复失败，请手动重启 SayIt")');
       return;
     }
 
@@ -695,7 +703,6 @@ function spawnBackend() {
     );
     console.log('[main] restart backoff', backoff, 'ms');
 
-    // Notify float to exit "thinking" mode
     pushToFloat('if(window.sayitOnBackendError)sayitOnBackendError("后台异常，SayIt 正在恢复")');
 
     setTimeout(() => {
@@ -704,19 +711,42 @@ function spawnBackend() {
       waitForServer(60).then(ok => {
         if (ok) {
           console.log('[main] backend restarted successfully');
+          // Reset crash episode budget — backend is healthy again
+          BACKEND_SUPERVISOR.restartAttempted = false;
           pushToFloat('if(window.sayitOnBackendRestored)sayitOnBackendRestored()');
-          // Restore idle state — close any stale result card
           destroyResultCard();
           connectWS();
         } else {
           console.error('[main] backend restart failed — server not reachable');
+          pushToFloat('if(window.sayitOnBackendError)sayitOnBackendError("后台恢复失败，请手动重启 SayIt")');
         }
       });
     }, backoff);
   });
   backendProcess.on('error', (err) => {
     console.error('[main] backend spawn error:', err.message);
-    backendProcess = null;
+    const now = Date.now();
+    BACKEND_SUPERVISOR.lastExitTime = now;
+
+    // Treat spawn error like an abnormal exit (same restart logic)
+    if (BACKEND_SUPERVISOR.userInitiatedExit) return;
+    if (BACKEND_SUPERVISOR.restartAttempted) {
+      pushToFloat('if(window.sayitOnBackendError)sayitOnBackendError("后台恢复失败，请手动重启 SayIt")');
+      return;
+    }
+    BACKEND_SUPERVISOR.restartAttempted = true;
+    pushToFloat('if(window.sayitOnBackendError)sayitOnBackendError("后台异常，SayIt 正在恢复")');
+    setTimeout(() => {
+      spawnBackend();
+      waitForServer(60).then(ok => {
+        if (ok) {
+          BACKEND_SUPERVISOR.restartAttempted = false;
+          pushToFloat('if(window.sayitOnBackendRestored)sayitOnBackendRestored()');
+          destroyResultCard();
+          connectWS();
+        }
+      });
+    }, 3000);  // spawn error gets 3s fixed backoff
   });
 }
 app.on('second-instance', (_event, _commandLine, _workingDirectory) => {
