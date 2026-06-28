@@ -16,6 +16,8 @@ let pendingResultText = '';           // main-process source-of-truth for clipbo
 let pendingSessionId = '';            // session id for the pending payload — must match activeSessionId to replay
 let activeSessionId = '';             // current recording session — stale events are ignored
 let autoCloseTimer = null;            // result-card auto-close timer handle
+// Phase D: Session watchdog — prevents permanent "thinking" state
+let sessionWatchdogTimer = null;
 
 // ── Backend supervisor (Phase 6) ─────────────────
 const BACKEND_SUPERVISOR = {
@@ -330,6 +332,34 @@ function destroyResultCard() {
   pendingSessionId = '';
 }
 
+// ── Phase D: Session watchdog ───────────────────────
+const SESSION_WATCHDOUT_MS = 120000;  // 2 minute max — backend should always complete within this
+
+function startSessionWatchdog(sessionId) {
+  stopSessionWatchdog();
+  if (!sessionId) return;
+  sessionWatchdogTimer = setTimeout(() => {
+    console.warn('[watchdog] Session ' + sessionId + ' timed out without terminal event — forcing exit from STOPPING');
+    sessionWatchdogTimer = null;
+    // Force the float to exit STOPPING state
+    try {
+      pushToFloat('if(window.sayitOnPipelineDone)sayitOnPipelineDone("")');
+      pushToFloat('if(window.sayitOnError)sayitOnError("处理异常，请查看历史记录或日志")');
+    } catch(e) {}
+    // Clear pending payload since session ended abnormally
+    pendingResultCardPayload = null;
+    pendingResultText = '';
+    pendingSessionId = '';
+  }, SESSION_WATCHDOUT_MS);
+}
+
+function stopSessionWatchdog() {
+  if (sessionWatchdogTimer !== null) {
+    clearTimeout(sessionWatchdogTimer);
+    sessionWatchdogTimer = null;
+  }
+}
+
 function flushPendingResultCardPayload() {
   if (!isUsableWindow(resultCardWin) || !resultCardReady) return;
   if (!pendingResultCardPayload) return;
@@ -442,6 +472,8 @@ function connectWS() {
           if (autoCloseTimer !== null) { clearTimeout(autoCloseTimer); autoCloseTimer = null; }
           destroyResultCard();
           activeSessionId = evt.session_id || '';
+          // Phase D: start session watchdog
+          startSessionWatchdog(activeSessionId);
           showFloat();
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnRecordingStarted)sayitOnRecordingStarted()');
@@ -455,14 +487,23 @@ function connectWS() {
           pushToFloat('if(window.sayitOnRecordingStopped)sayitOnRecordingStopped()');
           break;
         case 'pipeline_done':
-          // Pipeline finished — clear pending card state for this session
-          if (evt.session_id && activeSessionId && evt.session_id === activeSessionId) {
-            pendingResultCardPayload = null;
-            pendingResultText = '';
-            pendingSessionId = '';
-          }
+          // Phase E: pipeline_done/terminal must NOT clear pending card payload.
+          // The payload is cleared only by destroyResultCard (user close, new session).
+          // This prevents the race: show → done → load producing an empty card.
+          stopSessionWatchdog();
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnPipelineDone)sayitOnPipelineDone(' + JSON.stringify(evt.text) + ')');
+          pushToMain('backend-event', evt);
+          break;
+        case 'pipeline_terminal':
+          // Phase C+D: terminal event ends the session — stop watchdog, exit STOPPING
+          stopSessionWatchdog();
+          keepFloatOnTop();
+          if (evt.outcome === 'failed' || evt.outcome === 'aborted') {
+            pushToFloat('if(window.sayitOnError)sayitOnError("处理异常，请查看历史记录")');
+          } else if (evt.outcome === 'success') {
+            pushToFloat('if(window.sayitOnPipelineDone)sayitOnPipelineDone("")');
+          }
           pushToMain('backend-event', evt);
           break;
         case 'no_editable_target':
@@ -505,12 +546,9 @@ function connectWS() {
           pushToMain('backend-event', evt);
           break;
         case 'error':
-          // Pipeline/session error — clear pending card state
-          if (evt.session_id && activeSessionId && evt.session_id === activeSessionId) {
-            pendingResultCardPayload = null;
-            pendingResultText = '';
-            pendingSessionId = '';
-          }
+          // Phase E: error must NOT clear pending card payload (same race as pipeline_done).
+          // Payload is only cleared by destroyResultCard or new session.
+          stopSessionWatchdog();
           keepFloatOnTop();
           pushToFloat('if(window.sayitOnError)sayitOnError(' + JSON.stringify(evt.message) + ')');
           break;
