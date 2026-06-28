@@ -1,30 +1,44 @@
 # Current Task
 
-> 最后一次更新：2026-06-27
+> 最后一次更新：2026-06-28
 
 ## 状态
 
-**BLOCKED**
+**ZCODE_READY**
 
 ## 执行器
 
-本轮只允许：
+本轮改用：
 
 ```text
-SayIt Agent Bridge v0.2.2 → Claude Code CLI
+ZCode GUI → Claude Code
 ```
 
-不要同时启动 ZCode 或第二个 Bridge。
+原因：Agent Bridge 调用 Claude CLI 时立即以 exit code 1 退出，且 stderr 未被完整记录。Round 9 不再继续排查 Bridge，避免占用用户时间。
+
+运行本轮时：
+
+- Agent Bridge 必须关闭；
+- 不同时启动第二个 ZCode/Claude 执行器；
+- 只在当前 feature 分支工作。
 
 ## 当前任务起点
 
-发布 Round 9 任务的提交：
+Round 9 任务发布提交：
 
 ```text
 698b735157fc4fd23122545c06270b2b393dee24
 ```
 
-开始执行后，以 `git pull --ff-only` 后的真实 HEAD 为准。
+Bridge 失败只产生了 BLOCKED 元数据提交，没有修改功能代码。
+
+开始执行后，以：
+
+```text
+git pull --ff-only origin feature/silent-learning-stabilization
+```
+
+之后的真实 HEAD 为准。
 
 ## 必须读取
 
@@ -84,7 +98,7 @@ Phase 0 到 Phase 7 连续自主执行。
 → push 当前 feature 分支
 ```
 
-不向用户询问普通实现细节。遇到方案选择时，优先：
+不要向用户询问普通实现细节。遇到方案选择时，优先：
 
 ```text
 不丢文字
