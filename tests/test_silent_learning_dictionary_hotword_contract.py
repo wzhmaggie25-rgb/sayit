@@ -4,7 +4,7 @@ import unittest
 
 import infrastructure.silent_monitor as silent_monitor
 from domain.correction import apply_rules_with_stats
-from domain.silent_learning import can_start_silent_learning
+from domain.silent_learning import can_start_silent_learning, classify_user_edit
 
 
 class FakeHotwordsManager:
@@ -182,6 +182,44 @@ class SilentLearningDictionaryHotwordContractTests(unittest.TestCase):
 
         self.assertEqual(result, "打开微差")
         self.assertEqual(applied, [])
+
+    # --- P0-1: single-CJK expansion boundary tests (must FAIL on current code) ---
+
+    def test_single_cjk_replacement_must_not_expand_to_neighbor(self):
+        """天汽→天气 in '今天天汽很好' must NOT learn '气很'"""
+        decision = classify_user_edit("今天天汽很好", "今天天气很好")
+        self.assertFalse(decision.eligible,
+                         f"Should be ineligible but learned '{decision.corrected_term}': {decision.reason}")
+
+    def test_single_cjk_in_product_name_must_not_expand(self):
+        """豆抱→豆包 in '我喜欢豆抱助手' must NOT learn '包助'"""
+        decision = classify_user_edit("我喜欢豆抱助手", "我喜欢豆包助手")
+        self.assertFalse(decision.eligible,
+                         f"Should be ineligible but learned '{decision.corrected_term}': {decision.reason}")
+
+    def test_single_cjk_in_platform_name_must_not_expand(self):
+        """百练→百炼 in '阿里云百练平台' must NOT learn '炼平'"""
+        decision = classify_user_edit("阿里云百练平台", "阿里云百炼平台")
+        self.assertFalse(decision.eligible,
+                         f"Should be ineligible but learned '{decision.corrected_term}': {decision.reason}")
+
+    def test_single_cjk_replacement_returns_ambiguous_reason(self):
+        """Single CJK replacement without proven boundary → ambiguous_single_cjk"""
+        decision = classify_user_edit("天汽", "天气")
+        self.assertFalse(decision.eligible)
+        self.assertIn("ambiguous", decision.reason.lower())
+
+    def test_clean_2_char_cjk_replacement_still_works(self):
+        """Full 2-char CJK replacement (民天→明天) must still be eligible"""
+        decision = classify_user_edit("民天", "明天")
+        self.assertTrue(decision.eligible, f"Should be eligible: {decision.reason}")
+        self.assertEqual(decision.corrected_term, "明天")
+
+    def test_clean_3_char_cjk_replacement_still_works(self):
+        """Full 3-char CJK replacement must still be eligible"""
+        decision = classify_user_edit("阿巴阿", "阿巴阿巴")
+        self.assertTrue(decision.eligible, f"Should be eligible: {decision.reason}")
+        self.assertEqual(decision.corrected_term, "阿巴阿巴")
 
     def test_legacy_rules_do_not_auto_promote_hotwords(self):
         ContractDatabase.reset([
