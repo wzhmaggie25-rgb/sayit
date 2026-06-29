@@ -592,7 +592,7 @@ class AsrCascade:
                 model=a.get("asr_model", "fun-asr-realtime"),
                 ws_endpoint=a.get("ws_endpoint", "wss://dashscope.aliyuncs.com/api-ws/v1/inference"),
                 vocabulary_id=a.get("vocabulary_id", ""),
-                context=a.get("context", "") or getattr(self, "_streaming_context", ""),
+                context=getattr(self, "_streaming_context", "") or a.get("context", ""),
                 language=self._config.get("local", {}).get("language", "zh"),
                 max_sentence_silence=int(streaming_cfg.get("max_sentence_silence", 1300)),
                 event_callback=event_callback,
