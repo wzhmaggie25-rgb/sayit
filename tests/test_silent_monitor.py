@@ -78,6 +78,15 @@ class FakeDatabase:
         return False
 
 
+class FakeHotwords:
+    def __init__(self):
+        self.words: list[str] = []
+
+    def add_word(self, word):
+        self.words.append(word)
+        return True
+
+
 class SilentMonitorTests(unittest.TestCase):
     def setUp(self):
         self._old_database = silent_monitor.Database
@@ -90,20 +99,17 @@ class SilentMonitorTests(unittest.TestCase):
     def test_small_edit_extracts_rule_and_updates_history(self):
         monitor = silent_monitor.SilentMonitor()
         monitor._history_id = "42"
-        monitor._refined_text = "hello wrld"
-        monitor._track_context = make_context("prefix hello wrld suffix")
+        monitor._refined_text = "hello wurld"
+        monitor._hotwords_mgr = FakeHotwords()
+        monitor._track_context = make_context("prefix hello wurld suffix")
         monitor._last_context = make_context("prefix hello world suffix")
 
         monitor._check_edited_text("track_timeout")
 
-        self.assertTrue(FakeDatabase.merged_rules)
-        self.assertEqual(FakeDatabase.merged_rules[0]["pattern"], "wrld")
-        self.assertEqual(FakeDatabase.merged_rules[0]["replacement"], "world")
+        self.assertEqual(FakeDatabase.merged_rules, [])
+        self.assertEqual(monitor._hotwords_mgr.words, ["world"])
         self.assertEqual(FakeDatabase.updates[-1]["status"], "EXTRACTED")
         self.assertEqual(FakeDatabase.updates[-1]["edited_text"], "hello world")
-        # Phase 6: auto dictionary terms must NOT be added on single edit
-        self.assertEqual(FakeDatabase.added_words, [],
-                         "single edit must NOT auto-add dictionary terms")
 
     def test_large_full_field_edit_is_not_learned(self):
         monitor = silent_monitor.SilentMonitor()
@@ -133,25 +139,22 @@ class SilentMonitorTests(unittest.TestCase):
         )
         self.assertTrue(monitor._recent_enter_pressed())
 
-    def test_learn_does_not_auto_add_dictionary_terms(self):
-        """Phase 6: _learn must NOT call _auto_add_dictionary_terms.
-        Dictionary entries come ONLY from the promotion engine."""
+    def test_learn_does_not_create_correction_rules(self):
+        """Round 9.5A: learning writes only dictionary/hotwords, not rules."""
         monitor = silent_monitor.SilentMonitor()
         monitor._history_id = "99"
-        monitor._refined_text = "hello wrld"
-        monitor._track_context = make_context("prefix hello wrld suffix")
+        monitor._refined_text = "hello wurld"
+        monitor._hotwords_mgr = FakeHotwords()
+        monitor._track_context = make_context("prefix hello wurld suffix")
         monitor._last_context = make_context("prefix hello world suffix")
 
         monitor._check_edited_text("track_timeout")
 
-        # Rules are still learned (correction rules untouched)
-        self.assertTrue(FakeDatabase.merged_rules,
-                        "correction rules should still be learned")
-        # But no dictionary words added
-        self.assertEqual(FakeDatabase.added_words, [],
-                         "no dictionary words should be added by _learn alone")
+        self.assertEqual(FakeDatabase.merged_rules, [],
+                         "silent learning must not create correction_rules")
+        self.assertEqual(monitor._hotwords_mgr.words, ["world"])
         self.assertNotEqual(FakeDatabase.updates[-1]["status"], "LEARN_FAILED",
-                            "learn should succeed even without auto-add")
+                            "dictionary/hotword learning should succeed")
 
 
 if __name__ == "__main__":

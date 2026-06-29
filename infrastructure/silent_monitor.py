@@ -8,9 +8,7 @@ import threading
 import time
 from typing import Optional
 
-from domain.correction import (
-    learn_from_edit,
-)
+from domain.silent_learning import apply_silent_learning, classify_user_edit
 from infrastructure.context_helper_client import ContextHelperClient
 from infrastructure.database import Database
 from infrastructure.focus_context import (
@@ -51,7 +49,7 @@ class SilentMonitor:
 
     Mirrors Typeless' track-edit shape:
     inject text -> confirm inserted text in focused input -> bind input identity
-    -> watch small user edits -> learn rules and dictionary terms.
+    -> watch small user edits -> learn corrected dictionary terms.
     """
 
     def __init__(self):
@@ -252,34 +250,19 @@ class SilentMonitor:
 
     def _learn(self, original_text: str, edited_text: str,
                trigger_type: str, stats: dict):
-        db = Database()
         try:
-            existing_rules = db.get_rules(active_only=False)
-            merged, count = learn_from_edit(
-                original_text=original_text,
-                edited_text=edited_text,
-                existing_rules=existing_rules,
-                history_id=self._history_id,
-            )
-            if count > 0:
-                db.merge_rules(merged)
-
-            # ── Phase 6: hotword promotion only (no auto-add bypass) ─
-            # Dictionary entries must come ONLY from the promotion engine,
-            # which requires ≥ 2 distinct history sessions. Single-edit
-            # auto-add (removed _auto_add_dictionary_terms) would bypass
-            # the two-history gate.
-            promoted_word = self._maybe_promote_hotword(db)
-
-            status = "EXTRACTED" if count or promoted_word else "NO_RULE"
+            decision = classify_user_edit(original_text, edited_text)
+            result = apply_silent_learning(decision, self._hotwords_mgr)
+            status = "EXTRACTED" if result.learned else "NO_RULE"
             self._mark_history(edited_text, status)
             logger.info(
-                "SilentMonitor: learned rules=%d promoted=%s trigger=%s stats=%s",
-                count, promoted_word or "none", trigger_type, stats)
+                "SilentMonitor: learned=%s added=%s reason=%s term_len=%d trigger=%s stats=%s",
+                result.learned, result.added, result.reason,
+                result.corrected_term_len, trigger_type, stats)
 
-            if self._on_learned and (count or promoted_word):
+            if self._on_learned and result.learned:
                 try:
-                    self._on_learned(count + (1 if promoted_word else 0))
+                    self._on_learned(1 if result.added else 0)
                 except Exception as e:
                     logger.warning("SilentMonitor: callback error: %s", e)
         except Exception as e:
@@ -287,48 +270,12 @@ class SilentMonitor:
             logger.warning("SilentMonitor: learn failed: %s", e)
 
     def _maybe_promote_hotword(self, db) -> Optional[str]:
-        """Run the hotword promotion decision against current rules.
+        """Compatibility no-op for legacy correction-rule promotion.
 
-        Returns the promoted word (replacement string) if one was added
-        to the dictionary, else None. At most one promotion per call.
-
-        Only marks the rule as promoted AFTER the word has been
-        successfully added to the dictionary (HotwordsManager + DB),
-        so temporary failures keep the candidate eligible for retry.
+        Round 9.5A makes generic correction rules shadow-only: they must not
+        auto-promote replacements into personal dictionary or ASR hotwords.
         """
-        try:
-            from domain.hotword_promotion import decide_promotion
-            rules = db.get_rules(active_only=False)
-            decision = decide_promotion(rules)
-            if not decision.promoted_word:
-                return None
-            word = decision.promoted_word
-            pat, repl = decision.promoted_rule_keys
-            # Phase 7: promotion requires HotwordsManager for ASR sync.
-            # No DB-only fallback — without HotwordsManager, promotion
-            # silently fails and the rule stays eligible for retry when
-            # a HotwordsManager becomes available.
-            added = False
-            if self._hotwords_mgr is not None:
-                try:
-                    added = bool(self._hotwords_mgr.add_word(word))
-                except Exception as e:
-                    logger.warning(
-                        "SilentMonitor: hotwords_mgr.add_word failed: %s", e)
-            if added:
-                # Only mark promoted after successful dictionary add.
-                try:
-                    db.mark_rule_promoted(pat, repl)
-                except Exception as e:
-                    logger.warning("SilentMonitor: mark_rule_promoted failed: %s", e)
-                logger.info(
-                    "[HOTWORD-PROMOTION] promoted replacement=%r (from pattern=%r) "
-                    "to personal dictionary", word, pat)
-                return word
-            return None
-        except Exception as e:
-            logger.warning("SilentMonitor: hotword promotion error: %s", e)
-            return None
+        return None
 
     def _get_current_context(self, inserted_text: str = "") -> Optional[FocusContext]:
         if self._target_hwnd:

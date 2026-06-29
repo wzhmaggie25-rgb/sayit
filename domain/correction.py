@@ -170,25 +170,13 @@ def apply_rules(text: str, rules: list[dict]) -> str:
 
 
 def apply_rules_with_stats(text: str, rules: list[dict]) -> tuple[str, list[str]]:
-    """Apply active correction rules and return applied rule IDs."""
-    if not text:
-        return text, []
-    result = text
-    applied: list[str] = []
-    for rule in rules:
-        if not rule.get("is_active", True):
-            continue
-        if rule.get("confidence", 0) < MIN_CONFIDENCE_FOR_APPLY:
-            continue
-        if rule.get("match_count", 0) < MIN_MATCH_COUNT_FOR_APPLY:
-            continue
-        pattern = rule["pattern"]
-        replacement = rule["replacement"]
-        if pattern in result:
-            result = result.replace(pattern, replacement)
-            if rule.get("id"):
-                applied.append(rule["id"])
-    return result, applied
+    """Shadow-only compatibility for legacy correction rules.
+
+    Round 9.5A removes global correction-rule replacement from production
+    output. Existing rule data is kept intact for compatibility and review, but
+    this entry point no longer mutates ASR/final text or reports applied IDs.
+    """
+    return text, []
 
 
 # ── Strict dictionary auto-learn gating ─────────────────────────────

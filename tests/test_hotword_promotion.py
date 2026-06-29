@@ -237,7 +237,7 @@ class DatabaseDistinctHistoryAccumulationTests(unittest.TestCase):
 
 
 class HotwordPromotionEndToEndTests(unittest.TestCase):
-    """Higher-level integration through SilentMonitor._maybe_promote_hotword."""
+    """Legacy promotion is shadow-only through SilentMonitor."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -271,9 +271,8 @@ class HotwordPromotionEndToEndTests(unittest.TestCase):
             "updated_at": datetime.now().isoformat(),
         }])
 
-    def test_promotion_calls_hotwords_mgr_sync(self):
-        """After two distinct histories, _maybe_promote_hotword calls
-        HotwordsManager.add_word so ASR picks up the new term."""
+    def test_legacy_promotion_does_not_sync_hotwords(self):
+        """Round 9.5A stops correction_rules from auto-promoting hotwords."""
         from infrastructure.silent_monitor import SilentMonitor
         added: list[str] = []
 
@@ -288,12 +287,12 @@ class HotwordPromotionEndToEndTests(unittest.TestCase):
         self._insert_rule("叫一下", "焦虑", "h1")
         self._insert_rule("叫一下", "焦虑", "h2")
         promoted = sm._maybe_promote_hotword(self.db)
-        self.assertEqual(promoted, "焦虑")
-        self.assertEqual(added, ["焦虑"],
-                         "promotion must call HotwordsManager.add_word")
+        self.assertIsNone(promoted)
+        self.assertEqual(added, [],
+                         "legacy correction rules must not call add_word")
 
-    def test_promotion_idempotent_after_repeat_scan(self):
-        """Calling _maybe_promote_hotword again must NOT re-promote."""
+    def test_legacy_promotion_repeat_scan_remains_noop(self):
+        """Repeated scans must stay no-op and leave rule rows untouched."""
         from infrastructure.silent_monitor import SilentMonitor
 
         class FakeHM:
@@ -310,9 +309,10 @@ class HotwordPromotionEndToEndTests(unittest.TestCase):
         self._insert_rule("叫一下", "焦虑", "h2")
         first = sm._maybe_promote_hotword(self.db)
         second = sm._maybe_promote_hotword(self.db)
-        self.assertEqual(first, "焦虑")
-        self.assertIsNone(second, "repeated scan must not re-promote")
-        self.assertEqual(fake.calls, 1, "add_word should be called once")
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(fake.calls, 0, "add_word should not be called")
+        self.assertFalse(self.db.get_rules()[0]["promoted"])
 
     def test_promotion_skipped_for_contested_pattern(self):
         """Same pattern with two equally-supported replacements → no promote."""
