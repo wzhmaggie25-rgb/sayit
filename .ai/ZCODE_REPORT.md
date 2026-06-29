@@ -1,87 +1,86 @@
-# ZCode Session Report — Round 9.5A Test Isolation Repair + Conservative v1
+# ZCode Session Report — Round 9.5A Final Closeout
 
 > Date: 2026-06-29
 > Branch: `backup/hermes-silent-learning-recovery`
-> 前期实现: **Hermes**
-> 本轮修复与收尾: **Claude Code**
+> 前期实现: **Hermes** (P0-1/P0-2/P0-3)
+> 本轮收尾: **Claude Code** (global guard + controlled dictionary reset + reports)
 
 ## 接收到的任务
 
-Unattended, strictly-scoped round on `backup/hermes-silent-learning-recovery`:
-read-only dictionary-recovery feasibility check on preserved copies; repair the
-unsafe integration test's DB isolation; add a reusable hard test-safety guard;
-isolate ConfigStore; finalize silent-learning conservative v1 honestly; run the
-isolated test then the targeted Round 9.5A suite; correct earlier inaccurate
-reports; commit in three logical parts and push only the safety branch. End at
-`BLOCKED_REVIEW`, never `DONE`.
+Unattended final closeout on `backup/hermes-silent-learning-recovery`: add an
+automatic pytest-wide real-database guard, prove no test can open/migrate the
+real DB, run the guard + integration + Round 9.5A targeted suites, confirm the
+live DB is unchanged during tests, create fresh pre-reset backups, reset ONLY
+the live `dictionary` table (remove the synthetic row, reseed the 5 core
+hotwords), keep history/correction_rules unchanged, create post-reset backup,
+update reports, commit, push the safety branch. End at `BLOCKED_REVIEW`.
 
 ## 实际修改的文件
 
 | File | Change |
 |---|---|
-| `tests/db_safety_guard.py` | New — `IsolatedDatabase` context manager + `assert_temp_db_path` fail-closed guard; patches the correct `infrastructure.database.database_path` binding |
-| `tests/test_silent_learning_integration.py` | Rewritten — per-test temp DB, no `hw.clear()`, asserts real bound path before writes, ConfigStore isolated, incident regression test |
-| `domain/silent_learning.py` | Documented `_expand_corrected_term` as ASCII-only (CJK never neighbor-expanded); removed dead `_is_cjk` |
-| `features/silent_learning_dictionary_hotword.feature` | Honest conservative-v1 scenarios: full-term learned; single-character `民天→明天` explicitly NOT learned |
-| `tests/test_silent_learning_dictionary_hotword_contract.py` | Added `test_single_cjk_correction_in_sentence_not_learned_conservative_v1` |
-| `.ai/DICTIONARY_RECOVERY_FEASIBILITY.md` | New — read-only forensic feasibility result |
-| `.ai/ROUND9_5A_SELF_REVIEW.md` | Rewritten — withdraws inaccurate claims, honest Gherkin mapping |
-| `.ai/TEST_RESULTS.md` | Rewritten — isolated + targeted results, real-DB hash evidence |
+| `tests/conftest.py` | New — autouse session fixture installs the process-wide connect guard |
+| `tests/db_safety_guard.py` | Added `guarded_connect` / install/uninstall + `RealDatabaseAccessError` (process-wide guard) alongside the existing `IsolatedDatabase` |
+| `tests/test_db_global_safety_guard.py` | New — 7 proof tests for the global guard |
+| `.ai/FINAL_CLOSEOUT_REPORT.md` | New — closeout evidence |
+| `.ai/TEST_RESULTS.md` | Closeout section (97-test run, real-DB unchanged) |
 | `.ai/ZCODE_REPORT.md` | This file |
 | `.ai/CURRENT_TASK.md` | Status → `BLOCKED_REVIEW` |
 
-No production runtime path other than `domain/silent_learning.py` doc/dead-code
-cleanup was changed. ASR engine selection, deadlines, fallback order, SDK
-lifecycle, injector, float window, native hotkey: untouched.
+No production code changed this round. The dictionary reset used Python stdlib
+sqlite3 directly on the live DB (a data operation, not a code change); the
+recovery directory and backups live OUTSIDE the repo and are not committed.
 
-## 根因判断
+## 根因 / 决策
 
-`infrastructure/database.py` binds `database_path` at import. Patching
-`infrastructure.paths.database_path` does not rebind it, so the old integration
-test's `Database()` used the real DB and `hw.clear()` wiped the real dictionary.
-The fix patches the correct module attribute and proves the bound path is the
-temp path before any write, failing closed on a real-APPDATA path.
+- Guard root cause: the reusable `IsolatedDatabase` only protected opt-in tests.
+  The process-wide guard wraps the real `sqlite3.connect` boundary so it fires
+  before migrate/write even if a test patches the wrong path symbol.
+- Dictionary state: user chose Option 3 (accept reset). Pre-reset state matched
+  the incident exactly (dict=1, core=0, history=1125, rules=5); reset committed
+  only after in-transaction verification.
 
 ## 命令
 
 ```bash
 git fetch origin
-git merge --ff-only origin/backup/hermes-silent-learning-recovery   # 2a2eb54 -> aead778
-# read-only forensic on D:\SayIt-Recovery20260629-171434 copies only
-python -m pytest tests/test_silent_learning_integration.py -v --tb=short          # 8 passed
-python -m pytest <7 targeted files> -v --tb=short                                 # 90 passed
-# real-DB SHA-256 compared before/after both runs (file metadata only)
+git merge --ff-only origin/backup/hermes-silent-learning-recovery   # ae1bd0b -> 3e6e219
+python -m pytest tests/test_db_global_safety_guard.py -v --tb=short          # 7 passed
+python -m pytest tests/test_silent_learning_integration.py -v --tb=short     # 8 passed
+python -m pytest <8 targeted files> -v --tb=short                            # 97 passed
+# pre-reset backups (raw + sqlite backup API, read-only source)
+# one-transaction dictionary reset on live DB (stdlib sqlite3)
+# post-reset verification + consistent backup
 ```
 
 ## 测试结果
 
-- Isolated test alone: 8 passed, exit 0, normal process exit.
-- Targeted Round 9.5A suite: **90 collected / 90 passed / 0 failed / 0 skipped / exit 0**, normal exit.
-- Real DB SHA-256 `45ea7cfb…0919` identical before and after (Modify 2026-06-29 15:53:01) — unchanged.
+- Guard proof: 7 passed, exit 0.
+- Isolated integration: 8 passed, exit 0.
+- Round 9.5A targeted (incl. guard): 97 collected / 97 passed / 0 failed / 0 skipped, exit 0, normal exit, ~0.92s.
+- Real DB SHA-256 `45ea7cfb…0919` unchanged across all test runs.
 - No full-repository pytest run.
 
-## 未解决的问题
+## 词典重置结果
 
-- The real personal dictionary is almost certainly lost (1 non-core row left).
-  On-file recovery is not reliably possible (see feasibility report). Recovery
-  options (OS prior-version, evidence rebuild, or accept reset) require explicit
-  user approval and were NOT executed.
-- The historical full-suite hang / pre-existing failures remain out of scope.
-- `feature/silent-learning-stabilization` local is ahead of origin by 3 older
-  commits — untouched, deferred.
+dictionary 1→5 (noncore 1→0, core 0/5→5/5); history 1125→1125; rules 5→5;
+integrity ok→ok. Core words: Sayit, Typeless, 闪电说, DeepSeek, DashScope.
+Live DB hash changed by design `45ea7cfb…`→`5838b47e…`. Backups in
+`D:\SayIt-Recovery20260629-185628-dictionary-reset\`.
 
-## 风险
+## 风险 / 未解决
 
-- Conservative v1 deliberately does NOT learn single-character Chinese
-  corrections (e.g. `民天→明天`). This is a documented product limitation, not a
-  bug; original single-character behavior would require an explicit edit/selection
-  boundary signal and user approval (option 2 in the independent review).
+- Personal dictionary restarts from zero (previous terms unrecoverable; accepted).
+- Conservative v1 still does not auto-learn single-character Chinese corrections.
+- `feature/silent-learning-stabilization` deferred; merge only after independent
+  review of this safety-branch HEAD.
 
 ## 安全声明
 
-Real DB / dictionary / history / config / API key not opened or modified this
-round. Feature branch untouched. No `add -A`/`add .`/reset/clean/force-push.
-4 untracked pytest logs remain untracked. No data restored or reseeded.
+Only the dictionary table modified. HotwordsManager not instantiated; no remote
+sync; config/API keys not read or modified; SayIt not started; feature branch
+untouched; no full-repo pytest; no `add -A`/`add .`/reset/clean/force-push; DB
+backups and recovery dir not committed; 4 pytest logs remain untracked.
 
 ## 状态
 

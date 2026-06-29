@@ -7,6 +7,42 @@
 
 ---
 
+## Final closeout update (global guard + dictionary reset round)
+
+Added a pytest-wide fail-closed DB guard (`tests/conftest.py` +
+`tests/db_safety_guard.py`) and proof tests (`tests/test_db_global_safety_guard.py`).
+
+| Run | collected | passed | failed | skipped | exit | process |
+|---|---|---|---|---|---|---|
+| `test_db_global_safety_guard.py` | 7 | 7 | 0 | 0 | 0 | normal |
+| `test_silent_learning_integration.py` | 8 | 8 | 0 | 0 | 0 | normal |
+| Round 9.5A targeted (incl. guard file) | **97** | **97** | **0** | **0** | **0** | normal, ~0.92s |
+
+Command for the targeted run:
+
+```bash
+python -m pytest \
+  tests/test_db_global_safety_guard.py \
+  tests/test_silent_learning_dictionary_hotword_contract.py \
+  tests/test_silent_learning_integration.py \
+  tests/test_asr_streaming_context_priority.py \
+  tests/test_silent_monitor.py \
+  tests/test_dictionary_safety.py \
+  tests/test_hotword_promotion.py \
+  tests/test_chinese_local_learning.py \
+  -v --tb=short
+```
+
+Real DB SHA-256 before == after all test runs: `45ea7cfb…0919`, Modify
+2026-06-29 15:53:01 — **unchanged during testing** (verified by file metadata +
+hash; live DB never opened via Database/SQLite in tests). No full-repository
+pytest was run.
+
+The authorized dictionary reset (separate, post-test step) then changed the live
+DB by design — see `.ai/FINAL_CLOSEOUT_REPORT.md`.
+
+---
+
 ## 重要更正 (Correction of earlier claims)
 
 Earlier Round 9.5A reports stated "真实数据库/用户词典未读取、未修改" and "No
