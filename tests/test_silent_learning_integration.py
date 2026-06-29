@@ -1,19 +1,27 @@
 """P0-2: Integration test — real Database + HotwordsManager + fake ASR cascade.
 
-Proves the full dictionary → ASR hotword chain with real production objects
-and a temporary SQLite database. Never touches the real user database.
+Proves the full dictionary → ASR hotword chain with real production objects on
+a per-test temporary SQLite database. The real user database and config are
+never touched: isolation is enforced by ``tests.db_safety_guard.IsolatedDatabase``,
+which patches the CORRECT production binding
+(``infrastructure.database.database_path``) and fails closed if the resolved
+path is ever under the real ``%APPDATA%/Sayit`` directory.
+
+Round 9.5A regression note: the previous version of this test patched only
+``infrastructure.paths.database_path`` — the wrong symbol — and called
+``hw.clear()`` against shared state, which cleared the real personal dictionary.
+That destructive pattern is removed; see ``test_patch_targets_production_binding``.
 """
 from __future__ import annotations
 
 import os
-import tempfile
 import unittest
-from unittest.mock import patch
 
+import infrastructure.database as dbmod
 import infrastructure.paths
-from infrastructure.database import Database
-from infrastructure.hotwords_manager import HotwordsManager
+from infrastructure.hotwords_manager import HotwordsManager, CORE_HOTWORDS
 from domain.silent_learning import classify_user_edit, apply_silent_learning
+from tests.db_safety_guard import IsolatedDatabase, assert_temp_db_path
 
 
 class FakeAsrCascade:
@@ -31,34 +39,25 @@ class FakeAsrCascade:
 
 
 class SilentLearningIntegrationTests(unittest.TestCase):
-    """P0-2: Dictionary → ASR hotword production chain using real DB objects."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls._tmpdir = tempfile.mkdtemp(prefix="sayit-test-p02-")
-        cls._tmp_db = os.path.join(cls._tmpdir, "test.db")
-        cls._db_patcher = patch.object(
-            infrastructure.paths, "database_path", return_value=cls._tmp_db)
-        cls._db_patcher.start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls._db_patcher.stop()
-        Database._instance = None
-        try:
-            os.remove(cls._tmp_db)
-            os.rmdir(cls._tmpdir)
-        except OSError:
-            pass
+    """P0-2: Dictionary → ASR hotword chain on a per-test temporary database."""
 
     def setUp(self):
-        # Fresh instance per test with class-level temp DB.
-        Database._instance = None
+        # Per-test isolation: fresh temp DB + isolated ConfigStore, fail-closed.
+        self._iso = IsolatedDatabase(prefix="sayit-test-p02-").__enter__()
+        # Prove the real bound path is the temp path BEFORE any write happens.
+        self.assertEqual(
+            os.path.abspath(dbmod.database_path()),
+            os.path.abspath(self._iso.db_path),
+            "Production binding still resolves the wrong database path")
+
+    def tearDown(self):
+        self._iso.__exit__(None, None, None)
 
     def _new_hotwords(self) -> HotwordsManager:
+        # Constructing HotwordsManager triggers the first DB write (core
+        # hotword seeding) — assert isolation immediately after.
         hw = HotwordsManager()
-        # Flush core hotwords seeding so they don't pollute counts.
-        hw.clear()
+        assert_temp_db_path(hw._db._db_path, self._iso._tmpdir)
         return hw
 
     def _dict_words(self, hw: HotwordsManager) -> list[str]:
@@ -70,7 +69,7 @@ class SilentLearningIntegrationTests(unittest.TestCase):
     # ── tests ─────────────────────────────────────────────────
 
     def test_corrected_term_written_to_dictionary(self):
-        """One eligible correction creates exactly one dictionary row."""
+        """One eligible correction creates exactly one new dictionary row."""
         hw = self._new_hotwords()
         before = self._dict_count(hw)
 
@@ -112,7 +111,7 @@ class SilentLearningIntegrationTests(unittest.TestCase):
     def test_no_correction_rules_created(self):
         """Silent learning must not create or modify correction_rules rows."""
         hw = self._new_hotwords()
-        db = Database()
+        db = self._iso.make_database()
         rules_before = len(db.get_rules())
 
         decision = classify_user_edit("光明", "黑暗")
@@ -120,15 +119,33 @@ class SilentLearningIntegrationTests(unittest.TestCase):
 
         self.assertEqual(len(db.get_rules()), rules_before)
 
-    def test_no_real_database_path_accessed(self):
-        """The test must never resolve the production database path."""
-        Database()
-        real_path = os.path.join(
-            infrastructure.paths.APP_DATA_DIR, "sayit.db")
-        self.assertNotEqual(
-            self._tmp_db, real_path,
-            "Test is using the real production database path!")
-        # Temp db is written lazily; verify path isolation, not file existence.
+    def test_database_uses_temp_path_not_real(self):
+        """The Database actually bound by production code resolves to the temp
+        path, and would fail closed if it pointed at the real APPDATA dir."""
+        db = self._iso.make_database()
+        real_db = os.path.abspath(
+            os.path.join(infrastructure.paths.APP_DATA_DIR, "sayit.db"))
+        self.assertNotEqual(os.path.abspath(db._db_path), real_db)
+        # Guard would have raised in setUp/make_database if path were real;
+        # assert the temp path positively here.
+        assert_temp_db_path(db._db_path, self._iso._tmpdir)
+
+    def test_patch_targets_production_binding(self):
+        """Regression for the Round 9.5A incident: patching only
+        infrastructure.paths.database_path is insufficient because
+        infrastructure.database imported the symbol at module load. The guard
+        must patch infrastructure.database.database_path so the live binding
+        resolves the temp path."""
+        # The symbol actually used by Database.__init__ is the module-level
+        # name in infrastructure.database — it must resolve to the temp path.
+        self.assertEqual(
+            os.path.abspath(dbmod.database_path()),
+            os.path.abspath(self._iso.db_path))
+        # And a freshly built Database must bind that temp path.
+        db = self._iso.make_database()
+        self.assertEqual(
+            os.path.abspath(db._db_path),
+            os.path.abspath(self._iso.db_path))
 
     def test_cross_script_correction_preserves_case(self):
         """English term corrected from Chinese phonetic error, case preserved."""
