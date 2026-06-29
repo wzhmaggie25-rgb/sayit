@@ -4,14 +4,15 @@
 
 ## Status
 
-**BLOCKED_FINAL_GUARD_AND_DATA_DECISION**
+**READY_FINAL_CLOSEOUT**
 
-Core Round 9.5A fixes passed independent review, but the branch is not ready to merge.
+The user selected Option 3 and explicitly approved a controlled personal-dictionary reset after a fresh backup.
 
 Read first:
 
 ```text
 .ai/ROUND9_5A_CHATGPT_FINAL_REVIEW.md
+.ai/USER_DECISION_DICTIONARY_RESET_2026-06-29.md
 .ai/DB_SAFETY_ASSESSMENT_2026-06-29.md
 .ai/DICTIONARY_RECOVERY_FEASIBILITY.md
 ```
@@ -22,59 +23,70 @@ Read first:
 - Working branch: `backup/hermes-silent-learning-recovery`
 - Do not modify or merge: `feature/silent-learning-stabilization`
 
-## Confirmed passing work
+## Final closeout goals
 
-- the unsafe integration test now uses a per-test temporary database;
-- the correct `infrastructure.database.database_path` binding is patched;
-- real `ConfigStore` access is isolated;
-- `hw.clear()` was removed from the integration test;
-- conservative v1 honestly skips single-Chinese-character edits;
-- no neighboring CJK character guessing;
-- no global correction-rule replacement of final ASR text;
-- no legacy-rule auto-promotion to hotwords;
-- dynamic streaming context wins over stale startup context;
-- isolated test: 8 passed;
-- targeted suite: 90 passed;
-- real database hash and modification time remained unchanged.
+1. Add an automatic pytest-wide fail-closed guard that prevents any test from opening or migrating the real SayIt database.
+2. Add proof tests for the global guard.
+3. Run only the guard tests and the existing Round 9.5A targeted suite.
+4. Confirm the live database file remains unchanged during all tests.
+5. Create a new timestamped raw backup and SQLite-consistent backup outside the repository.
+6. In one explicit SQLite transaction, reset only the live `dictionary` table.
+7. Remove the remaining synthetic row and insert exactly these five built-in core hotwords:
+   - Sayit
+   - Typeless
+   - 闪电说
+   - DeepSeek
+   - DashScope
+8. Verify:
+   - dictionary contains exactly the five core hotwords;
+   - history row count is unchanged;
+   - correction_rules row count is unchanged;
+   - `PRAGMA integrity_check` returns `ok`.
+9. Create a post-reset consistent backup.
+10. Update reports, commit, and push only the safety branch.
+11. Finish at `BLOCKED_REVIEW`, never `DONE`.
 
-## Remaining blocker 1: repository-wide test guard
+## Global test-guard requirements
 
-`tests/db_safety_guard.py` currently protects tests that explicitly use it. It does not automatically protect every pytest test.
+The protection must apply automatically to the entire pytest process, not only tests that explicitly use `IsolatedDatabase`.
 
-Add an automatic pytest-wide fail-closed guard that rejects any database migration or connection resolving inside the real SayIt application-data directory before any write occurs.
+It must reject a database connection or migration whose resolved path is inside the real SayIt application-data directory before the database is opened or written.
 
-Required proof:
+Do not rely only on wrapping `database_path`, because individual tests may replace that function. Guard the actual database connection/migration boundary as well.
 
-1. an unguarded real-path `Database()` attempt fails before opening or migrating the database;
-2. a temporary path succeeds;
-3. current manually isolated DB tests continue to pass;
-4. the real database hash and modification time remain unchanged.
+Proof tests must show:
 
-Do not rely only on wrapping `database_path`, because individual tests can replace that function. Guard the migration/connection boundary as well.
+- an unguarded real-path `Database()` attempt fails before connect/migrate;
+- a temporary path succeeds;
+- manually isolated database tests still pass;
+- real database SHA-256 and modification time do not change.
 
-## Remaining blocker 2: live dictionary state
+## Authorized live database change
 
-The real dictionary remains in post-incident state:
+Only the `dictionary` table may be reset.
 
-- one non-core row;
-- zero of five built-in core hotwords;
-- original personal terms not recoverable from the preserved SQLite files.
+Before writing:
 
-No live database write is authorized yet.
+- SayIt and Agent Bridge must not be running;
+- create a new raw backup and a SQLite-consistent backup outside the repository;
+- record source database SHA-256, size, and modification time;
+- record dictionary, history, and correction-rule row counts without printing content.
 
-User must explicitly choose one:
+The reset must use one transaction. If the observed preconditions differ from the incident state or any verification fails, roll back and stop.
 
-1. attempt OS-level prior-version recovery;
-2. rebuild selected terms from surviving evidence in a separate privacy-reviewed task;
-3. accept reset, remove the synthetic row, and reseed the five built-in core hotwords.
+Do not instantiate `HotwordsManager` for the reset, do not sync a remote vocabulary, and do not read or change configuration or API keys.
+
+After the transaction, verify counts and integrity, then create a post-reset consistent backup.
 
 ## Forbidden
 
-- do not start normal SayIt use;
-- do not modify, restore, replace, or delete the live database;
-- do not reseed core hotwords without user approval;
+- do not modify history rows;
+- do not modify correction-rule rows;
+- do not output user history text or personal dictionary terms other than the five public core hotwords;
+- do not modify configuration or API keys;
 - do not run full-repository pytest;
-- do not pull, rebase, cherry-pick, reset, force-push, or clean;
-- do not modify the formal feature branch;
+- do not modify or merge the formal feature branch;
 - do not create a pull request;
+- do not pull, rebase, cherry-pick, reset, force-push, or clean;
+- do not start normal SayIt use after the reset;
 - do not mark this task `DONE`.
