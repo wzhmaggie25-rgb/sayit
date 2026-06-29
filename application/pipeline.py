@@ -7,6 +7,7 @@ import uuid
 import httpx
 
 from domain.models import RecordingState
+from domain.silent_learning import can_start_silent_learning
 from application.eventbus import EventBus, Events
 from application.result_card_eligibility import should_show_large_result_card
 from infrastructure.injector import InjectionResult
@@ -487,9 +488,11 @@ class RecordingPipeline:
                 pass
             can_learn = (
                 inject_result is not None
-                and inject_result.state == "verified_success"
-                and inject_result.target_verified
-                and injector.last_target_hwnd
+                and can_start_silent_learning(
+                    inject_result.state,
+                    inject_result.target_verified,
+                    injector.last_target_hwnd,
+                )
             )
             if can_learn and silent_learning_enabled:
                 try:

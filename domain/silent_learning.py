@@ -33,6 +33,15 @@ class SilentLearningResult:
     corrected_term_len: int = 0
 
 
+def can_start_silent_learning(injection_state: str, target_verified: bool, target_hwnd: int) -> bool:
+    """Return whether a pipeline result is eligible to start edit tracking."""
+    return (
+        injection_state == "verified_success"
+        and bool(target_verified)
+        and bool(target_hwnd)
+    )
+
+
 def classify_user_edit(original_inserted: str, edited_inserted: str) -> SilentLearningDecision:
     """Return the one corrected term from a clear single replacement.
 

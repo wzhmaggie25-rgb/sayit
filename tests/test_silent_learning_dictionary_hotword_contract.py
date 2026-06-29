@@ -4,6 +4,7 @@ import unittest
 
 import infrastructure.silent_monitor as silent_monitor
 from domain.correction import apply_rules_with_stats
+from domain.silent_learning import can_start_silent_learning
 
 
 class FakeHotwordsManager:
@@ -153,6 +154,23 @@ class SilentLearningDictionaryHotwordContractTests(unittest.TestCase):
         self.assertEqual(hotwords.words, [])
         self.assertEqual(hotwords.add_calls, [])
         self.assertEqual(ContractDatabase.merged_rules, [])
+
+    def test_stale_or_unverified_target_is_ignored(self):
+        self.assertFalse(can_start_silent_learning(
+            "attempted_unverified",
+            target_verified=False,
+            target_hwnd=1001,
+        ))
+        self.assertFalse(can_start_silent_learning(
+            "verified_success",
+            target_verified=False,
+            target_hwnd=1001,
+        ))
+        self.assertFalse(can_start_silent_learning(
+            "verified_success",
+            target_verified=True,
+            target_hwnd=0,
+        ))
 
     def test_legacy_rules_do_not_mutate_final_asr_text(self):
         rules = [
