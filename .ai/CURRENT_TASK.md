@@ -18,6 +18,14 @@ Round 9.4 **未通过独立审查**，不要开始用户实机验收，也不要
 2. 已经出现文字后，悬浮窗最后仍显示“识别失败”；
 3. 悬浮窗新增黄色“后台异常/后台已恢复”等技术提示，状态混乱。
 
+稳定备份 `0d69a98` 与当前分支的独立对比确认：
+
+- 当前分支比稳定备份多 144 个提交；
+- 核心生产文件约有 3,605 行新增、664 行删除，约 4,269 行运行时代码被触碰；
+- injector、Native键盘、Electron主进程、orchestrator、pipeline、静默学习均发生大幅改写；
+- 现在的问题属于多轮改造叠加后的结构性回归，不是单独一个错字或UI判断错误；
+- 稳定代码备份不包含当前真实数据库、规则、词典和配置，因此单纯回退代码不一定能恢复旧准确率。
+
 用户对界面和注入失败处理作出最终决定：
 
 - **注入失败但已有可用文字时，悬浮窗仍显示原有的“完成”；**
@@ -29,8 +37,11 @@ Round 9.4 **未通过独立审查**，不要开始用户实机验收，也不要
 代码审查已确认：
 
 - streaming 最终文本目前只用“字数是否足够”判断质量，错误但够长的文本会直接被采用；
-- 静默学习规则会进行全局字符串替换，坏规则可能继续破坏原始识别文本；
+- 当前 streaming 收尾从稳定版的至少45秒压缩到8秒，并新增30秒共享ASR预算，更容易进入截断、超时或备用引擎；
+- 当前新增短中文片段学习，但规则仍使用全局字符串替换，坏规则可能继续破坏原始识别文本；
+- 当前新增自动热词晋升，错误学习结果可能反过来持续影响后续ASR；
 - `float.html` 把通用 error 统一显示成“识别失败”，无法区分 ASR、AI、注入和服务中断；
+- 当前同时存在 `pipeline_done`、`pipeline_terminal`、generic error、WS close/error、watchdog和poll等多套会话结束机制；
 - Electron backend supervisor 会主动把“后台异常，SayIt 正在恢复”和“后台已恢复”显示成黄色提示；
 - 后端出现该提示意味着进程确实异常退出并被自动重启，不能只当UI问题处理。
 
@@ -50,20 +61,22 @@ Round 9.4 **未通过独立审查**，不要开始用户实机验收，也不要
 
 ## 必须执行
 
-本轮必须使用 **BDD + TDD**，不得再次先改实现、再补能通过的测试。
+本轮必须使用 **稳定基线差异对比 + BDD + TDD**，不得再次先改实现、再补能通过的测试。
 
 先完整阅读，后面的文件在冲突处优先级更高：
 
-1. `.ai/ROUND9_5_TEST_INTEGRITY_RUNTIME_BOUNDARY_REVIEW.md`
-2. `.ai/ROUND9_5_TEST_INTEGRITY_RUNTIME_BOUNDARY_TASK.md`
-3. `.ai/ROUND9_5_BDD_ASR_ACCURACY_UI_RECOVERY_ADDENDUM.md`
-4. `.ai/ROUND9_5_UI_MINIMAL_CHANGE_OVERRIDE.md`（**最高优先级，覆盖冲突的UI和注入失败要求**）
-5. `.ai/ROUND9_4_RUNTIME_CLOSURE_TASK.md`
-6. 当前 Round 9.4 代码和测试
+1. `.ai/STABLE_BASELINE_REGRESSION_COMPARISON.md`
+2. `.ai/ROUND9_5_TEST_INTEGRITY_RUNTIME_BOUNDARY_REVIEW.md`
+3. `.ai/ROUND9_5_TEST_INTEGRITY_RUNTIME_BOUNDARY_TASK.md`
+4. `.ai/ROUND9_5_BDD_ASR_ACCURACY_UI_RECOVERY_ADDENDUM.md`
+5. `.ai/ROUND9_5_UI_MINIMAL_CHANGE_OVERRIDE.md`（**最高优先级，覆盖冲突的UI和注入失败要求**）
+6. `.ai/ROUND9_4_RUNTIME_CLOSURE_TASK.md`
+7. 稳定备份 `0d69a98` 与当前 Round 9.4 代码和测试
 
-然后把以下三个任务作为**一个完整开发回合**执行：
+然后把以下四项作为**一个完整开发回合**执行：
 
 ```text
+.ai/STABLE_BASELINE_REGRESSION_COMPARISON.md
 .ai/ROUND9_5_TEST_INTEGRITY_RUNTIME_BOUNDARY_TASK.md
 .ai/ROUND9_5_BDD_ASR_ACCURACY_UI_RECOVERY_ADDENDUM.md
 .ai/ROUND9_5_UI_MINIMAL_CHANGE_OVERRIDE.md
@@ -71,24 +84,30 @@ Round 9.4 **未通过独立审查**，不要开始用户实机验收，也不要
 
 执行顺序：
 
-1. 先提交 Gherkin/BDD 场景；
-2. 再提交会在当前代码上失败的生产路径测试；
-3. 再做最小生产修改；
-4. 测试变绿后重构；
-5. 最后跑完整回归并生成真实报告。
+1. **先完成稳定版 vs 当前版 golden-path 差异测试，只使用隔离的临时数据库、合成规则和mock provider响应；**
+2. 输出逐阶段对比：streaming、batch、selected raw、local correction、AI、final、injection、terminal、float、result card；
+3. 再提交 Gherkin/BDD 场景；
+4. 再提交会在当前代码上失败的生产路径测试；
+5. 再做最小生产修改；
+6. 测试变绿后重构；
+7. 最后跑完整回归并生成真实报告。
 
 本轮必须同时完成：
 
+- 用同一组合成输入证明稳定版与当前版行为差异，不能凭注释或猜测；
 - batch ASR 成为可用时的规范最终结果，streaming 只做进度/受控备用；
 - 错误但够长的 streaming 结果不能绕过最终验证；
 - 静默学习规则进入安全门/影子模式，不能大面积改坏句子；
+- 同一pattern的冲突规则、链式替换和短中文片段替换必须有失败测试；
 - AI失败或超时时，有可用ASR文本就正常完成；
 - **注入失败但已有可用文字时：悬浮窗显示“完成”，并弹出原有文字结果框；**
 - 注入失败、服务中断、无目标、AI降级不得伪装成识别失败；
 - **不得新增可见的 `input_failed` 状态；**
 - **不得重做悬浮窗UI，只做最小事件映射修复；**
+- 一个会话只能由一个canonical terminal控制悬浮窗；
 - 后台空闲时自动恢复必须静默，不再显示黄色“后台已恢复”；
 - 活跃会话中后端崩溃必须产生唯一 `service_interrupted` 终止结果；
+- 后端退出必须记录不含正文的 exit code/signal 和 last completed stage；
 - 永久阻塞SDK/本地推理必须有真正可终止的进程或原生取消边界；
 - 前端测试必须调用 main.js 实际使用的同一个生产控制器；
 - 完成Native修饰键、单会话诊断、严格单终止事件和测试报告可信度收口。
@@ -116,7 +135,9 @@ Round 9.4 **未通过独立审查**，不要开始用户实机验收，也不要
 - 不修改稳定备份 commit `0d69a98`
 - 不修改/删除 tag `local-working-2026-06-25`
 - 不读取或修改真实数据库、词库、历史正文、音频内容、剪贴板内容、API Key
+- stable-vs-current测试必须使用临时隔离数据，不能连接真实用户数据
 - 不自动清空或删除用户已有静默学习规则/词典
+- 不把“回退整个分支”当作修复；旧版本也有不安全学习逻辑，只能选择性恢复简单可靠的用户行为
 - 不开发发布、登录、支付、订阅、更新器或其他产品功能
 - 不通过过滤乱码/错字字符串掩盖问题
 - 不通过 daemon 线程、线程改名、忽略线程计数来掩盖泄漏
@@ -134,6 +155,7 @@ Round 9.4 **未通过独立审查**，不要开始用户实机验收，也不要
 
 完成后必须具备：
 
+- 稳定版与当前版的逐阶段golden-path对比表和可重复命令；
 - BDD场景全部映射到可执行测试；
 - 原始ASR、规则修正、AI整理、最终输出四层可分别验证；
 - batch final、streaming fallback和无可用结果的选择行为确定且有测试；
