@@ -4,73 +4,77 @@
 
 ## Status
 
-**BLOCKED_REVIEW**
+**BLOCKED_FINAL_GUARD_AND_DATA_DECISION**
 
-Do not mark `DONE`. Awaiting ChatGPT independent review of the test-isolation
-repair and conservative-v1 finalization. The live database must not be opened,
-modified, restored, or reseeded without explicit user approval.
-
-## Executors
-
-- Prior P0 implementation (P0-1/P0-2/P0-3): **Hermes**
-- Test isolation repair + conservative v1 + reports: **Claude Code**
-
-## Repository
-
-- Repository: `wzhmaggie25-rgb/sayit`
-- Allowed branch: `backup/hermes-silent-learning-recovery`
-- Forbidden branch: `feature/silent-learning-stabilization` (not modified/merged/pushed)
-
-## This round completed
-
-1. Read-only dictionary-recovery feasibility check on preserved copies only —
-   `.ai/DICTIONARY_RECOVERY_FEASIBILITY.md`. On-file recovery NOT reliably
-   possible (freelist empty, dictionary page compacted). Live DB never opened.
-2. Repaired `tests/test_silent_learning_integration.py`: per-test temp DB,
-   patches the correct binding `infrastructure.database.database_path`, asserts
-   the bound path is the temp path before any write, isolates `ConfigStore`,
-   removes `hw.clear()`, adds the incident regression test.
-3. New reusable hard guard `tests/db_safety_guard.py` — fails closed if a test
-   DB path resolves under real `%APPDATA%/Sayit`.
-4. Conservative v1 finalized honestly: single-character Chinese corrections
-   (e.g. `民天→明天`) are NOT auto-learned; feature file and a contract test now
-   state this explicitly. No neighbor guessing, no global rules, no auto-promotion.
-5. Withdrew earlier inaccurate safety/"no weakening" claims in reports.
-
-## Test evidence
-
-- Isolated test alone: 8 passed, exit 0.
-- Targeted Round 9.5A suite: 90 collected / 90 passed / 0 failed / 0 skipped /
-  exit 0, normal process exit. (Count is 90, not 88.)
-- Real DB SHA-256 `45ea7cfb…0919` unchanged before/after both runs.
-- No full-repository pytest run.
-
-## Requires explicit user approval (NOT auto-executed)
-
-- write recovered words into the live database;
-- delete the remaining dictionary row;
-- reseed the five core hotwords;
-- accept a permanent dictionary reset;
-- merge the feature branch;
-- publish a release.
-
-## Forbidden
-
-- do not run the OLD unsafe integration test pattern;
-- do not run the full repository pytest;
-- do not open, modify, replace, delete, or restore the live database;
-- do not expose history text, dictionary words, configuration, or API keys;
-- do not pull/rebase/cherry-pick/reset/force-push/clean;
-- do not modify the formal feature branch;
-- do not create a pull request;
-- do not mark this task `DONE`.
+Core Round 9.5A fixes passed independent review, but the branch is not ready to merge.
 
 Read first:
 
 ```text
-.ai/ROUND9_5A_FINAL_INDEPENDENT_REVIEW.md
+.ai/ROUND9_5A_CHATGPT_FINAL_REVIEW.md
 .ai/DB_SAFETY_ASSESSMENT_2026-06-29.md
 .ai/DICTIONARY_RECOVERY_FEASIBILITY.md
-.ai/ROUND9_5A_SELF_REVIEW.md
-.ai/TEST_RESULTS.md
 ```
+
+## Repository
+
+- Repository: `wzhmaggie25-rgb/sayit`
+- Working branch: `backup/hermes-silent-learning-recovery`
+- Do not modify or merge: `feature/silent-learning-stabilization`
+
+## Confirmed passing work
+
+- the unsafe integration test now uses a per-test temporary database;
+- the correct `infrastructure.database.database_path` binding is patched;
+- real `ConfigStore` access is isolated;
+- `hw.clear()` was removed from the integration test;
+- conservative v1 honestly skips single-Chinese-character edits;
+- no neighboring CJK character guessing;
+- no global correction-rule replacement of final ASR text;
+- no legacy-rule auto-promotion to hotwords;
+- dynamic streaming context wins over stale startup context;
+- isolated test: 8 passed;
+- targeted suite: 90 passed;
+- real database hash and modification time remained unchanged.
+
+## Remaining blocker 1: repository-wide test guard
+
+`tests/db_safety_guard.py` currently protects tests that explicitly use it. It does not automatically protect every pytest test.
+
+Add an automatic pytest-wide fail-closed guard that rejects any database migration or connection resolving inside the real SayIt application-data directory before any write occurs.
+
+Required proof:
+
+1. an unguarded real-path `Database()` attempt fails before opening or migrating the database;
+2. a temporary path succeeds;
+3. current manually isolated DB tests continue to pass;
+4. the real database hash and modification time remain unchanged.
+
+Do not rely only on wrapping `database_path`, because individual tests can replace that function. Guard the migration/connection boundary as well.
+
+## Remaining blocker 2: live dictionary state
+
+The real dictionary remains in post-incident state:
+
+- one non-core row;
+- zero of five built-in core hotwords;
+- original personal terms not recoverable from the preserved SQLite files.
+
+No live database write is authorized yet.
+
+User must explicitly choose one:
+
+1. attempt OS-level prior-version recovery;
+2. rebuild selected terms from surviving evidence in a separate privacy-reviewed task;
+3. accept reset, remove the synthetic row, and reseed the five built-in core hotwords.
+
+## Forbidden
+
+- do not start normal SayIt use;
+- do not modify, restore, replace, or delete the live database;
+- do not reseed core hotwords without user approval;
+- do not run full-repository pytest;
+- do not pull, rebase, cherry-pick, reset, force-push, or clean;
+- do not modify the formal feature branch;
+- do not create a pull request;
+- do not mark this task `DONE`.
