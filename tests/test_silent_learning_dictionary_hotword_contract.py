@@ -222,6 +222,21 @@ class SilentLearningDictionaryHotwordContractTests(unittest.TestCase):
         self.assertTrue(decision.eligible, f"Should be eligible: {decision.reason}")
         self.assertEqual(decision.corrected_term, "日月星")
 
+    def test_single_cjk_correction_in_sentence_not_learned_conservative_v1(self):
+        """Conservative v1: 民天→明天 inside '我今天去了民天广场' learns nothing.
+
+        Only the single character 民→明 changed. The intended word '明天'
+        cannot be proven without guessing the neighbor, so v1 learns nothing.
+        This is the honest executable mapping for the feature's single-character
+        scenario — it must NOT silently learn a guessed term.
+        """
+        hotwords = self._learn("我今天去了民天广场", "我今天去了明天广场")
+
+        self.assertEqual(hotwords.words, [])
+        self.assertEqual(hotwords.add_calls, [])
+        self.assertEqual(ContractDatabase.merged_rules, [])
+        self.assertEqual(ContractDatabase.updates[-1]["status"], "NO_RULE")
+
     def test_legacy_rules_do_not_auto_promote_hotwords(self):
         ContractDatabase.reset([
             legacy_rule("微差", "WeChat"),

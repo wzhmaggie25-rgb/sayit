@@ -2,17 +2,33 @@ Feature: Silent learning adds corrected terms to ASR hotwords
   SayIt should learn only clear user-corrected terms from verified injections.
   It must not learn whole sentences, ambiguous edits, or legacy replacement rules.
 
+  # Conservative v1 (Round 9.5A): silent learning never guesses a Chinese word
+  # boundary from the before/after text alone. A single changed Chinese
+  # character is therefore NOT auto-learned, because its true word boundary
+  # cannot be proven without an explicit user edit/selection signal. Learning is
+  # limited to clean full replacements: a complete 2–8 character Chinese term, an
+  # English/mixed product term, or a single unambiguous replacement span.
+
   Background:
     Given silent learning is enabled
     And the injection result is "verified_success"
     And the monitored target is the same verified target
 
-  Scenario: Single Chinese term correction is learned
+  Scenario: Full Chinese term correction is learned
+    Given SayIt injected "我看到了光明"
+    When the user changes the inserted span to "我看到了黑暗"
+    Then the corrected term "黑暗" is added once to the personal dictionary
+    And ASR hotwords are refreshed with "黑暗"
+    And no global replacement rule is created or applied
+
+  Scenario: Single Chinese character correction is NOT learned in conservative v1
     Given SayIt injected "我今天去了民天广场"
     When the user changes the inserted span to "我今天去了明天广场"
-    Then the corrected term "明天" is added once to the personal dictionary
-    And ASR hotwords are refreshed with "明天"
-    And no global replacement rule is created or applied
+    Then no dictionary term is added
+    And ASR hotwords are not refreshed
+    # Rationale: only the single character 民→明 changed. The intended word
+    # "明天" cannot be proven from the final text without guessing the
+    # neighboring character, so conservative v1 deliberately learns nothing.
 
   Scenario: Chinese phonetic error corrected to an English product name
     Given SayIt injected "我在用微差调试"

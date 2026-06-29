@@ -114,6 +114,10 @@ def apply_silent_learning(decision: SilentLearningDecision, hotword_manager) -> 
 
 
 def _expand_corrected_term(edited: str, j1: int, j2: int, replacement: str) -> str:
+    """Deterministically widen an ASCII/alphanumeric replacement to its full
+    lexical token. CJK spans are returned as-is: conservative v1 never guesses a
+    Chinese word boundary by absorbing neighboring characters.
+    """
     if re.fullmatch(r"[A-Za-z0-9_+\-]+", replacement):
         left = j1
         right = j2
@@ -139,7 +143,3 @@ def _is_safe_term(term: str) -> bool:
     if _MIXED_TERM_RE.fullmatch(term):
         return 2 <= len(term) <= MAX_MIXED_TERM_LEN
     return False
-
-
-def _is_cjk(ch: str) -> bool:
-    return "\u4e00" <= ch <= "\u9fff"
