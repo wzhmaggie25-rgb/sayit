@@ -21,8 +21,10 @@ Production code is untouched; only the test process environment is affected.
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 from unittest.mock import patch
+from urllib.parse import urlparse, parse_qs
 
 import infrastructure.paths as _paths
 import infrastructure.database as _database
@@ -33,8 +35,80 @@ class RealDatabasePathError(AssertionError):
     """Raised when a test would resolve the real application database path."""
 
 
+class RealDatabaseAccessError(AssertionError):
+    """Raised when a test would actually open the real SayIt database."""
+
+
+# Snapshotted once at import; tests cannot move this by patching a variable.
+REAL_SAYIT_DIR = os.path.abspath(_paths.APP_DATA_DIR)
+_TEMP_DIR = os.path.abspath(tempfile.gettempdir())
+
+# The genuine sqlite3.connect, captured before any wrapping.
+_orig_sqlite_connect = sqlite3.connect
+
+
+def _resolve_db_filename(database) -> str | None:
+    """Return a filesystem path for a sqlite3.connect target, or None for memory."""
+    if isinstance(database, bytes):
+        try:
+            database = database.decode("utf-8", "surrogateescape")
+        except Exception:
+            return None
+    database = os.fspath(database) if hasattr(database, "__fspath__") else database
+    if not isinstance(database, str):
+        return None
+    name = database
+    if name.startswith("file:"):
+        parsed = urlparse(name)
+        q = parse_qs(parsed.query)
+        if "mode" in q and "memory" in q["mode"]:
+            return None  # in-memory URI
+        p = parsed.path
+        if os.name == "nt" and p.startswith("/") and len(p) > 2 and p[2] == ":":
+            p = p[1:]
+        if p in (":memory:", ""):
+            return None
+        name = p
+    if name in (":memory:", ""):
+        return None
+    return os.path.abspath(name)
+
+
+def _is_under(path: str, directory: str) -> bool:
+    try:
+        return os.path.commonpath([path, directory]) == directory
+    except ValueError:
+        return False  # different drives on Windows
+
+
+def guarded_connect(database, *args, **kwargs):
+    """sqlite3.connect wrapper that blocks the real SayIt database directory."""
+    resolved = _resolve_db_filename(database)
+    if resolved is not None and _is_under(resolved, REAL_SAYIT_DIR):
+        raise RealDatabaseAccessError(
+            "Blocked sqlite3.connect to the real SayIt database directory "
+            f"{REAL_SAYIT_DIR!r} (resolved path {resolved!r}). Tests must use a "
+            "temporary database -- see tests/db_safety_guard.IsolatedDatabase.")
+    return _orig_sqlite_connect(database, *args, **kwargs)
+
+
+def install_global_connect_guard() -> None:
+    """Wrap sqlite3.connect process-wide (pytest only). Idempotent."""
+    if sqlite3.connect is not guarded_connect:
+        sqlite3.connect = guarded_connect
+
+
+def uninstall_global_connect_guard() -> None:
+    """Restore the genuine sqlite3.connect."""
+    sqlite3.connect = _orig_sqlite_connect
+
+
+def is_global_guard_installed() -> bool:
+    return sqlite3.connect is guarded_connect
+
+
 def _real_appdata_dir() -> str:
-    return os.path.abspath(_paths.APP_DATA_DIR)
+    return REAL_SAYIT_DIR
 
 
 def assert_temp_db_path(db_path: str, tmp_root: str) -> None:
