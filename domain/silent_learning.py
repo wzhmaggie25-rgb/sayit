@@ -75,6 +75,10 @@ def classify_user_edit(original_inserted: str, edited_inserted: str) -> SilentLe
     if original_term == corrected_term:
         return SilentLearningDecision(False, reason="same_term")
 
+    # Reject single-CJK replacement — word boundary cannot be proven.
+    if _CJK_TERM_RE.fullmatch(corrected_term) and len(corrected_term) == 1:
+        return SilentLearningDecision(False, reason="ambiguous_single_cjk")
+
     corrected_term = _expand_corrected_term(edited, j1, j2, corrected_term)
     if not _is_safe_term(corrected_term):
         return SilentLearningDecision(False, reason="unsafe_term")
@@ -118,14 +122,6 @@ def _expand_corrected_term(edited: str, j1: int, j2: int, replacement: str) -> s
         while right < len(edited) and re.fullmatch(r"[A-Za-z0-9_+\-]", edited[right]):
             right += 1
         return edited[left:right]
-    if not _CJK_TERM_RE.fullmatch(replacement):
-        return replacement
-    if len(replacement) != 1:
-        return replacement
-    if j2 < len(edited) and _is_cjk(edited[j2]):
-        return replacement + edited[j2]
-    if j1 > 0 and _is_cjk(edited[j1 - 1]):
-        return edited[j1 - 1] + replacement
     return replacement
 
 

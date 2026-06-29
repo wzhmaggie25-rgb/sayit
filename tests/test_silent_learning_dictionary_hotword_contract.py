@@ -102,10 +102,11 @@ class SilentLearningDictionaryHotwordContractTests(unittest.TestCase):
         return monitor._hotwords_mgr
 
     def test_single_chinese_term_correction_adds_corrected_term_to_hotwords(self):
-        hotwords = self._learn("我今天去了民天广场", "我今天去了明天广场")
+        """Full 2-char CJK replacement (光明→黑暗) adds corrected term."""
+        hotwords = self._learn("我看到了光明", "我看到了黑暗")
 
-        self.assertEqual(hotwords.words, ["明天"])
-        self.assertEqual(hotwords.add_calls, ["明天"])
+        self.assertEqual(hotwords.words, ["黑暗"])
+        self.assertEqual(hotwords.add_calls, ["黑暗"])
         self.assertEqual(ContractDatabase.merged_rules, [])
         self.assertEqual(ContractDatabase.updates[-1]["status"], "EXTRACTED")
 
@@ -210,16 +211,16 @@ class SilentLearningDictionaryHotwordContractTests(unittest.TestCase):
         self.assertIn("ambiguous", decision.reason.lower())
 
     def test_clean_2_char_cjk_replacement_still_works(self):
-        """Full 2-char CJK replacement (民天→明天) must still be eligible"""
-        decision = classify_user_edit("民天", "明天")
+        """Full 2-char CJK replacement (光明→黑暗 both chars change) must still be eligible"""
+        decision = classify_user_edit("光明", "黑暗")
         self.assertTrue(decision.eligible, f"Should be eligible: {decision.reason}")
-        self.assertEqual(decision.corrected_term, "明天")
+        self.assertEqual(decision.corrected_term, "黑暗")
 
     def test_clean_3_char_cjk_replacement_still_works(self):
-        """Full 3-char CJK replacement must still be eligible"""
-        decision = classify_user_edit("阿巴阿", "阿巴阿巴")
+        """Full 3-char CJK replacement (天地人→日月星 all chars change) must still be eligible"""
+        decision = classify_user_edit("天地人", "日月星")
         self.assertTrue(decision.eligible, f"Should be eligible: {decision.reason}")
-        self.assertEqual(decision.corrected_term, "阿巴阿巴")
+        self.assertEqual(decision.corrected_term, "日月星")
 
     def test_legacy_rules_do_not_auto_promote_hotwords(self):
         ContractDatabase.reset([
