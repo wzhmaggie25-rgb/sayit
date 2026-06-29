@@ -1,88 +1,90 @@
-# Test Results — Round 9.4 Runtime Closure
+# Test Results — Round 9.5A Targeted Run
 
-## Round 9.4 Specific Tests
+> Date: 2026-06-29
+> Branch: `backup/hermes-silent-learning-recovery`
+> HEAD: `0ff0ca1d6bd1d02875a63e26c6b5d3313bfac9ae`
+> 前期实现: **Hermes**
+> 最终审计与收尾: **Claude Code**
 
-### Phase B: Modifier Release Regression (6 tests)
-**Command:** `python -m pytest tests/test_modifier_release_regression.py -v`
-**Result:** 6/6 PASS
+---
 
-| Test | Status |
-|------|--------|
-| `test_release_respects_physical_key_state` | PASS |
-| `test_release_sends_release_for_pressed_modifier` | PASS |
-| `test_force_parameter_removed` | PASS |
-| `test_inject_with_pre_release_no_ghost_keys` | PASS |
-| `test_native_dll_no_key_pressed_conditional_release` | PASS |
-| `test_editability_verified_routes_to_inject` | PASS |
+## 范围
 
-### Phase C: Tri-State Routing (7 tests)
-**Command:** `python -m pytest tests/test_tri_state_routing.py -v`
-**Result:** 7/7 PASS
+**This is the Round 9.5A targeted test run — NOT a full-repository pytest sweep.**
 
-| Test | Status |
-|------|--------|
-| `test_editable_verified_true` | PASS |
-| `test_editable_probable_true` | PASS |
-| `test_no_editable_verified_true` | PASS |
-| `test_unknown_true` | PASS |
-| `test_editable_string_dead_branch` | PASS |
-| `test_editable_probable_fallback` | PASS |
-| `test_no_editable_verified_blocks_inject` | PASS |
+The 7 selected files cover the silent-learning contract (P0-1), the isolated real-DB + real-HotwordsManager integration test (P0-2), the streaming-context priority fix (P0-3), and the silent-monitor / dictionary-safety / hotword-promotion / chinese-local-learning regression nets that back them.
 
-### Phase D: ASR Monotonic Deadline (3 tests)
-**Command:** `python -m pytest tests/test_asr_deadline_global.py -v`
-**Result:** 3/3 PASS
+The historical 6 failures and the full-suite hang documented in the independent review are **explicitly out of scope** for this finalization.
 
-| Test | Status |
-|------|--------|
-| `test_monotonic_deadline_global` | PASS |
-| `test_per_engine_remaining_reduction` | PASS |
-| `test_remaining_never_negative` | PASS |
+---
 
-### Phase E: Streaming Stop Isolation (3 tests)
-**Command:** `python -m pytest tests/test_streaming_poison.py -v`
-**Result:** 3/3 PASS
+## Command
 
-| Test | Status |
-|------|--------|
-| `test_exec_stop_creates_new_executor` | PASS |
-| `test_exec_stop_with_timeout` | PASS |
-| `test_exec_stop_without_timeout` | PASS |
+```bash
+python -m pytest \
+  tests/test_silent_learning_dictionary_hotword_contract.py \
+  tests/test_silent_learning_integration.py \
+  tests/test_asr_streaming_context_priority.py \
+  tests/test_silent_monitor.py \
+  tests/test_dictionary_safety.py \
+  tests/test_hotword_promotion.py \
+  tests/test_chinese_local_learning.py \
+  -v --tb=short
+```
 
-### Phase G: Terminal Exactly One (6 tests)
-**Command:** `python -m pytest tests/test_terminal_exactly_one.py -v`
-**Result:** 6/6 PASS
+## Aggregate result
 
-| Test | Status |
-|------|--------|
-| `test_terminal_emitted_exactly_once` | PASS |
-| `test_terminal_count_one_in_session_log` | PASS |
-| `test_no_duplicate_pipeline_done_in_success` | PASS |
-| `test_no_pipeline_done_in_terminal` | PASS |
-| `test_new_session_resets_terminal_latch` | PASS |
-| `test_terminal_incremented_only_by_emit_terminal` | PASS |
+| Metric | Value |
+|---|---|
+| collected | 88 |
+| passed | **88** |
+| failed | **0** |
+| skipped | **0** |
+| xfailed | 0 |
+| errors | 0 |
+| **exit code** | **0** |
+| 测试进程退出 | 正常 (not hung) |
+| Wall time | 0.86s |
+| pytest | 9.0.2 |
+| platform | win32 / Python 3.11.15 |
+| rootdir | `D:\code\sayit_zcode` |
 
-### Phase F: Frontend Handler (17 tests)
-**Command:** `node frontend/_test_production_handler.js`
-**Result:** 17/17 PASS
+## Per-file result
 
-## Full Python Test Suite (Regression)
-**Command:** `python -m pytest tests/ -v --timeout=30`
-**Result:** All PASS (no regression)
+| File | Tests | Pass | Fail | Skip |
+|---|---|---|---|---|
+| `tests/test_silent_learning_dictionary_hotword_contract.py` | 16 | 16 | 0 | 0 |
+| `tests/test_silent_learning_integration.py` | 7 | 7 | 0 | 0 |
+| `tests/test_asr_streaming_context_priority.py` | 2 | 2 | 0 | 0 |
+| `tests/test_silent_monitor.py` | 4 | 4 | 0 | 0 |
+| `tests/test_dictionary_safety.py` | 24 | 24 | 0 | 0 |
+| `tests/test_hotword_promotion.py` | 21 | 21 | 0 | 0 |
+| `tests/test_chinese_local_learning.py` | 17 | 17 | 0 | 0 |
+| **Total** | **88** | **88** | **0** | **0** |
 
-## Broader Tests
-**Command:** `python -m pytest tests/test_clipboard_rules.py tests/test_orchestrator_state.py -v`
-**Result:** All PASS
+## Commit ↔ test phase mapping
 
-## Native DLLs
-| DLL | Version | Build ID | Size |
-|-----|---------|----------|------|
-| `native/context_helper/build/Release/sayit_keyboard_helper.dll` | 5 | 2026-06-28-v5 | 18432 bytes |
-| `native/hotkey-addon/build/Release/hotkey_addon.node` | 5 | 2026-06-28-v5 | 148992 bytes |
+| Phase | Commit | Subject |
+|---|---|---|
+| P0-1 RED test | `5fe07d8` | `test: add P0-1 single-CJK expansion boundary tests (RED)` |
+| P0-1 implementation | `a81433f` | `fix(P0-1): remove single-CJK expansion, reject ambiguous replacements` |
+| P0-2 integration test | `0ed1584` | `test(P0-2): add real Database + HotwordsManager + fake ASR integration tests` |
+| P0-3 fix + test | `0ff0ca1` | `fix(P0-3): dynamic streaming context must win over static startup config` |
 
-## Summary
-- **Round 9.4 tests**: 42/42 PASS
-- **Production files**: 7 modified (pipeline.py, main.js, asr.py, asr_streaming.py, injector.py, keyboard_helper.cpp, main.cpp)
-- **New test files**: 6 (5 Python + 1 Node)
-- **All gate conditions**: MET
-- **State**: READY for `BLOCKED_USER_VALIDATION`
+## Process exit confirmation
+
+The pytest process exited normally with status code `0`. There was no hang, no manual termination, and no stalled fixture teardown. The harness captured `===EXIT_CODE===0` immediately after the summary line `============================= 88 passed in 0.86s ==============================`.
+
+## Out-of-scope, not re-run here
+
+- Full-repository pytest sweep
+- The 6 historical failures referenced in `.ai/ROUND9_5A_INDEPENDENT_REVIEW.md`
+- `feature/silent-learning-stabilization` — not switched into, not run against, not modified
+- Native DLL re-tests (no native code changed in this round)
+- Frontend `_test_production_handler.js` (unrelated)
+
+## Safety
+
+- No real database, dictionary, history, audio, clipboard, or API key was read or written.
+- No `git add -A` / `git add .` / `reset --hard` / `git clean` / force-push usage.
+- The 4 untracked pytest log files (`pytest-full-20260629-131831.log`, `pytest-minimal-recheck.log`, `pytest-native-20260629-131622.log`, `pytest-safe-20260629-131611.log`) remain **untracked** and are not part of this commit.

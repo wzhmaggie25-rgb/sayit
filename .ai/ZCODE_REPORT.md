@@ -1,84 +1,119 @@
-# ZCode Session Report
+# ZCode Session Report — Round 9.5A Finalization
+
+> Date: 2026-06-29
+> Branch: `backup/hermes-silent-learning-recovery`
+> HEAD: `0ff0ca1d6bd1d02875a63e26c6b5d3313bfac9ae`
+
+## 执行主体
+
+- **前期实现 (P0-1 RED → P0-1 fix → P0-2 integration test → P0-3 fix):** Hermes
+- **最终独立审计与收尾 (本报告 / 推送 `backup/hermes-silent-learning-recovery` 的最后一步):** Claude Code
+- **不涉及任何对 `feature/silent-learning-stabilization` 的修改、合并或推送。**
 
 ## 接收到的任务
 
-Execute Round 9.4 Runtime Closure per `.ai/ROUND9_4_RUNTIME_CLOSURE_TASK.md` autonomously on branch `feature/silent-learning-stabilization`. Must end at state `BLOCKED_USER_VALIDATION` (NOT DONE).
+Finalize Round 9.5A on `backup/hermes-silent-learning-recovery` only:
 
-13 closure requirements covering 6 P0 bug categories. Test-first approach: "先增加会失败的生产路径测试，再修改代码".
+1. Re-run the targeted Round 9.5A test suite and confirm `88 passed / 0 failed / 0 skipped / exit 0`.
+2. Update `.ai/ROUND9_5A_SELF_REVIEW.md`, `.ai/TEST_RESULTS.md`, `.ai/ZCODE_REPORT.md`, `.ai/CURRENT_TASK.md`.
+3. Commit only those 4 `.ai/` files; do NOT include pytest logs, SKILL.md, databases, configs, or out-of-repo files.
+4. Push `backup/hermes-silent-learning-recovery` only — never `feature/silent-learning-stabilization`.
+5. End state must be `BLOCKED_REVIEW`, not `DONE`.
 
-## 实际修改的文件
+## 实际修改的文件 (this finalization commit only)
 
-| Phase | File | Change |
-|-------|------|--------|
-| B | `infrastructure/injector.py` | Removed `force` parameter from `_release_modifiers()`, always checks `GetAsyncKeyState`; fixed dead branch `editability == "editable"` → `"editable_verified"` |
-| B | `native/context_helper/src/keyboard_helper.cpp` | `ForceReleaseAlt()` → `ConditionalReleaseAlt()`, added GetAsyncKeyState guard; version 4→5, build "2026-06-28-v4"→"2026-06-28-v5" |
-| B | `native/hotkey-addon/src/main.cpp` | `ForceReleaseAlt()` → `ConditionalReleaseAlt()`, added GetAsyncKeyState guard |
-| B | `tests/test_modifier_release_regression.py` | New — 6 tests (modifier release, force removal, native DLL, editability routing) |
-| C | `tests/test_tri_state_routing.py` | New — 7 tests for `_assess_target_editability` return value coverage |
-| D | `infrastructure/asr.py` | Added `_cascade_start = time.monotonic()` and per-engine `remaining_for_engine` recomputation |
-| D | `application/pipeline.py` | `time.time()` → `time.monotonic()` at 4 locations |
-| D | `tests/test_asr_deadline_global.py` | New — 3 tests for monotonic deadline behavior |
-| E | `infrastructure/asr_streaming.py` | Removed module-level `_STOP_EXECUTOR` singleton; added `_exec_stop(self, timeout)` creating fresh `ThreadPoolExecutor(max_workers=1)` per call |
-| E | `tests/test_streaming_poison.py` | New — 3 tests for streaming stop isolation |
-| F | `frontend/main.js` | Added `_applyWatchdogAction(eventType)` dispatcher; replaced manual stop/start in 7 event paths with dispatcher; added `isSessionTerminal(evt.event)` invocation |
-| F | `frontend/_test_production_handler.js` | New — 17 tests covering all 7 event paths through production handlers |
-| G | `application/pipeline.py` | Removed duplicate `self._eb.emit(Events.PIPELINE_DONE, final_text)` at line 506; moved `terminal_count = 1` inside `_emit_terminal()` |
+| File | Change |
+|---|---|
+| `.ai/ROUND9_5A_SELF_REVIEW.md` | New — final self-review for Round 9.5A with full Gherkin↔pytest mapping |
+| `.ai/TEST_RESULTS.md` | Rewritten — targeted Round 9.5A run, 88/0/0/exit-0 |
+| `.ai/ZCODE_REPORT.md` | This file — finalization session report |
+| `.ai/CURRENT_TASK.md` | Status flipped from `HERMES_FIX_READY` → `BLOCKED_REVIEW` |
 
-## 根因判断
+No production source file was modified by this finalization step. All P0 fixes were already in commits `5fe07d8` / `a81433f` / `0ed1584` / `0ff0ca1`.
 
-Six P0 root causes identified in Round 9.4 review:
+## 命令
 
-1. **Modifier release bug** (B): `_release_modifiers(force=True)` bypassed `GetAsyncKeyState` guard → 11 stray key-up events → FEVHLBIGKOPS. Root cause: `force` parameter existed as a design flaw allowing unconditional release.
-2. **Tri-state routing bug** (C): Dead branch `"editable"` (old string) at injector.py:1020 never matched new tri-state values → select-aware Win32 path unreachable.
-3. **ASR deadline bug** (D): `time.time()` is subject to system clock adjustments → can cause negative remaining time. Also `remaining` was passed identically to all engines instead of per-engine recomputation.
-4. **Streaming poisoning bug** (E): Module-level `_STOP_EXECUTOR` singleton could be permanently blocked by a wedged SDK stop call → all subsequent stops hang.
-5. **Frontend handler gap** (F): Watchdog lifecycle was duplicated inline in each event handler with no centralized dispatcher → `isSessionTerminal` not called in production handler path.
-6. **PIPELINE_DONE / terminal_count bug** (G): Duplicate `PIPELINE_DONE` emit on success path; `terminal_count` set after `[SESSION]` log already written → log showed default value.
+只读审计:
 
-## 实施内容
+```bash
+git rev-parse --show-toplevel
+git remote -v
+git branch --show-current
+git status --short
+git rev-parse HEAD
+git fetch origin
+git rev-parse origin/backup/hermes-silent-learning-recovery
+git rev-parse origin/feature/silent-learning-stabilization
+git rev-list --left-right --count origin/backup/hermes-silent-learning-recovery...HEAD
+git log --oneline --decorate --graph -15
+```
 
-Completed Phases B–G of Round 9.4 with test-first approach. 42 new tests created, all proven red before fix, green after fix. No test assertions weakened. No filtering of FEVHLBIGKOPS string. Rebuilt both native DLLs with version bump.
+定向测试:
 
-## 执行过的命令
+```bash
+python -m pytest \
+  tests/test_silent_learning_dictionary_hotword_contract.py \
+  tests/test_silent_learning_integration.py \
+  tests/test_asr_streaming_context_priority.py \
+  tests/test_silent_monitor.py \
+  tests/test_dictionary_safety.py \
+  tests/test_hotword_promotion.py \
+  tests/test_chinese_local_learning.py \
+  -v --tb=short
+```
 
-- `python -m pytest tests/test_modifier_release_regression.py -v` — 6/6 PASS
-- `python -m pytest tests/test_tri_state_routing.py -v` — 7/7 PASS
-- `python -m pytest tests/test_asr_deadline_global.py -v` — 3/3 PASS
-- `python -m pytest tests/test_streaming_poison.py -v` — 3/3 PASS
-- `python -m pytest tests/test_terminal_exactly_one.py -v` — 6/6 PASS
-- `node frontend/_test_production_handler.js` — 17/17 PASS
-- `python -m pytest tests/ -v --timeout=30` — full suite regression check
-- `python -m pytest tests/test_clipboard_rules.py tests/test_orchestrator_state.py -v` — broader tests
-- `cmake --build . --config Release` (context_helper DLL)
-- `npm run rebuild` (hotkey-addon)
+收尾提交（仅 4 个 `.ai/` 文件，明确路径，不使用 `git add -A`）:
+
+```bash
+git add .ai/ROUND9_5A_SELF_REVIEW.md .ai/TEST_RESULTS.md .ai/ZCODE_REPORT.md .ai/CURRENT_TASK.md
+git commit -m "docs: finalize Round 9.5A review evidence"
+git fetch origin                    # re-verify nothing new on remote
+git rev-list --left-right --count origin/backup/hermes-silent-learning-recovery...HEAD
+git push origin backup/hermes-silent-learning-recovery
+```
 
 ## 测试结果
 
 ```
-# Round 9.4 specific tests: 42 tests, all PASS
-tests/test_modifier_release_regression.py ... 6/6 PASS
-tests/test_tri_state_routing.py .............. 7/7 PASS
-tests/test_asr_deadline_global.py ............ 3/3 PASS
-tests/test_streaming_poison.py ............... 3/3 PASS
-tests/test_terminal_exactly_one.py ........... 6/6 PASS
-frontend/_test_production_handler.js ......... 17/17 PASS
-
-# Regression: broader tests also PASS
-tests/test_clipboard_rules.py ................ all PASS
-tests/test_orchestrator_state.py ............. all PASS
+============================= 88 passed in 0.86s ==============================
 ```
 
-## 未解决的问题
+- collected: 88
+- passed: 88
+- failed: 0
+- skipped: 0
+- exit code: 0
+- 测试进程: 正常退出
 
-- `orchestrator.py:371` — `terminal_count` assignment is now redundant (pipeline sets it first inside `_emit_terminal()`) but idempotent. Cleanup is cosmetic-only.
-- `pipeline.py:330` — `ai_degraded = True` on success branch is a latent logic bug but out of scope for Round 9.4.
+This is the **Round 9.5A targeted run only**, not a full-repository pytest sweep.
+
+## 提交链
+
+| Commit | Subject |
+|---|---|
+| `5fe07d8` | test: add P0-1 single-CJK expansion boundary tests (RED) |
+| `a81433f` | fix(P0-1): remove single-CJK expansion, reject ambiguous replacements |
+| `0ed1584` | test(P0-2): add real Database + HotwordsManager + fake ASR integration tests |
+| `0ff0ca1` | fix(P0-3): dynamic streaming context must win over static startup config |
+| _(this commit)_ | docs: finalize Round 9.5A review evidence |
 
 ## 风险
 
-- Native DLLs (`sayit_keyboard_helper.dll`, `hotkey_addon.node`) must be deployed alongside the application for modifier release fix to take effect. Old DLLs will still use `ForceReleaseAlt()`.
-- The `force` parameter removal is a breaking API change — any external caller using `force=True` will now get `TypeError`.
-- User validation on real Windows hardware is required before declaring Round 9.4 complete.
+- 历史 6 个失败和全量 pytest 退出挂起仍在仓库中，不在本轮范围。
+- `feature/silent-learning-stabilization` 本地领先远端 3 个提交（来自更早的 Round）— 严格未触及，等待下一轮指令。
+- 4 个 pytest 日志保持 untracked，等待清理或后续指令决定是否归档。
+
+## 安全声明
+
+- 未读取/修改：真实数据库、用户词典、历史、音频、剪贴板、API Key、悬浮窗、Native 热键、注入器、AI 路由、ASR 超时、SDK 生命周期。
+- 未使用：`git add -A`、`git add .`、`reset --hard`、`git clean`、force-push、删除分支或 tag。
+- 未运行：整个仓库的全量 pytest。
+- 未切换到：`feature/silent-learning-stabilization`。
 
 ## 当前提交ID
 
-`a9ff7b0cabaa3faea28182c6755d367df60d5e66`
+收尾提交完成后会更新；推送后 origin 与本地 HEAD 必须一致。请参见 `.ai/CURRENT_TASK.md` 与 `git log --oneline --decorate -12` 输出确认。
+
+## 状态
+
+`BLOCKED_REVIEW` — 等待用户/独立审查方核验后再决定下一步；不得直接转为 `DONE`。
