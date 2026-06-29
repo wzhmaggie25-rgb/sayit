@@ -4,108 +4,170 @@
 
 ## 状态
 
-**CODEX_READY**
+**HERMES_FIX_READY**
 
 ---
 
-## 本轮唯一任务
+## 当前分支
 
-本轮只实现“静默学习”的最终产品定义：
+只在以下安全分支继续：
 
 ```text
-用户明确修改一个识别错词
-→ 提取修改后的正确词
-→ 加入个人词典
-→ 同步为 ASR 热词
-→ 提高以后对该词的识别准确率
+backup/hermes-silent-learning-recovery
 ```
 
-必须先完整阅读并执行：
+当前独立审查基线：
+
+```text
+b2f6fce70fc2d375dd8c7fb5eee63e74b4a1bfa6
+```
+
+ChatGPT审查提交：
+
+```text
+84be7f11079f33e8e74816b0bd0c8b5d69876ee2
+```
+
+不要切回、不要覆盖、不要合并：
+
+```text
+feature/silent-learning-stabilization
+```
+
+---
+
+## 必须阅读
 
 ```text
 .ai/ROUND9_5A_SILENT_LEARNING_CONTRACT_TASK.md
+.ai/ROUND9_5A_INDEPENDENT_REVIEW.md
 ```
 
-该文件是本轮最高优先级任务，覆盖此前文档中与静默学习冲突的描述。
+后者是本轮最新独立审查，冲突时优先级最高。
 
 ---
 
-## 核心边界
+## 本轮唯一目标
 
-静默学习只学习“正确词”，不学习整句话，也不建立会破坏输出的全局替换规则。
+修正并证明完整链路：
 
-必须做到：
+```text
+用户明确修改一个错词
+→ 精确提取正确词
+→ 写入个人词典
+→ 同步到下一次ASR使用的热词context
+```
 
-- 只观察 `verified_success` 后同一目标、同一插入区域的用户修改；
-- 只接受一次明确、干净的单词/词语替换；
-- 把修改后的正确词加入个人词典；
-- 同步到 ASR 热词；
-- 支持中文、英文、混合词和跨语言纠正；
-- 重复词幂等，不重复添加；
-- 句子重写、多处修改、增删内容、标点格式修改、目标不确定时一律不学习；
-- 停止在生产输出中应用 legacy `correction_rules` 的全局字符串替换；
-- 停止从通用纠错规则自动晋升热词；
-- 不删除、不重写用户已有真实规则和词典数据。
+继续保持：
 
----
-
-## 开发方法
-
-本轮必须采用小范围 **BDD + TDD**：
-
-1. 先提交产品契约和 Gherkin 场景；
-2. 再提交能在当前代码上失败的生产路径测试；
-3. 再做最小实现；
-4. 测试通过后才能重构；
-5. 最后提交准确测试报告。
-
-测试必须执行 `SilentMonitor` 实际调用的同一生产函数，禁止源码 grep、注释断言或测试专用复制实现。
+- 不建立或应用全局错词替换规则；
+- 不从legacy correction_rules自动晋升热词；
+- 不删除用户已有规则和词典数据。
 
 ---
 
-## 执行器
+## 三个阻断必须全部修复
 
-- 本轮执行器：**Codex**
-- 不使用 ZCode / Claude Code 执行本轮
-- ZCode 与 Codex 不得同时在此分支工作
-- Agent Bridge 保持关闭
-- 分支：`feature/silent-learning-stabilization`
-- 开始前执行 `git pull`
+### 1. 禁止猜测中文相邻字符
+
+当前 `_expand_corrected_term()` 会把单字纠错随意拼接右边或左边字符，可能学习成错误词，例如：
+
+```text
+天汽 → 天气，可能错误学习“气很”或“气好”
+豆抱助手 → 豆包助手，可能错误学习“包助”
+百练平台 → 百炼平台，可能错误学习“炼平”
+```
+
+必须：
+
+- 删除这种相邻字符猜测；
+- 单个CJK字符修改且无法证明完整词边界时，一律不学习；
+- 返回明确原因，例如 `ambiguous_single_cjk`；
+- 只有修改片段本身就是干净的2-8字中文词时才允许学习；
+- 英文/中英混合词只能按确定的字母数字token边界扩展。
+
+### 2. 必须验证真实词典与ASR同步
+
+新增隔离集成测试，必须使用：
+
+- 临时SQLite；
+- 真实 `Database`；
+- 真实 `HotwordsManager`；
+- fake ASR cascade记录 `set_hotwords_context()` 调用；
+- fake ConfigStore，禁止读取真实配置。
+
+测试必须证明：
+
+- 正确词只写入一行；
+- 重复学习不产生重复行；
+- 第一次写入后，传给ASR的context包含正确词；
+- 不创建或修改correction_rules；
+- 不访问真实数据库路径。
+
+### 3. 下一次streaming必须拿到最新context
+
+修正 `AsrCascade.create_streaming_session()`：
+
+- 动态 `_streaming_context` 必须优先于启动时旧的 `aliyun.context`；
+- 增加生产路径测试，证明启动后新增词能够进入下一次streaming session；
+- 不修改ASR引擎选择、超时、fallback顺序和SDK生命周期。
 
 ---
 
-## 本轮禁止范围
+## BDD + TDD要求
 
-不要顺手修改：
+先补会失败的测试，再改实现。
 
-- ASR streaming/batch选择和超时；
-- 后端进程恢复；
-- 悬浮窗和结果框；
-- injector大改；
-- Native DLL、RAlt、修饰键；
-- 音频采集；
-- AI整理；
-- 发布、登录、支付、更新器。
+必须新增并执行以下边界测试：
 
-这些问题后续单独开任务。
+```text
+天汽 → 天气：不得学习气很/气好
+豆抱 → 豆包（位于“豆包助手”中）：不得学习包助
+百练 → 百炼（位于“百炼平台”中）：不得学习炼平
+单纯标点修改：不学习
+单个中文插入/删除：不学习
+完整2-8字中文词替换：允许学习
+中文误识别改英文品牌名：允许学习并保留大小写
+英文token内部纠正：只能学习完整token
+```
 
----
+Gherkin每个场景必须在自审报告中对应一个真实可执行的pytest node id。
 
-## 数据安全
-
-- 测试只用临时SQLite、合成文本和fake hotword manager；
-- 不读取或修改真实数据库、词典、历史正文、音频、剪贴板和API Key；
-- 不清空或迁移用户真实数据；
-- 不在日志中输出用户正文或正确词明文。
+禁止源码grep、注释断言和测试专用复制实现。
 
 ---
 
-## 完成状态
+## 测试方式
+
+- 只运行Round 9.5A定向测试；
+- 测试必须由进程正常返回exit code 0，不能只打印pass后挂起；
+- 不在Codex内置终端运行全量pytest；
+- 暂不处理历史6个失败和全量pytest退出挂起，单独记录，不扩大本轮范围；
+- 4个untracked pytest日志继续保持未提交。
+
+---
+
+## 执行器与安全
+
+- 唯一执行器：Hermes；
+- 不启动Codex；
+- 不启动ZCode/Agent Bridge；
+- 不终止任何无关Hermes进程；
+- 不执行 `reset --hard`、`git clean`、force push；
+- 不读取或修改真实数据库、词典、历史、音频、剪贴板、API Key；
+- 不改悬浮窗、Native热键、注入器、AI、ASR超时、后端恢复。
+
+---
+
+## 完成要求
 
 完成后：
 
 - 更新 `.ai/ROUND9_5A_SELF_REVIEW.md`；
-- 真实更新 `.ai/TEST_RESULTS.md` 和 `.ai/ZCODE_REPORT.md`，注明执行器为 Codex；
+- 准确更新 `.ai/TEST_RESULTS.md` 和 `.ai/ZCODE_REPORT.md`，注明执行器为Hermes；
+- 记录失败测试提交、实现提交和最终HEAD；
+- 记录每条BDD对应的pytest node id；
+- 记录准确pass/fail/skip数量和进程exit code；
 - 将本文件状态改为 `BLOCKED_REVIEW`；
 - 不得改为 `DONE`；
-- 提交并推送。
+- 只推送 `backup/hermes-silent-learning-recovery`，不要推正式feature分支。
