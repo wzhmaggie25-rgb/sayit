@@ -4,67 +4,124 @@
 
 ## Status
 
-**BLOCKED_REVIEW**
+**BLOCKED_REVIEW_FIX_REQUIRED**
 
-The practical-ASR-repeat P0 fixes are implemented and tested. Awaiting ChatGPT
-independent review. Do not mark `DONE`.
+ChatGPT independent review found four blocking gaps. Practical voice retest is not authorized yet.
 
 Read first:
 
 ```text
+.ai/PRACTICAL_ASR_REPEAT_CHATGPT_REVIEW.md
 .ai/PRACTICAL_ASR_REPEAT_FIX_REPORT.md
 .ai/PRACTICAL_ASR_REPEAT_LOG_DIAGNOSIS.md
-.ai/PRACTICAL_ASR_REPEAT_INCIDENT_2026-06-30.md
-.ai/TEST_RESULTS.md
 ```
 
 ## Repository and branches
 
 - Repository: `wzhmaggie25-rgb/sayit`
-- Working branch: `fix-practical-asr-repeat` (built on `feature/silent-learning-stabilization`)
-- Frozen — do not modify or push: `feature/silent-learning-stabilization`,
-  `backup/hermes-silent-learning-recovery`.
+- Only working branch: `fix-practical-asr-repeat`
+- Frozen: `feature/silent-learning-stabilization`, `backup/hermes-silent-learning-recovery`
 
-## What was fixed
+## Accepted state
 
-1. **Empty normalized AI input → fail closed.** `infrastructure/corrector.py`
-   returns `(text, None, None)` and never calls any AI provider when normalized
-   text is empty/whitespace. No hallucinated text. Regression tests in
-   `tests/test_corrector_empty_input_guard.py`.
-2. **Audio-quality fail-closed gate.** New `infrastructure/audio_quality.py`
-   (RMS, peak, zero/nonzero fraction, active-frame ratio, duration) +
-   `application/pipeline.py` gate after capture: on effectively-silent audio
-   (nonzero_fraction < 0.05 or active_frame_ratio < 0.05) it aborts streaming,
-   emits `未检测到清晰语音，请检查麦克风或提高音量`, and terminates before
-   ASR/AI/injection — no invented text, no hallucinated history. Tests in
-   `tests/test_audio_quality_gate.py`.
-3. **Safe noise gate.** `noise_gate_threshold` added to `DEFAULT_CONFIG`
-   (default 0.0); effective gate clamped to `MAX_NOISE_GATE=0.012`; suppression
-   ratio logged. Quiet speech is no longer zeroed into near-silence.
-4. **Console UTF-8 logging** in `server.py` so Chinese log fields are readable.
+- preserved WAV evidence confirms the incident recording was heavily zeroed / over-gated;
+- empty normalized text no longer reaches an AI provider;
+- PCM quality metrics and an early pipeline decision point exist;
+- focused tests and prior 99-test targeted suite were reported passing;
+- formal and safety branches remain unchanged.
 
-## WAV evidence (read-only)
+## Blocking gap 1 — empty normalized text still falls back to raw garbage
 
-`%USERPROFILE%\Desktop\sayit_last.wav`: RMS=0.0051, zero_fraction=0.968,
-active_ratio@0.010=0.032, duration 4.03s → effectively silent/over-gated. This
-supported choosing conservative thresholds safely; no second recording required.
-Hence status is `BLOCKED_REVIEW` (not `BLOCKED_NEEDS_ONE_CONTROLLED_REPRO`).
+`correct_text()` returns an empty string, but the pipeline keeps its initial `final_text = raw_text` when corrected text is empty. This can still inject the short/garbled raw ASR result.
 
-## Test results
+Required:
 
-- Focused P0 regressions: 12 passed (4 empty-input + 8 audio-quality), exit 0.
-- Prior targeted suite: 99 collected / 99 passed (+4 subtests) / 0 failed /
-  0 skipped, exit 0.
-- Live DB unchanged: SHA-256 `bbdea0bd…090bd`, size 1224704, Modify
-  2026-06-30 18:54:51 (filesystem hash/stat only; never opened via SQLite).
-- No full-repository pytest.
+1. add an explicit empty-normalized-input outcome (custom exception, typed result, or explicit status);
+2. pipeline must stop before injection and silent learning;
+3. emit `未识别到有效语音内容，请重试` or equivalent;
+4. do not create a successful/final-text history row;
+5. add a real pipeline test proving provider, injector, silent monitor, and successful history are not reached.
+
+## Blocking gap 2 — existing 0.015 gate still becomes 0.012
+
+The user's existing config is not replaced by the new default. `min(0.015, 0.012)` still leaves an effective gate well above the incident RMS (~0.0051), so speech can still be zeroed.
+
+Required for this recovery version:
+
+1. keep on-disk config untouched;
+2. disable chunk-level zeroing at runtime (`effective_gate=0.0`) or explicitly disable legacy/high values in the incident range;
+3. log configured and effective values;
+4. rely on post-capture quality checks;
+5. add a regression proving configured `0.015` does not zero a quiet valid signal.
+
+Do not guess another high fixed threshold. Adaptive gating belongs to a later task with pre-gate evidence.
+
+## Blocking gap 3 — fixed active-frame threshold can reject quiet valid speech
+
+The current rule rejects whenever `active_frame_ratio < 0.05`, where active means frame RMS >= 0.010. Continuous quiet speech around RMS 0.005–0.009 can be rejected even with high non-zero continuity.
+
+Required:
+
+1. do not use low active-frame ratio as an independent rejection condition at the fixed 0.010 threshold;
+2. reject using combined conservative evidence such as near-all-zero samples or extremely low RMS+peak;
+3. retain active-frame ratio as diagnostic unless validated;
+4. add a quiet continuous fixture around incident-level RMS with high non-zero continuity and prove it is accepted;
+5. retain rejection of the incident-like 97%-zero fixture.
+
+## Blocking gap 4 — no executable production-pipeline short-circuit proof
+
+Current tests only test helper functions and explicitly avoid instantiating the full pipeline.
+
+Add a focused pipeline test proving rejected audio:
+
+- aborts the streaming session;
+- does not call batch ASR;
+- does not call corrector;
+- does not call injector;
+- does not call `db.add_history`;
+- does not call silent monitor;
+- emits the expected user-facing and terminal failure events.
+
+Also add the normalized-empty pipeline test from gap 1.
+
+## Required test sequence
+
+Run only:
+
+1. empty-normalized-input unit and pipeline tests;
+2. audio capture/noise-gate tests;
+3. audio-quality tests including valid quiet audio;
+4. production-pipeline short-circuit tests;
+5. prior approved 99-test targeted suite.
+
+Do not run full-repository pytest.
+
+Before and after tests, verify the live database SHA-256, size, and modification time using filesystem reads only. It must remain unchanged.
+
+## Completion
+
+Update:
+
+```text
+.ai/PRACTICAL_ASR_REPEAT_FIX_REPORT.md
+.ai/TEST_RESULTS.md
+.ai/ZCODE_REPORT.md
+.ai/CURRENT_TASK.md
+```
+
+Commit and push only `fix-practical-asr-repeat`.
+
+Final status:
+
+```text
+BLOCKED_REVIEW
+```
 
 ## Forbidden
 
-- no further 10-use acceptance until review;
-- no broad phrase blacklist for `设置语言`;
+- no user voice retest yet;
 - no full-repository pytest;
-- no live DB / dictionary / history / correction-rule / API-key change;
+- no live database/dictionary/history/correction-rule/API-key modification;
 - no modification or push to frozen branches;
 - no release or desktop-shortcut change;
 - no broad process-kill commands;
