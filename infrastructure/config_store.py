@@ -24,6 +24,12 @@ DEFAULT_CONFIG = {
     "audio": {
         "channels": 1, "format": "pcm_s16le",
         "gain_enabled": True, "gain_multiplier": 2.0,
+        # Noise gate: chunks whose RMS falls below this normalized threshold are
+        # zeroed. The practical incident showed 0.015 was too high relative to a
+        # captured RMS of ~0.005, zeroing ~97% of samples. The default is now
+        # conservative (0.0); runtime also auto-clamps an over-aggressive gate.
+        "noise_gate_threshold": 0.0,
+        "dump_last_wav": True,
     },
     "asr_engine": "aliyun",
     "asr_fallback": {

@@ -189,6 +189,32 @@ class RecordingPipeline:
 
             self._session_metrics["duration_s"] = seconds
 
+            # ── Audio quality fail-closed gate ───────────────────────
+            # Do not rely only on output character length. Measure the captured
+            # PCM directly and skip ASR/AI/injection when the audio is
+            # effectively silent or lacks enough active speech (the practical
+            # incident: RMS=0.005 with a 0.015 noise gate zeroed ~97% of
+            # samples, then ASR returned a short wrong result and AI was called
+            # with empty input). No invented text is produced or saved.
+            from infrastructure.audio_quality import measure_pcm, should_reject_audio
+            quality = measure_pcm(pcm)
+            reject, reason = should_reject_audio(quality)
+            logger.info(
+                "Pipeline: audio quality rms=%.4f peak=%.4f nonzero=%.4f "
+                "active_ratio=%.4f duration=%.2fs reject=%s reason=%s",
+                quality.rms, quality.peak, quality.nonzero_fraction,
+                quality.active_frame_ratio, quality.duration_s, reject, reason)
+            if reject:
+                if streaming_session:
+                    streaming_session.abort()
+                msg = "未检测到清晰语音，请检查麦克风或提高音量"
+                self._eb.emit(Events.RECORDING_ERROR, msg)
+                self.state = RecordingState.ERROR
+                self._eb.emit(Events.PIPELINE_ERROR, msg)
+                self._emit_terminal("failed", "capturing", reason,
+                                    final_text_available=False)
+                return
+
             # ── Phase 2: ASR ─────────────────────────────────────────
             self.state = RecordingState.TRANSCRIBING
             raw_text = ""

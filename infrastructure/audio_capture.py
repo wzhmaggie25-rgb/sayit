@@ -25,6 +25,11 @@ INT16_MAX = 32767
 CLIP_LEVEL = int(INT16_MAX * 0.95)
 MAX_GAIN = 12.0
 MIN_PCM_LENGTH = 9600  # ~0.3s @ 16kHz — discard shorter recordings
+# Conservative upper bound on the noise gate. The practical incident had a 0.015
+# gate against a ~0.005-RMS signal, zeroing ~97% of samples. Even if a user
+# configures a higher value, the effective gate is clamped here so quiet speech
+# is not silently suppressed. 0 disables the gate entirely.
+MAX_NOISE_GATE = 0.012
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +56,8 @@ class AudioCapture:
         self._total_samples = 0
         self._gain_reduced = False
         self._noise_gate: float = 0.0
+        self._gate_zeroed_chunks = 0
+        self._gate_total_chunks = 0
         self._recording = False
         self._stream = None
         self._read_thread = None
@@ -123,7 +130,9 @@ class AudioCapture:
             arr2.frombytes(gained)
             sq = sum(arr2[i] * arr2[i] for i in range(len(arr2)))
             rms = (sq / len(arr2)) ** 0.5 / 32768.0
+            self._gate_total_chunks += 1
             if rms < ng:
+                self._gate_zeroed_chunks += 1
                 gained = b"\x00" * len(gained)
 
         self._queue.put(gained)
@@ -215,11 +224,19 @@ class AudioCapture:
             store = ConfigStore()
             configured_gain = store.get("audio", "gain_multiplier", 2.0)
             self._gain = max(1.0, min(float(configured_gain), MAX_GAIN))
-            self._noise_gate = max(0.0, float(store.get("audio", "noise_gate_threshold", 0.015)))
+            configured_gate = max(0.0, float(store.get("audio", "noise_gate_threshold", 0.0)))
         except Exception:
-            self._noise_gate = 0.0
+            configured_gate = 0.0
+        # Safety clamp: the practical incident showed a 0.015 gate zeroing ~97%
+        # of a 0.005-RMS signal. Cap the effective gate so quiet but real speech
+        # is never suppressed into near-silence. 0 disables the gate entirely.
+        self._noise_gate = min(configured_gate, MAX_NOISE_GATE)
+        self._gate_zeroed_chunks = 0
+        self._gate_total_chunks = 0
         if self._noise_gate > 0.0:
-            logger.info("AudioCapture: noise_gate=%.4f", self._noise_gate)
+            logger.info(
+                "AudioCapture: noise_gate=%.4f (configured=%.4f clamped_to_max=%.4f)",
+                self._noise_gate, configured_gate, MAX_NOISE_GATE)
         self.reset_clip_stats()
         self._read_stop.clear()
         self._capture_stopped.clear()
@@ -273,6 +290,13 @@ class AudioCapture:
             self._gain_reduced = True
         logger.info("AudioCapture: stopped %d bytes, clip=%.2f%%",
                      len(pcm), self.clip_fraction() * 100)
+        if self._gate_total_chunks > 0 and self._noise_gate > 0.0:
+            suppressed = self._gate_zeroed_chunks / self._gate_total_chunks
+            logger.info(
+                "AudioCapture: noise_gate=%.4f suppressed_chunk_ratio=%.3f "
+                "(zeroed %d/%d)",
+                self._noise_gate, suppressed,
+                self._gate_zeroed_chunks, self._gate_total_chunks)
 
         self._capture_stopped.set()
 

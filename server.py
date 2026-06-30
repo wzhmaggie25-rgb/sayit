@@ -1203,6 +1203,16 @@ def _test_volcengine_ai(cfg: dict) -> dict:
 # ── Startup ──────────────────────────────────────
 
 def main():
+    # ── Console UTF-8: keep Chinese log fields (audio device name, raw ASR
+    # text, AI request/response summary, injection preview) readable on stdout
+    # / stderr. The persistent file handler is already UTF-8; this fixes the
+    # console mojibake seen in the practical-incident captured log.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     # ── File logging: also write to %APPDATA%/Sayit/sayit.log ──
     from infrastructure.paths import log_path as _log_path
     logging.getLogger().addHandler(

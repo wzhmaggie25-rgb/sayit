@@ -141,6 +141,15 @@ def correct_text(
         enable_punctuation=enable_punctuation,
     )
 
+    # Fail closed: never call any AI provider with empty/whitespace normalized
+    # input. Normalization can empty a non-empty raw result (filler-only input,
+    # punctuation-only, whitespace). Calling a provider then would let it invent
+    # text unrelated to the user's speech. Return a non-success tuple so the
+    # pipeline falls back to raw text / degraded mode instead of hallucinating.
+    if not text or not text.strip():
+        logger.info("[AI] skipping provider: normalized input empty")
+        return text, None, None
+
     if not enable_correction and not enable_structuring:
         return text, None, None
 
