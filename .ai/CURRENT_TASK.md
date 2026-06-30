@@ -4,16 +4,17 @@
 
 ## Status
 
-**BLOCKED_REVIEW**
+**BLOCKED_COLLECTION_TIME_DB_GUARD**
 
-Do not mark `DONE`. Awaiting ChatGPT independent review of the safety-branch HEAD
-(global DB guard + controlled dictionary reset). Do not start normal SayIt use
-and do not merge the feature branch before that review.
+The controlled dictionary reset passed independent review. One small pytest safety gap remains before merge.
 
-## Executors
+Read first:
 
-- Prior P0 implementation (P0-1/P0-2/P0-3): **Hermes**
-- Test isolation, conservative v1, global guard, dictionary reset, reports: **Claude Code**
+```text
+.ai/FINAL_CLOSEOUT_CHATGPT_REVIEW.md
+.ai/FINAL_CLOSEOUT_REPORT.md
+.ai/ROUND9_5A_CHATGPT_FINAL_REVIEW.md
+```
 
 ## Repository
 
@@ -21,47 +22,50 @@ and do not merge the feature branch before that review.
 - Working branch: `backup/hermes-silent-learning-recovery`
 - Do not modify or merge: `feature/silent-learning-stabilization`
 
-## Final closeout completed
+## Confirmed passing state
 
-1. Process-wide pytest DB guard added (`tests/conftest.py` +
-   `tests/db_safety_guard.py`): wraps `sqlite3.connect`, rejects any path under
-   real `%APPDATA%/Sayit` before connect/migrate/write, survives wrong-symbol
-   patching; `:memory:` and temp paths allowed. Proof: 7 passing tests.
-2. Targeted Round 9.5A suite (incl. guard): 97 collected / 97 passed / 0 failed /
-   0 skipped, exit 0, normal exit. Real DB unchanged during all tests
-   (`45ea7cfb…0919`).
-3. User Option 3 dictionary reset (authorized): one transaction reset of ONLY
-   the `dictionary` table — synthetic row removed, 5 core hotwords reseeded.
-   history 1125 and correction_rules 5 unchanged; integrity ok.
-4. Fresh pre-reset + post-reset backups outside the repo:
-   `D:\SayIt-Recovery20260629-185628-dictionary-reset\`.
-5. Reports updated (`.ai/FINAL_CLOSEOUT_REPORT.md`, `TEST_RESULTS.md`,
-   `ZCODE_REPORT.md`).
+- live dictionary reset completed under explicit user approval;
+- dictionary now contains exactly the five core hotwords and no personal terms;
+- history remains 1125 rows;
+- correction_rules remains 5 rows;
+- integrity check is `ok`;
+- fresh pre-reset and post-reset backups exist outside the repository;
+- conservative silent-learning v1 and repaired isolated integration tests remain acceptable;
+- targeted suite reported 97/97 passing;
+- no further live database reset is needed.
 
-## Evidence
+## Remaining blocker
 
-- Live DB hash: pre-reset `45ea7cfb…0919` → post-reset `5838b47e…90a8` (changed
-  by the authorized dictionary reset only).
-- Core hotwords now present: Sayit, Typeless, 闪电说, DeepSeek, DashScope.
-- Personal dictionary restarts from zero.
-- No full-repository pytest. SayIt not started. No remote vocabulary sync.
-  Config / API keys not read or modified.
+`tests/conftest.py` currently installs the global `sqlite3.connect` guard through a session-scoped autouse fixture.
+
+Pytest imports and collects test modules before session fixtures are set up. A test module could therefore construct `Database()` during module import and reach the real database before the guard is active.
+
+## Required final fix
+
+1. Install the real-database guard before test-module collection, using `pytest_configure` or immediate root-conftest import-time installation.
+2. Restore the original connector using `pytest_unconfigure` or equivalent guaranteed teardown.
+3. Keep installation and removal idempotent.
+4. Canonicalize protected and requested paths with `abspath`, `realpath`, and `normcase` before comparison.
+5. Add subprocess proof that a temporary test module beneath `tests` attempts `Database()` at module-import time and is blocked during collection before genuine SQLite connect.
+6. Verify the post-reset live database hash, size, and modification time remain unchanged.
+7. Where applicable, prove a Windows case-variant real path is also blocked.
+
+## Allowed tests
+
+Run only:
+
+- `tests/test_db_global_safety_guard.py`;
+- `tests/test_silent_learning_integration.py`;
+- the Round 9.5A targeted suite including the guard proof.
 
 ## Forbidden
 
-- do not start normal SayIt use before independent review;
-- do not modify history or correction-rule rows;
+- no further live database writes or resets;
+- do not start normal SayIt use yet;
 - do not run full-repository pytest;
-- do not modify or merge the formal feature branch; no pull request;
-- do not pull/rebase/cherry-pick/reset/force-push/clean;
-- do not commit databases, backups, WAL/SHM, recovery dirs, or pytest logs;
+- do not modify history, correction rules, configuration, or API keys;
+- do not modify or merge the formal feature branch;
+- do not pull, rebase, cherry-pick, reset, force-push, or clean;
 - do not mark this task `DONE`.
 
-Read first:
-
-```text
-.ai/FINAL_CLOSEOUT_REPORT.md
-.ai/ROUND9_5A_CHATGPT_FINAL_REVIEW.md
-.ai/USER_DECISION_DICTIONARY_RESET_2026-06-29.md
-.ai/TEST_RESULTS.md
-```
+After the fix, update reports, commit and push only the safety branch, set status to `BLOCKED_REVIEW`, and stop.
