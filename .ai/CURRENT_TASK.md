@@ -4,16 +4,19 @@
 
 ## Status
 
-**BLOCKED_P0_PRACTICAL_ASR_REPEAT**
+**READY_P0_FIX_EXECUTION**
 
-Practical acceptance failed immediately: two different spoken utterances both produced the same incorrect output, `设置语言`.
+The user-provided runtime log identifies two production failures:
+
+1. raw ASR is already wrong on low-quality audio;
+2. normalized AI input can become empty, yet DeepSeek is still called and invents output.
 
 Read first:
 
 ```text
+.ai/PRACTICAL_ASR_REPEAT_LOG_DIAGNOSIS.md
 .ai/PRACTICAL_ASR_REPEAT_INCIDENT_2026-06-30.md
 .ai/INTEGRATION_REPORT.md
-.ai/ROUND9_5A_FINAL_APPROVAL.md
 ```
 
 ## Repository and branches
@@ -30,170 +33,188 @@ Local directory:
 D:\code\sayit_zcode
 ```
 
-Only allowed investigation branch:
+Only allowed branch:
 
 ```text
 fix-practical-asr-repeat
 ```
 
-Frozen branches — do not modify or push:
+Frozen — do not modify or push:
 
 ```text
 feature/silent-learning-stabilization
 backup/hermes-silent-learning-recovery
 ```
 
-## Current judgment
+## Confirmed evidence
 
-Repeated identical output across two different utterances is not normal ASR inaccuracy. Diagnose which stage first produced `设置语言`:
+Session `ed165e194aee`:
 
-```text
-audio capture
-→ streaming/batch ASR raw text
-→ local correction
-→ AI correction
-→ event/session routing
-→ injection
-```
+- streaming ASR produced a short incorrect raw result;
+- AI preserved the incorrect result;
+- injection later failed.
 
-Do not guess the cause before reading runtime evidence.
+Session `5b87e455f2e1`:
+
+- streaming ASR produced a 2-character result;
+- batch DashScope fallback returned the same short result;
+- batch audio log reported `RMS=0.005`;
+- runtime noise gate was `0.0150`, gain `1.5x`;
+- normalization reduced the AI input to empty;
+- DeepSeek was still called with `len=0 input=''` and generated new text;
+- injection later failed.
+
+The first known wrong stage is ASR. A second deterministic bug allows AI hallucination from empty normalized input.
 
 ## This task's one and only goal
 
-Use the two already-recorded failed sessions to locate the first incorrect stage. Apply a minimal fix only if the evidence is conclusive; otherwise stop with a precise diagnostic report and the smallest required next test.
+Fix the low-audio / empty-AI-input failure path so SayIt never injects invented text when audio is effectively silent or normalized ASR input is empty.
 
-## Phase 1 — preserve and inspect existing evidence
+## Required execution
 
-Do not ask the user to speak again before this phase is complete.
+### 1. Preserve and inspect the existing WAV
 
-1. Fetch and switch to `fix-practical-asr-repeat` with fast-forward-only rules.
-2. Confirm no tracked local modifications before changing code.
-3. Preserve copies outside Git of these files if they exist:
-   - `%APPDATA%\Sayit\sayit.log`;
-   - `%USERPROFILE%\Desktop\sayit_last.wav`.
-4. Do not commit the log, WAV, database, config, or any user data.
-5. Locate the two most recent recording sessions corresponding to the user's failed attempts.
-6. For each session, report only:
-   - session id and timestamps;
-   - backend executable/script path and process command line if available;
-   - audio device name;
-   - captured PCM bytes, duration, RMS/peak/nonzero fraction if available;
-   - streaming start/success/failure;
-   - ASR engine;
-   - `[ASR-RAW]` value;
-   - AI provider and whether AI changed the text;
-   - injected final value;
-   - target application/process;
-   - terminal outcome.
-7. Do not output unrelated history text, API keys, tokens, full config, or unrelated log lines.
-8. Inspect `sayit_last.wav` with local tools only:
-   - WAV header/sample rate/channels/width/duration;
-   - SHA-256;
-   - RMS, peak, zero/nonzero fraction;
-   - whether it is effectively silence/clipped;
-   - do not upload or commit it.
-9. Record the current Windows default input device and available input-device names. Do not change the device automatically.
-10. Inspect configuration in redacted form only:
-    - configured ASR order;
-    - streaming enabled/disabled;
-    - model names;
-    - local language;
-    - organize level / AI correction enabled state;
-    - audio gain and noise gate;
-    - API credential presence as true/false only;
-    - endpoint hostnames only, never secret query strings or keys.
-11. Check current or last-run process identity:
-    - Electron command and working directory;
-    - Python backend command and exact `server.py` path;
-    - port 17890 owner;
-    - whether more than one SayIt backend existed.
-12. Do not kill unrelated Hermes, Codex, ZCode, Python, or Electron processes. If SayIt is still running, preserve evidence first, then stop only the verified SayIt processes.
+Before code changes, inspect `%USERPROFILE%\Desktop\sayit_last.wav` if present.
 
-## Decisive diagnosis rules
+Report without committing or uploading it:
 
-### A. Raw ASR already equals `设置语言`
+- SHA-256;
+- sample rate, channels, sample width, duration;
+- RMS and peak;
+- zero/nonzero sample fraction;
+- active-frame ratio at multiple RMS thresholds;
+- whether speech appears structurally present, clipped, or effectively silent.
 
-Investigate audio/device/streaming and stale ASR session state. Compare session IDs and event ordering. Verify each recording creates a fresh streaming session and fresh PCM queue.
+Do not require another user recording before this inspection.
 
-### B. Raw ASR differs but AI/final equals `设置语言`
+### 2. Fix empty normalized AI input
 
-The fault is in correction/prompt/provider handling. Preserve the correct raw text and fail open to raw text when correction is implausible, stale, or not traceable to the current session.
+In the correction path:
 
-### C. Logs show correct final text but injected text is `设置语言`
+- retain the original current-session input separately;
+- after deterministic normalization, if the normalized text is empty or whitespace, do not build prompts and do not call any AI provider;
+- return a non-success correction result that lets the pipeline fail closed rather than accept generated text;
+- add a regression test proving the provider function is never called for empty normalized input;
+- add a regression test for filler-only input that normalizes to empty;
+- do not return provider-generated content when current-session input is empty.
 
-Investigate stale frontend events, pending result replay, clipboard/injection content, and session-id filtering.
+### 3. Add an audio-quality fail-closed gate
 
-### D. WAV is near-silent or unrelated
+Do not rely only on output character length.
 
-Treat microphone/default-device capture as the primary fault. Add explicit device diagnostics and a safe user-facing microphone selection/check path; do not hide the failure by accepting hallucinated ASR text.
+Add reusable PCM quality metrics, at minimum:
 
-### E. Evidence belongs to an old backend or wrong path
+- RMS;
+- peak;
+- zero/nonzero fraction;
+- active-frame ratio;
+- duration.
 
-Fix launch supervision so the Electron process confirms the backend script/executable path and instance identity before accepting recording input.
+Use evidence from `sayit_last.wav` to choose a conservative threshold.
 
-## Minimal-fix requirements
+When audio is effectively silent or lacks enough active speech:
 
-If the root cause is conclusive:
+- skip ASR acceptance, AI correction, and injection;
+- preserve no invented final text;
+- emit a clear user-facing message such as `未检测到清晰语音，请检查麦克风或提高音量`;
+- mark the terminal outcome as an audio-quality failure;
+- do not save hallucinated text to history.
 
-1. Add a regression test reproducing the exact failure class.
-2. Ensure text from a prior session cannot be reused in a later session.
-3. Ensure session/event results are accepted only for the active session.
-4. Add a low-audio quality gate before accepting a short repeated/hallucinated result where appropriate.
-5. Preserve recognized raw text if AI correction fails validation.
-6. Do not introduce broad phrase blacklists such as special-casing `设置语言`.
-7. Do not modify the live dictionary, history, correction rules, or API configuration.
-8. Run only relevant targeted tests plus the prior 99-test suite if the minimal fix passes its focused tests.
-9. Confirm the live database fingerprint is unchanged.
-10. Commit and push only `fix-practical-asr-repeat`.
-11. End at `BLOCKED_REVIEW`.
+### 4. Make the noise gate safe
 
-## If evidence is inconclusive
+Current runtime evidence shows `noise_gate=0.0150` while captured overall RMS was `0.005`.
 
-Do not change production logic speculatively. Write:
+After WAV inspection:
+
+- if speech is present but suppressed, lower or adapt the runtime noise gate;
+- measure raw/gained audio before gating and post-gate audio separately;
+- do not silently zero most speech;
+- avoid directly editing the user's config unless a documented, reversible migration is necessary;
+- log the effective threshold and suppression ratio without logging audio content.
+
+### 5. Keep session safety
+
+- each recording must use fresh audio buffers and a fresh streaming session;
+- no prior-session partial/final result may be reused;
+- keep active-session checks in frontend/backend routing;
+- add a focused regression test if a stale-session path is found during inspection.
+
+### 6. Fix log encoding for diagnosis
+
+Ensure Chinese log fields written to the persistent log remain valid UTF-8 and readable, including:
+
+- audio device name;
+- raw ASR text;
+- AI request/response summary;
+- injection preview.
+
+Do not expose secrets or full unrelated user content.
+
+### 7. Focused tests, then prior targeted suite
+
+Run focused tests for:
+
+- empty normalized input never calling AI;
+- filler-only input;
+- low/silent PCM rejection;
+- valid quiet speech not being rejected if fixture evidence supports it;
+- no injection and no invented history record on audio-quality failure;
+- fresh session state.
+
+Only after focused tests pass, run the prior approved 99-test targeted suite.
+
+Do not run full-repository pytest.
+
+### 8. Safety evidence
+
+Before and after tests, compare the live database using filesystem SHA-256, size, and modification time only. It must remain unchanged.
+
+Do not modify:
+
+- live database;
+- dictionary;
+- history;
+- correction rules;
+- API keys or endpoints;
+- desktop shortcuts;
+- formal or safety branches.
+
+## Completion
+
+Update:
 
 ```text
-.ai/PRACTICAL_ASR_REPEAT_DIAGNOSIS.md
+.ai/PRACTICAL_ASR_REPEAT_FIX_REPORT.md
+.ai/TEST_RESULTS.md
+.ai/ZCODE_REPORT.md
+.ai/CURRENT_TASK.md
 ```
 
-with:
+Commit and push only `fix-practical-asr-repeat`.
 
-- exact first known incorrect stage;
-- evidence from each failed session;
-- ruled-out causes;
-- remaining hypotheses;
-- one smallest controlled reproduction request;
-- exact logs/metrics needed from that one reproduction.
+Final status:
 
-Set final status to:
+```text
+BLOCKED_REVIEW
+```
+
+If WAV evidence is missing or thresholds cannot be chosen safely, do not guess. Fix the empty-input AI bug, document the missing audio evidence, set:
 
 ```text
 BLOCKED_NEEDS_ONE_CONTROLLED_REPRO
 ```
 
+and stop.
+
 ## Forbidden
 
-- no further 10-use acceptance testing;
+- no further 10-use acceptance;
+- no broad phrase blacklist for `设置语言`;
 - no full-repository pytest;
-- no live database write/reset/restore;
-- no API-key disclosure;
-- no modification or push to the formal or safety branches;
+- no live DB write/reset/restore;
+- no modification or push to frozen branches;
 - no release or desktop-shortcut change;
-- no broad kill commands for all Python/Electron/Hermes/Codex/ZCode processes;
+- no broad process-kill commands;
 - no `git pull`, rebase, cherry-pick, reset, force push, or `git clean`;
 - no `git add .` or `git add -A`;
 - do not mark `DONE`.
-
-## Completion report
-
-Report:
-
-1. investigation branch HEAD;
-2. two failed session IDs/timestamps;
-3. actual backend path/process identity;
-4. actual audio device and WAV quality metrics;
-5. raw ASR, AI/final, and injected values per failed session;
-6. exact first incorrect stage;
-7. root cause confidence;
-8. files changed and tests run;
-9. live database fingerprint before/after;
-10. final status (`BLOCKED_REVIEW` or `BLOCKED_NEEDS_ONE_CONTROLLED_REPRO`).
