@@ -227,16 +227,22 @@ class AudioCapture:
             configured_gate = max(0.0, float(store.get("audio", "noise_gate_threshold", 0.0)))
         except Exception:
             configured_gate = 0.0
-        # Safety clamp: the practical incident showed a 0.015 gate zeroing ~97%
-        # of a 0.005-RMS signal. Cap the effective gate so quiet but real speech
-        # is never suppressed into near-silence. 0 disables the gate entirely.
-        self._noise_gate = min(configured_gate, MAX_NOISE_GATE)
+        # Recovery-version safety: the legacy chunk-level noise gate (e.g. the
+        # user's existing 0.015) zeroed ~97% of a ~0.005-RMS signal in the
+        # practical incident, suppressing quiet speech into near-silence. Rather
+        # than guess another high threshold, DISABLE chunk-level zeroing at
+        # runtime for this recovery version (effective gate = 0.0). The user's
+        # on-disk config is NOT changed. Fail-closed behavior now relies on the
+        # post-capture audio-quality gate in the pipeline. Log both values.
+        self._noise_gate = 0.0
+        self._configured_gate = configured_gate
         self._gate_zeroed_chunks = 0
         self._gate_total_chunks = 0
-        if self._noise_gate > 0.0:
+        if configured_gate > 0.0:
             logger.info(
-                "AudioCapture: noise_gate=%.4f (configured=%.4f clamped_to_max=%.4f)",
-                self._noise_gate, configured_gate, MAX_NOISE_GATE)
+                "AudioCapture: noise_gate disabled at runtime "
+                "(configured=%.4f effective=%.4f) — relying on post-capture quality gate",
+                configured_gate, self._noise_gate)
         self.reset_clip_stats()
         self._read_stop.clear()
         self._capture_stopped.clear()

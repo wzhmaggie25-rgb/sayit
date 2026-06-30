@@ -12,6 +12,7 @@ from application.eventbus import EventBus, Events
 from application.result_card_eligibility import should_show_large_result_card
 from infrastructure.injector import InjectionResult
 from infrastructure.config_store import ConfigStore
+from infrastructure.corrector import EmptyNormalizedInputError
 
 logger = logging.getLogger(__name__)
 
@@ -355,6 +356,21 @@ class RecordingPipeline:
                         logger.warning("AI correction returned empty, using raw text")
                         ai_degraded = True
                     self._session_metrics["ai_degraded"] = True
+                except EmptyNormalizedInputError:
+                    # Gap-1 fail closed: normalization emptied the ASR result.
+                    # Do NOT fall back to raw/garbled text. Stop before injection,
+                    # silent learning, and successful-history with a clear message.
+                    logger.warning(
+                        "[AI] normalized input empty — stopping (no injection)")
+                    msg = "未识别到有效语音内容，请重试"
+                    self._eb.emit(Events.AI_DEGRADED, msg)
+                    self._eb.emit(Events.RECORDING_ERROR, msg)
+                    self.state = RecordingState.ERROR
+                    self._eb.emit(Events.PIPELINE_ERROR, msg)
+                    self._emit_terminal("failed", "correcting",
+                                        "empty_normalized_input",
+                                        final_text_available=False)
+                    return
                 except httpx.TimeoutException:
                     logger.warning(
                         "[AI] deadline %.0fs exceeded — falling back to locally_refined_text",

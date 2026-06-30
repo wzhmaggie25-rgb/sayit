@@ -24,6 +24,17 @@ logger = logging.getLogger(__name__)
 _PROMPT_DIR = os.path.join(os.path.dirname(__file__), "..", "prompts")
 
 
+class EmptyNormalizedInputError(Exception):
+    """Raised when deterministic normalization reduces ASR text to empty.
+
+    This is an explicit, distinguishable outcome: the raw ASR result had no
+    usable content after normalization (filler-only, punctuation-only,
+    whitespace). The pipeline must treat this as a hard fail-closed — it must
+    NOT fall back to the raw/garbled text and must NOT inject, learn, or record
+    a successful history row.
+    """
+
+
 def _load_prompt(filename: str) -> str:
     path = os.path.join(_PROMPT_DIR, filename)
     try:
@@ -144,11 +155,12 @@ def correct_text(
     # Fail closed: never call any AI provider with empty/whitespace normalized
     # input. Normalization can empty a non-empty raw result (filler-only input,
     # punctuation-only, whitespace). Calling a provider then would let it invent
-    # text unrelated to the user's speech. Return a non-success tuple so the
-    # pipeline falls back to raw text / degraded mode instead of hallucinating.
+    # text unrelated to the user's speech. Raise an explicit, distinguishable
+    # outcome so the pipeline can stop before injection / silent learning /
+    # successful-history instead of falling back to the raw garbled text.
     if not text or not text.strip():
-        logger.info("[AI] skipping provider: normalized input empty")
-        return text, None, None
+        logger.info("[AI] normalized input empty — fail closed")
+        raise EmptyNormalizedInputError("normalized ASR input is empty")
 
     if not enable_correction and not enable_structuring:
         return text, None, None

@@ -35,8 +35,17 @@ class AudioQuality:
 
     @property
     def effectively_silent(self) -> bool:
-        """Conservative: so little non-zero signal that ASR cannot be trusted."""
-        return self.nonzero_fraction < 0.05 or self.active_frame_ratio < 0.05
+        """Conservative combined-evidence test for effectively-silent audio.
+
+        Do NOT reject merely because the fixed-threshold active-frame ratio is
+        low — a continuous quiet voice signal around RMS 0.005–0.009 can sit
+        below the 0.010 frame threshold yet still be real speech. Reject only on
+        combined conservative evidence: near-all-zero samples (the incident
+        signature, ~97% zeros) OR extremely low RMS *and* peak together.
+        """
+        near_all_zero = self.nonzero_fraction < 0.05
+        extremely_low = self.rms < 0.003 and self.peak < 0.02
+        return near_all_zero or extremely_low
 
 
 # Frame size used for active-frame measurement (matches AudioCapture's CHUNK).
