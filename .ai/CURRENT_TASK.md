@@ -4,16 +4,18 @@
 
 ## Status
 
-**BLOCKED_COLLECTION_TIME_DB_GUARD**
+**BLOCKED_REVIEW**
 
-The controlled dictionary reset passed independent review. One small pytest safety gap remains before merge.
+Do not mark `DONE`. The collection-time pytest DB guard gap is closed; awaiting
+one final ChatGPT independent review of this safety-branch HEAD before any
+formal-branch integration planning. Do not start normal SayIt use yet.
 
 Read first:
 
 ```text
 .ai/FINAL_CLOSEOUT_CHATGPT_REVIEW.md
 .ai/FINAL_CLOSEOUT_REPORT.md
-.ai/ROUND9_5A_CHATGPT_FINAL_REVIEW.md
+.ai/TEST_RESULTS.md
 ```
 
 ## Repository
@@ -22,41 +24,36 @@ Read first:
 - Working branch: `backup/hermes-silent-learning-recovery`
 - Do not modify or merge: `feature/silent-learning-stabilization`
 
-## Confirmed passing state
+## Collection-time guard gap — CLOSED
 
-- live dictionary reset completed under explicit user approval;
-- dictionary now contains exactly the five core hotwords and no personal terms;
-- history remains 1125 rows;
-- correction_rules remains 5 rows;
-- integrity check is `ok`;
-- fresh pre-reset and post-reset backups exist outside the repository;
-- conservative silent-learning v1 and repaired isolated integration tests remain acceptable;
-- targeted suite reported 97/97 passing;
-- no further live database reset is needed.
+1. Guard installed before test-module collection: `tests/conftest.py` installs
+   at conftest import time AND in `pytest_configure` (idempotent); removed in
+   `pytest_unconfigure`.
+2. Paths canonicalized with abspath + realpath + normcase
+   (`tests/db_safety_guard._canon`) before the directory check.
+3. New proof `test_collection_time_real_db_access_blocked_in_subprocess`: a child
+   pytest collecting a module that opens the real DB at import time fails during
+   collection with `RealDatabaseAccessError`; genuine connect never reached; real
+   DB fingerprint (hash/size/mtime) unchanged.
+4. New proof `test_windows_case_variant_real_path_blocked`: upper/lower/slash/
+   redundant real-path variants all blocked.
 
-## Remaining blocker
+## Test evidence
 
-`tests/conftest.py` currently installs the global `sqlite3.connect` guard through a session-scoped autouse fixture.
+- `test_db_global_safety_guard.py`: 9 passed (+4 subtests), exit 0.
+- `test_silent_learning_integration.py`: 8 passed, exit 0.
+- Round 9.5A targeted (incl. guard): **99 collected / 99 passed (+4 subtests) /
+  0 failed / 0 skipped**, exit 0, normal exit, ~3.65s.
+- Post-reset live DB SHA-256 `5838b47ebaf5072def17d1873dd4cb5efb7acc5b3a2fcaa2f16777d9e61590a8`,
+  size 1224704, Modify 2026-06-29 18:58:41 — **unchanged before and after all
+  test runs this round**.
+- No full-repository pytest run. SayIt not started. No live DB write this round.
 
-Pytest imports and collects test modules before session fixtures are set up. A test module could therefore construct `Database()` during module import and reach the real database before the guard is active.
+## Confirmed prior state (unchanged)
 
-## Required final fix
-
-1. Install the real-database guard before test-module collection, using `pytest_configure` or immediate root-conftest import-time installation.
-2. Restore the original connector using `pytest_unconfigure` or equivalent guaranteed teardown.
-3. Keep installation and removal idempotent.
-4. Canonicalize protected and requested paths with `abspath`, `realpath`, and `normcase` before comparison.
-5. Add subprocess proof that a temporary test module beneath `tests` attempts `Database()` at module-import time and is blocked during collection before genuine SQLite connect.
-6. Verify the post-reset live database hash, size, and modification time remain unchanged.
-7. Where applicable, prove a Windows case-variant real path is also blocked.
-
-## Allowed tests
-
-Run only:
-
-- `tests/test_db_global_safety_guard.py`;
-- `tests/test_silent_learning_integration.py`;
-- the Round 9.5A targeted suite including the guard proof.
+- live dictionary holds exactly the 5 core hotwords, no personal terms;
+- history 1125 rows; correction_rules 5 rows; integrity ok;
+- pre-reset and post-reset backups exist outside the repository.
 
 ## Forbidden
 
@@ -64,8 +61,7 @@ Run only:
 - do not start normal SayIt use yet;
 - do not run full-repository pytest;
 - do not modify history, correction rules, configuration, or API keys;
-- do not modify or merge the formal feature branch;
+- do not modify or merge the formal feature branch; no pull request;
 - do not pull, rebase, cherry-pick, reset, force-push, or clean;
+- do not commit databases, backups, WAL/SHM, recovery dirs, or pytest logs;
 - do not mark this task `DONE`.
-
-After the fix, update reports, commit and push only the safety branch, set status to `BLOCKED_REVIEW`, and stop.

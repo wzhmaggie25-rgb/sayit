@@ -7,6 +7,33 @@
 
 ---
 
+## Collection-time guard gap fix (latest closeout)
+
+The pytest DB guard is now installed at conftest **import time** (plus
+`pytest_configure`, idempotent) and removed in `pytest_unconfigure`, so it covers
+test-module import/collection — not only test-method execution. Paths are
+canonicalized with **abspath + realpath + normcase**. Two new proofs added.
+
+| Run | collected | passed | failed | skipped | exit | process |
+|---|---|---|---|---|---|---|
+| `test_db_global_safety_guard.py` | 9 | 9 (+4 subtests) | 0 | 0 | 0 | normal |
+| `test_silent_learning_integration.py` | 8 | 8 | 0 | 0 | 0 | normal |
+| Round 9.5A targeted (incl. guard) | **99** | **99 (+4 subtests)** | **0** | **0** | **0** | normal, ~3.65s |
+
+New proofs:
+- `test_collection_time_real_db_access_blocked_in_subprocess` — a child pytest
+  collecting a module that opens the real DB at import time fails during
+  collection with `RealDatabaseAccessError`; genuine connect never reached; real
+  DB fingerprint (hash/size/mtime) unchanged.
+- `test_windows_case_variant_real_path_blocked` — upper/lower/slash/redundant
+  real-path variants all blocked.
+
+Post-reset live DB SHA-256 before == after all runs:
+`5838b47ebaf5072def17d1873dd4cb5efb7acc5b3a2fcaa2f16777d9e61590a8`, size 1224704,
+Modify 2026-06-29 18:58:41 — **unchanged during testing**. No full-repo pytest.
+
+---
+
 ## Final closeout update (global guard + dictionary reset round)
 
 Added a pytest-wide fail-closed DB guard (`tests/conftest.py` +

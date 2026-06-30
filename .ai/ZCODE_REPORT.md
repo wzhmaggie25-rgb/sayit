@@ -5,6 +5,16 @@
 > 前期实现: **Hermes** (P0-1/P0-2/P0-3)
 > 本轮收尾: **Claude Code** (global guard + controlled dictionary reset + reports)
 
+## 后续修复 — collection-time guard gap (latest)
+
+ChatGPT final review found the guard installed via a session autouse fixture,
+which runs after pytest collects modules. Fixed: `tests/conftest.py` installs the
+guard at conftest import time (+ `pytest_configure`, idempotent) and removes it
+in `pytest_unconfigure`; path comparison canonicalized with abspath + realpath +
+normcase (`tests/db_safety_guard._canon`). Added a subprocess collection-time
+proof and a Windows case-variant proof. Targeted suite now 99 passed (was 97),
+exit 0; post-reset live DB unchanged (`5838b47e…`, Modify 18:58:41).
+
 ## 接收到的任务
 
 Unattended final closeout on `backup/hermes-silent-learning-recovery`: add an

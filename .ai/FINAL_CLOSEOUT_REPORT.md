@@ -18,6 +18,29 @@
 8. Left `history` (1125) and `correction_rules` (5) unchanged.
 9. Created a post-reset consistent backup.
 
+## Collection-time guard gap closed (follow-up fix)
+
+ChatGPT's final review (`.ai/FINAL_CLOSEOUT_CHATGPT_REVIEW.md`) found the guard
+was installed by a session-scoped autouse fixture, which runs only AFTER pytest
+imports/collects test modules — so a module could reach the real DB at
+import/collection time before the guard was active. Fixed:
+
+- `tests/conftest.py` now installs the guard at **conftest import time** (before
+  any test module is collected) and re-asserts it in `pytest_configure`
+  (idempotent); it is removed in `pytest_unconfigure`.
+- Path comparison canonicalizes with **abspath + realpath + normcase**
+  (`tests/db_safety_guard._canon`), so Windows case variants, short names,
+  symlinks, and junctions cannot bypass the directory check.
+- New proof tests:
+  - `test_collection_time_real_db_access_blocked_in_subprocess` — a child pytest
+    collecting a module that opens the real DB at import time fails during
+    collection with `RealDatabaseAccessError`, the genuine connect is never
+    reached, and the real DB fingerprint (hash/size/mtime) is unchanged;
+  - `test_windows_case_variant_real_path_blocked` — upper/lower/slash/redundant
+    variants of the real path are all blocked.
+- Targeted suite is now **99 passed** (was 97; +2 new guard proofs), exit 0,
+  post-reset live DB unchanged (`5838b47e…`).
+
 ## User decision
 
 The user explicitly selected **Option 3**
