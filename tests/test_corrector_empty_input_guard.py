@@ -2,7 +2,8 @@
 
 Practical-incident P0: normalization could reduce ASR text to empty, yet the AI
 provider was still called and invented text. These prove the provider is never
-called for empty / whitespace / filler-only normalized input.
+called for empty / whitespace / filler-only normalized input, and that the
+explicit EmptyNormalizedInputError is raised so the pipeline can fail closed.
 """
 from __future__ import annotations
 
@@ -10,7 +11,9 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 import infrastructure.corrector as corrector_mod
-from infrastructure.corrector import correct_text, normalize_text
+from infrastructure.corrector import (
+    correct_text, normalize_text, EmptyNormalizedInputError,
+)
 
 
 class EmptyNormalizedInputGuardTests(unittest.TestCase):
@@ -34,29 +37,25 @@ class EmptyNormalizedInputGuardTests(unittest.TestCase):
             result = correct_text(raw_text, providers=providers, **kw)
         return result, mock_call
 
-    def test_empty_input_does_not_call_provider(self):
-        result, mock_call = self._run("")
-        text, pid, model = result
-        self.assertEqual(text, "")
-        self.assertIsNone(pid)
-        self.assertIsNone(model)
-        mock_call.assert_not_called()
+    def test_empty_input_raises_and_does_not_call_provider(self):
+        with self.assertRaises(EmptyNormalizedInputError):
+            with patch.object(corrector_mod, "call_provider") as mock_call:
+                correct_text("", providers=self._providers())
+                mock_call.assert_not_called()
 
-    def test_whitespace_only_input_does_not_call_provider(self):
-        result, mock_call = self._run("   \n\t  ")
-        text, pid, _ = result
-        self.assertEqual(text.strip(), "")
-        self.assertIsNone(pid)
-        mock_call.assert_not_called()
+    def test_whitespace_only_input_raises_and_skips_provider(self):
+        with self.assertRaises(EmptyNormalizedInputError):
+            with patch.object(corrector_mod, "call_provider") as mock_call:
+                correct_text("   \n\t  ", providers=self._providers())
+                mock_call.assert_not_called()
 
-    def test_filler_only_input_normalizes_to_empty_and_skips_provider(self):
+    def test_filler_only_input_normalizes_to_empty_and_raises(self):
         # Filler-only input is non-empty raw, but normalization removes fillers.
         self.assertEqual(normalize_text("嗯嗯嗯"), "")
-        result, mock_call = self._run("嗯嗯嗯")
-        text, pid, _ = result
-        self.assertEqual(text, "")
-        self.assertIsNone(pid)
-        mock_call.assert_not_called()
+        with self.assertRaises(EmptyNormalizedInputError):
+            with patch.object(corrector_mod, "call_provider") as mock_call:
+                correct_text("嗯嗯嗯", providers=self._providers())
+                mock_call.assert_not_called()
 
     def test_real_text_still_calls_provider(self):
         result, mock_call = self._run("打开豆包助手")
