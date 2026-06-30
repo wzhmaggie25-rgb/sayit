@@ -7,6 +7,26 @@
 
 ---
 
+## Practical ASR-repeat P0 fix — Round 2 review blockers (2026-06-30)
+
+Closed the four ChatGPT review blockers (empty-text fail-closed via
+`EmptyNormalizedInputError`; runtime noise-gate disable; combined-evidence
+quality gate; real pipeline short-circuit proof). Focused regressions + prior
+targeted suite:
+
+| Run | collected | passed | failed | skipped | exit |
+|---|---|---|---|---|---|
+| `tests/test_corrector_empty_input_guard.py` | 4 | 4 | 0 | 0 | 0 |
+| `tests/test_audio_quality_gate.py` | 12 | 12 | 0 | 0 | 0 |
+| `tests/test_pipeline_short_circuit.py` | 3 | 3 | 0 | 0 | 0 |
+| prior targeted suite | 99 | 99 (+4 subtests) | 0 | 0 | 0 |
+
+Live DB unchanged: SHA-256 `bbdea0bd…090bd`, size 1224704, Modify
+2026-06-30 18:54:51. No full-repository pytest. See
+`.ai/PRACTICAL_ASR_REPEAT_FIX_REPORT.md`.
+
+---
+
 ## Practical ASR-repeat P0 fix (2026-06-30, branch `fix-practical-asr-repeat`)
 
 Empty-normalized-input AI guard + audio-quality fail-closed gate + safe noise

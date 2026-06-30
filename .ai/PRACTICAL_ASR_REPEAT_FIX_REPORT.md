@@ -5,6 +5,60 @@
 > Executor: Claude Code (host: ZCode), unattended P0 fix
 > Status: **BLOCKED_REVIEW** — WAV evidence present and thresholds chosen safely.
 
+## Round 2 — ChatGPT review-blocker fixes (latest)
+
+The independent review (`.ai/PRACTICAL_ASR_REPEAT_CHATGPT_REVIEW.md`) found four
+blocking gaps in the first fix. All four are closed:
+
+### Gap 1 — empty normalized text now fails closed (no raw-garbage fallback)
+
+- New explicit `EmptyNormalizedInputError` in `infrastructure/corrector.py`;
+  `correct_text` raises it when normalized text is empty/whitespace/filler-only
+  (instead of returning `("", None, None)`).
+- The pipeline (`application/pipeline.py`) catches it and stops BEFORE injection,
+  silent learning, and successful-history: emits `未识别到有效语音内容，请重试`,
+  sets ERROR, emits PIPELINE_ERROR, and `_emit_terminal("failed", "correcting",
+  "empty_normalized_input", final_text_available=False)`. The raw/garbled ASR
+  text is no longer retained or injected.
+
+### Gap 2 — legacy 0.015 noise gate disabled at runtime (on-disk config untouched)
+
+- `AudioCapture.start()` now sets the effective runtime noise gate to **0.0**
+  regardless of the user's on-disk `noise_gate_threshold` (the recovery version
+  disables chunk-level zeroing). The configured value is logged alongside the
+  effective value. Fail-closed now relies on the post-capture quality gate.
+- The on-disk config file is NOT modified.
+
+### Gap 3 — quality gate no longer rejects quiet continuous speech
+
+- `AudioQuality.effectively_silent` no longer uses low `active_frame_ratio` as
+  an independent rejection condition. It rejects only on combined evidence:
+  near-all-zero samples (`nonzero_fraction < 0.05`) OR extremely low RMS+peak
+  together (`rms < 0.003 and peak < 0.02`). `active_frame_ratio` is retained as
+  a diagnostic metric only.
+
+### Gap 4 — real production-pipeline short-circuit proof
+
+- New `tests/test_pipeline_short_circuit.py` instantiates the real
+  `RecordingPipeline` and proves rejected audio aborts streaming and never calls
+  batch ASR / corrector / injector / `db.add_history` / silent monitor, emitting
+  the expected failure events. Also proves normalized-empty raw ASR stops before
+  injection (no raw garbage).
+
+## Round-2 test results
+
+| Run | collected | passed | failed | skipped | exit |
+|---|---|---|---|---|---|
+| `tests/test_corrector_empty_input_guard.py` | 4 | 4 | 0 | 0 | 0 |
+| `tests/test_audio_quality_gate.py` | 12 | 12 | 0 | 0 | 0 |
+| `tests/test_pipeline_short_circuit.py` | 3 | 3 | 0 | 0 | 0 |
+| prior targeted suite | 99 | 99 (+4 subtests) | 0 | 0 | 0 |
+
+Live DB unchanged: SHA-256 `bbdea0bd…090bd`, size 1224704, Modify
+2026-06-30 18:54:51 (filesystem hash/stat only). No full-repository pytest.
+
+---
+
 ## Incident recap (two failed practical sessions)
 
 1. Raw ASR was already wrong on low-quality audio.

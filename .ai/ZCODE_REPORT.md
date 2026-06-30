@@ -5,6 +5,20 @@
 > 前期实现: **Hermes** (P0-1/P0-2/P0-3)
 > 本轮收尾: **Claude Code** (global guard + controlled dictionary reset + reports)
 
+## 实用ASR重复 P0 修复 Round 2 (2026-06-30, branch `fix-practical-asr-repeat`)
+
+Closed the four ChatGPT review blockers: (1) empty normalized text now raises
+`EmptyNormalizedInputError` and the pipeline stops before injection/silent-
+learning/history (no raw-garbage fallback); (2) legacy 0.015 noise gate disabled
+at runtime (effective 0.0), on-disk config untouched, both values logged; (3)
+quality gate rejects only on near-all-zero samples or extremely-low RMS+peak —
+quiet continuous speech (RMS ~0.007, high non-zero continuity) is accepted; (4)
+real `RecordingPipeline` short-circuit test proves rejected audio aborts
+streaming and never reaches batch ASR/corrector/injector/db.add_history/silent-
+monitor, plus a normalized-empty pipeline test. Focused 19 passed; prior
+targeted suite 99 passed; live DB unchanged. Status → `BLOCKED_REVIEW`. Details
+in `.ai/PRACTICAL_ASR_REPEAT_FIX_REPORT.md`.
+
 ## 实用ASR重复 P0 修复 (2026-06-30, branch `fix-practical-asr-repeat`)
 
 Built on `feature/silent-learning-stabilization`. Root cause confirmed from the
