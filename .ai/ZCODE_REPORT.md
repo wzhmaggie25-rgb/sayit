@@ -5,6 +5,16 @@
 > 前期实现: **Hermes** (P0-1/P0-2/P0-3)
 > 本轮收尾: **Claude Code** (global guard + controlled dictionary reset + reports)
 
+## 正式分支整合 (2026-06-30)
+
+Fast-forward-only integration of safety HEAD `838be4f` into
+`feature/silent-learning-stabilization` (was `8cc3a49`). Pushed only the formal
+branch (`8cc3a49..838be4f`); local == remote == safety HEAD. Targeted suite
+re-run on the formal branch: 99 collected / 99 passed / 0 failed / 0 skipped,
+exit 0. Live DB unchanged (`5838b47e…`, Modify 18:58:41). Local launch prepared
+via `start.bat` (no build, no release, no shortcut change). Status →
+`BLOCKED_PRACTICAL_ACCEPTANCE`. Details in `.ai/INTEGRATION_REPORT.md`.
+
 ## 后续修复 — collection-time guard gap (latest)
 
 ChatGPT final review found the guard installed via a session autouse fixture,

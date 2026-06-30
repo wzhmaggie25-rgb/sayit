@@ -7,6 +7,27 @@
 
 ---
 
+## Post-integration verification (2026-06-30, formal branch)
+
+After the fast-forward-only integration into
+`feature/silent-learning-stabilization` (HEAD `838be4f`), the same targeted
+suite was re-run on the formal branch:
+
+| Metric | Value |
+|---|---|
+| collected | 99 |
+| passed | 99 (+4 subtests) |
+| failed | 0 |
+| skipped | 0 |
+| exit code | 0 |
+| process exit | normal, ~2.98s |
+
+Live DB SHA-256 before == after: `5838b47e…90a8`, size 1224704, Modify
+2026-06-29 18:58:41 — **unchanged**. No full-repository pytest. See
+`.ai/INTEGRATION_REPORT.md`.
+
+---
+
 ## Collection-time guard gap fix (latest closeout)
 
 The pytest DB guard is now installed at conftest **import time** (plus

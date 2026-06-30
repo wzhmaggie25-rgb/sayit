@@ -4,149 +4,82 @@
 
 ## Status
 
-**READY_INTEGRATION_EXECUTION**
+**BLOCKED_PRACTICAL_ACCEPTANCE**
 
-The user approved formal-branch integration. This is an execution task with strict stop conditions.
+The reviewed safety branch was fast-forward integrated into the formal branch and
+the targeted suite re-verified. Awaiting the user's 10-use practical acceptance
+and ChatGPT review. Do not mark `DONE`.
 
 Read first:
 
 ```text
-.ai/USER_APPROVAL_FORMAL_INTEGRATION_2026-06-30.md
+.ai/INTEGRATION_REPORT.md
 .ai/ROUND9_5A_FINAL_APPROVAL.md
-.ai/FINAL_CLOSEOUT_REPORT.md
+.ai/USER_APPROVAL_FORMAL_INTEGRATION_2026-06-30.md
 .ai/TEST_RESULTS.md
 ```
 
 ## Repository and branches
 
-Repository:
+- Repository: `wzhmaggie25-rgb/sayit`
+- Formal branch (now integrated): `feature/silent-learning-stabilization` @ `838be4f`
+- Source safety branch: `backup/hermes-silent-learning-recovery` @ `838be4f`
+- Both local and remote formal HEAD == safety HEAD == `838be4f`.
+
+## Integration result
+
+- Method: fast-forward-only (`git merge --ff-only 838be4f`), no merge commit.
+- origin/feature before: `8cc3a49` (clean ancestor of safety; 0 ahead / 32 behind).
+- Push: `8cc3a49..838be4f feature/silent-learning-stabilization` (fast-forward).
+- Targeted suite on the formal branch: 99 collected / 99 passed / 0 failed /
+  0 skipped, exit 0, normal exit.
+- Live DB fingerprint unchanged: SHA-256 `5838b47e…90a8`, size 1224704, Modify
+  2026-06-29 18:58:41 (5 core hotwords; history 1125; correction_rules 5).
+- No full-repository pytest. No live DB write. No release. No shortcut changed.
+
+## How the user runs the 10-use practical acceptance
+
+Launch the integrated dev version (README 方式 A, recommended; no build needed —
+`frontend/node_modules` is present):
 
 ```text
-wzhmaggie25-rgb/sayit
+Double-click:  D:\code\sayit_zcode\start.bat
 ```
 
-Local directory:
+Equivalent dev/debug alternative:
 
 ```text
-D:\code\sayit_zcode
+cd D:\code\sayit_zcode\frontend
+npx electron .
 ```
 
-Approved source branch:
+Stop by closing the SayIt window (and Ctrl+C the launcher window if it remains).
 
-```text
-backup/hermes-silent-learning-recovery
-```
+### What to check across 10 consecutive real uses
 
-Approved destination branch:
-
-```text
-feature/silent-learning-stabilization
-```
-
-No other branch may be modified or pushed.
-
-## Current reviewed state
-
-- Round 9.5A passed independent review;
-- targeted suite: 99 collected / 99 passed / 0 failed / 0 skipped;
-- collection-time real-database guard is active;
-- live dictionary contains exactly the five core hotwords;
-- history remains 1125 rows;
-- correction_rules remains 5 rows;
-- live database integrity is `ok`;
-- no further live database reset or write is required;
-- safety branch was ahead of formal branch and not behind at the last remote comparison.
-
-## This task's one and only goal
-
-Fast-forward the reviewed safety-branch history into the formal feature branch, verify the same targeted suite, and prepare the current local checkout for practical 10-use acceptance.
-
-## Required execution
-
-1. Keep SayIt and Agent Bridge stopped during Git and pytest work.
-2. Run `git fetch origin`.
-3. Record:
-   - current branch;
-   - local HEAD;
-   - `origin/backup/hermes-silent-learning-recovery` HEAD;
-   - `origin/feature/silent-learning-stabilization` HEAD;
-   - tracked and untracked working-tree status.
-4. Stop if tracked files are modified, branches have diverged, or the formal branch is not an ancestor of the safety branch.
-5. The four known pytest log files may remain untracked; do not delete or commit them.
-6. Switch to `feature/silent-learning-stabilization`.
-7. Fast-forward only to the exact reviewed safety-branch HEAD. Do not create a merge commit.
-8. Push only `feature/silent-learning-stabilization`.
-9. Confirm local formal HEAD and remote formal HEAD exactly match the safety-branch HEAD used for integration.
-10. Before tests, record the live database SHA-256, size, and modification time using filesystem reads only.
-11. Run only the approved targeted suite:
-
-```text
-python -m pytest tests/test_db_global_safety_guard.py tests/test_silent_learning_dictionary_hotword_contract.py tests/test_silent_learning_integration.py tests/test_asr_streaming_context_priority.py tests/test_silent_monitor.py tests/test_dictionary_safety.py tests/test_hotword_promotion.py tests/test_chinese_local_learning.py -v --tb=short
-```
-
-12. Record collected, passed, failed, skipped, exit code, process exit, and runtime.
-13. Recalculate the live database SHA-256, size, and modification time. They must be unchanged.
-14. Inspect how the current development version is normally launched or built locally.
-15. Prepare the local formal branch for practical acceptance using the existing supported development launch/build method.
-16. Do not publish a release or replace a desktop shortcut unless its target can be verified and the change is reversible.
-17. Report the exact command or shortcut the user should use for the 10-use practical test.
-18. Update `.ai/INTEGRATION_REPORT.md`, `.ai/TEST_RESULTS.md`, `.ai/ZCODE_REPORT.md`, and `.ai/CURRENT_TASK.md` on the formal branch.
-19. Set final status to `BLOCKED_PRACTICAL_ACCEPTANCE`.
-20. Commit and push only the formal branch's report updates if needed, then stop.
-
-## Practical acceptance target
-
-The user will later perform 10 consecutive real uses and check:
-
-- press/hold and release reliably produces transcription;
+- press/hold then release reliably produces transcription;
 - text inserts into the intended window;
-- successful insertion does not show a false failure;
-- failed insertion keeps recognized text available;
+- a successful insertion does NOT show a false failure;
+- a failed insertion keeps the recognized text available;
 - no noisy technical recovery warning appears;
-- clear full-term corrections can enter the personal dictionary and refresh ASR hotwords;
+- a clear full-term correction can enter the personal dictionary and refresh ASR
+  hotwords;
 - no global sentence replacement occurs;
 - no crash or lost text across all 10 uses.
 
-## Stop conditions
+## Desktop shortcut
 
-Stop immediately without modifying the formal branch if:
-
-- remote branches diverged;
-- tracked local modifications exist;
-- destination branch is not an ancestor of the source branch;
-- fast-forward-only integration is impossible;
-- the exact reviewed source HEAD cannot be identified;
-- any targeted test fails or hangs;
-- the live database fingerprint changes during tests;
-- a live database write, reset, or recovery would be required;
-- full-repository pytest would be required;
-- building would overwrite user data or require publishing a release;
-- an unrelated branch or unknown commit must be included.
+Not created or modified. An existing desktop shortcut may point at an older
+build; use `start.bat` for this acceptance round. Changing a shortcut requires a
+verifiable, reversible target and explicit confirmation.
 
 ## Forbidden
 
-- no `git pull`;
-- no rebase, cherry-pick, squash, reset, force push, or `git clean`;
-- no `git add .` or `git add -A`;
+- no `git pull`, merge commit, rebase, cherry-pick, squash, reset, force-push, or
+  `git clean`;
+- no `git add .` / `git add -A`;
 - no full-repository pytest;
-- no live database modification or reset;
-- no history or correction-rule modification;
-- no configuration or API-key access beyond normal existing launch behavior;
+- no live database modification or reset; no history / correction-rule change;
 - no release publication;
-- no `DONE` status before the user's 10-use practical acceptance.
-
-## Completion report
-
-Report exactly:
-
-1. source and destination remote HEADs before integration;
-2. branch relationship before integration;
-3. formal branch HEAD after integration;
-4. push result;
-5. targeted test counts and exit code;
-6. live database fingerprint before and after tests;
-7. local launch/build method prepared;
-8. exact shortcut or command for the user to test;
-9. whether any desktop shortcut was changed;
-10. final Git status;
-11. final task status, which must be `BLOCKED_PRACTICAL_ACCEPTANCE`.
+- no desktop-shortcut change without a verified, reversible target;
+- do not mark `DONE` before the user's 10-use practical acceptance.
