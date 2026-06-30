@@ -5,6 +5,21 @@
 > 前期实现: **Hermes** (P0-1/P0-2/P0-3)
 > 本轮收尾: **Claude Code** (global guard + controlled dictionary reset + reports)
 
+## 实用ASR重复 P0 修复 (2026-06-30, branch `fix-practical-asr-repeat`)
+
+Built on `feature/silent-learning-stabilization`. Root cause confirmed from the
+preserved `sayit_last.wav`: RMS=0.005, zero_fraction=0.968, active_ratio@0.010=
+0.032 — effectively silent/over-gated audio (0.015 gate). Fixes: (1) empty-
+normalized-input AI guard in `infrastructure/corrector.py` (provider never
+called on empty/whitespace/filler-only input); (2) reusable PCM quality metrics
++ fail-closed pipeline gate (`infrastructure/audio_quality.py`,
+`application/pipeline.py`) that skips ASR/AI/injection with a microphone message
+before any hallucinated text; (3) safe noise gate (default 0.0, clamped to
+MAX_NOISE_GATE=0.012, suppression-ratio logging); (4) console UTF-8 logging.
+Focused regressions 12 passed; prior targeted suite 99 passed; live DB
+unchanged. Status → `BLOCKED_REVIEW`. Details in
+`.ai/PRACTICAL_ASR_REPEAT_FIX_REPORT.md`.
+
 ## 正式分支整合 (2026-06-30)
 
 Fast-forward-only integration of safety HEAD `838be4f` into
