@@ -40,7 +40,17 @@ class RealDatabaseAccessError(AssertionError):
 
 
 # Snapshotted once at import; tests cannot move this by patching a variable.
+def _canon(path: str) -> str:
+    """Canonicalize a path: abspath + realpath + normcase.
+
+    Defeats Windows case variants, short (8.3) names, symlinks, and junctions
+    that could otherwise sneak a real-directory path past the directory check.
+    """
+    return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+
+
 REAL_SAYIT_DIR = os.path.abspath(_paths.APP_DATA_DIR)
+REAL_SAYIT_DIR_CANON = _canon(_paths.APP_DATA_DIR)
 _TEMP_DIR = os.path.abspath(tempfile.gettempdir())
 
 # The genuine sqlite3.connect, captured before any wrapping.
@@ -71,10 +81,13 @@ def _resolve_db_filename(database) -> str | None:
         name = p
     if name in (":memory:", ""):
         return None
-    return os.path.abspath(name)
+    return _canon(name)
 
 
 def _is_under(path: str, directory: str) -> bool:
+    """True if canonical ``path`` is inside canonical ``directory``."""
+    path = _canon(path)
+    directory = _canon(directory)
     try:
         return os.path.commonpath([path, directory]) == directory
     except ValueError:
@@ -84,7 +97,7 @@ def _is_under(path: str, directory: str) -> bool:
 def guarded_connect(database, *args, **kwargs):
     """sqlite3.connect wrapper that blocks the real SayIt database directory."""
     resolved = _resolve_db_filename(database)
-    if resolved is not None and _is_under(resolved, REAL_SAYIT_DIR):
+    if resolved is not None and _is_under(resolved, REAL_SAYIT_DIR_CANON):
         raise RealDatabaseAccessError(
             "Blocked sqlite3.connect to the real SayIt database directory "
             f"{REAL_SAYIT_DIR!r} (resolved path {resolved!r}). Tests must use a "
