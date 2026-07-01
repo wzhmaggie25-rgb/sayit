@@ -373,7 +373,6 @@ function startSessionWatchdog(sessionId) {
     // Force the float to exit STOPPING state
     try {
       pushToFloat('if(window.sayitOnPipelineDone)sayitOnPipelineDone("")');
-      pushToFloat('if(window.sayitOnError)sayitOnError("处理异常，请查看历史记录或日志")');
     } catch(e) {}
     // Clear pending payload since session ended abnormally
     pendingResultCardPayload = null;
@@ -537,17 +536,10 @@ function connectWS() {
           // Phase F: decideWatchdogAction('pipeline_terminal') returns 'stop'
           _applyWatchdogAction('pipeline_terminal');
           keepFloatOnTop();
-          // Phase B: use shared pure function to determine float action
-          const terminalAction = getTerminalFloatAction(
-            evt.outcome,
-            !!evt.final_text_available
-          );
-          if (terminalAction.command === 'pipeline_done') {
-            pushToFloat('if(window.sayitOnPipelineDone)sayitOnPipelineDone("")');
-          } else {
-            pushToFloat('if(window.sayitOnError)sayitOnError(' +
-              JSON.stringify(terminalAction.args[0]) + ')');
-          }
+          // Voice-session terminals are intentionally non-diagnostic in the
+          // compact float: all outcomes land on the same "完成" state.
+          getTerminalFloatAction(evt.outcome, !!evt.final_text_available);
+          pushToFloat('if(window.sayitOnPipelineDone)sayitOnPipelineDone("")');
           pushToMain('backend-event', evt);
           break;
         case 'no_editable_target':
@@ -590,17 +582,13 @@ function connectWS() {
           pushToMain('backend-event', evt);
           break;
         case 'error':
-          // Phase E: error must NOT clear pending card payload (same race as pipeline_done).
-          // Payload is only cleared by destroyResultCard or new session.
-          // Phase F: decideWatchdogAction('error') returns 'stop'
-          _applyWatchdogAction('error');
-          keepFloatOnTop();
-          pushToFloat('if(window.sayitOnError)sayitOnError(' + JSON.stringify(evt.message) + ')');
+          // Session-internal errors are diagnostic only. The compact float waits
+          // for pipeline_terminal and then shows the single "完成" ending.
+          pushToMain('backend-event', evt);
           break;
         case 'light_hint':
-          // Lightweight hint — show on float bar, not large result card
-          keepFloatOnTop();
-          pushToFloat('if(window.sayitOnLightHint)sayitOnLightHint(' + JSON.stringify(evt.message || '') + ')');
+          // Keep injection/recovery hints out of the compact voice-session float.
+          pushToMain('backend-event', evt);
           break;
         case 'tick':
           pushToFloat('if(window.sayitOnTick)sayitOnTick(' + evt.seconds + ')');
@@ -633,9 +621,8 @@ function connectWS() {
             JSON.stringify(evt.text) + ',' + JSON.stringify(evt.provider || '') + ',' + JSON.stringify(evt.model || '') + ')');
           break;
         case 'ai_degraded':
-          // AI deadline exceeded or AI failure — show hint on float bar
-          keepFloatOnTop();
-          pushToFloat('if(window.sayitOnAiDegraded)sayitOnAiDegraded(' + JSON.stringify(evt.message || '') + ')');
+          // AI degradation is diagnostic; the compact float remains simple.
+          pushToMain('backend-event', evt);
           break;
       }
     } catch(e) {}

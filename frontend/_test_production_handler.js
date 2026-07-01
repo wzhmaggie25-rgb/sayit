@@ -69,6 +69,14 @@ function checkNotIn(label, needle, haystack) {
   }
 }
 
+function getCaseBlock(caseName) {
+  const start = mainSource.indexOf(`case '${caseName}':`);
+  if (start < 0) return '';
+  const rest = mainSource.slice(start);
+  const next = rest.slice(1).search(/\n\s{8}case\s+['"]|\n\s{8}default\s*:/);
+  return next >= 0 ? rest.slice(0, next + 1) : rest;
+}
+
 // ══════════════════════════════════════════════════════════════
 // TEST 1: main.js imports decideWatchdogAction
 // ══════════════════════════════════════════════════════════════
@@ -211,6 +219,44 @@ checkIn('result card race test HAS activeSessionId (duplicated)',
 
 // AFTER FIX: the race test should import from main.js (or a shared module)
 // and NOT redeclare these variables.
+
+// Compact float ending: session diagnostics must not surface in the small bar.
+console.log('\n── TEST 10: Compact float ending stays simple ──');
+
+const terminalBlock = getCaseBlock('pipeline_terminal');
+checkIn('pipeline_terminal still completes the compact float',
+  'sayitOnPipelineDone',
+  terminalBlock);
+checkNotIn('pipeline_terminal does not send compact-float error',
+  'sayitOnError',
+  terminalBlock);
+
+const errorBlock = getCaseBlock('error');
+checkIn('session error is still forwarded to main window',
+  "pushToMain('backend-event', evt)",
+  errorBlock);
+checkNotIn('session error does not stop the watchdog before terminal',
+  "_applyWatchdogAction('error')",
+  errorBlock);
+checkNotIn('session error does not send compact-float error',
+  'sayitOnError',
+  errorBlock);
+
+const lightHintBlock = getCaseBlock('light_hint');
+checkIn('light_hint is still forwarded diagnostically',
+  "pushToMain('backend-event', evt)",
+  lightHintBlock);
+checkNotIn('light_hint does not show on compact float',
+  'sayitOnLightHint',
+  lightHintBlock);
+
+const aiDegradedBlock = getCaseBlock('ai_degraded');
+checkIn('ai_degraded is still forwarded diagnostically',
+  "pushToMain('backend-event', evt)",
+  aiDegradedBlock);
+checkNotIn('ai_degraded does not show on compact float',
+  'sayitOnAiDegraded',
+  aiDegradedBlock);
 
 // ══════════════════════════════════════════════════════════════
 // Summary

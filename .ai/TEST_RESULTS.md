@@ -1,3 +1,39 @@
+## Float compact completion verification (2026-07-01)
+
+Scope: frontend compact-float session ending only. No full-repository pytest and no live voice test.
+
+| Run | Result | Exit |
+|---|---|---|
+| `node frontend/_test_session_lifecycle.js` | 50 passed | 0 |
+| `node frontend/_test_production_handler.js` | 26 passed | 0 |
+| `node frontend/_test_session_filter.js` | 8 passed | 0 |
+| `node --check frontend/main.js` | OK | 0 |
+| `node --check frontend/preload.js` | OK | 0 |
+
+Additional command: `node --check frontend/ui/float.html` is not applicable because Node does not syntax-check `.html` files directly; it returned `ERR_UNKNOWN_FILE_EXTENSION`.
+
+Key assertions:
+- all `getTerminalFloatAction(outcome, finalTextAvailable)` cases return `{ command: "pipeline_done", args: [""] }`;
+- `main.js` no longer sends session `error`, `light_hint`, or `ai_degraded` events to the compact float;
+- `pipeline_terminal` always completes the compact float instead of showing an error.
+
+---
+
+## Float false “识别失败” fix verification (2026-06-30)
+
+Scope: frontend terminal-outcome mapping only. No full-repository pytest and no live voice test.
+
+| Run | Result | Exit |
+|---|---|---|
+| `node frontend/_test_session_lifecycle.js` | 50 passed | 0 |
+| `node --check frontend/main.js` | OK | 0 |
+| `node --check frontend/preload.js` | OK | 0 |
+| `node frontend/_test_production_handler.js` | 17 passed | 0 |
+| `node frontend/_test_session_filter.js` | 8 passed | 0 |
+
+Key assertion: `getTerminalFloatAction("failed", true)` now returns `{ command: "pipeline_done", args: [""] }`, so a terminal failure with usable recognized text no longer drives the compact float into the red “识别失败” state.
+
+---
 # Test Results — Round 9.5A (Test Isolation Repair + Conservative v1)
 
 > Date: 2026-06-29

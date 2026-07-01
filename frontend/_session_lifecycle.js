@@ -77,55 +77,12 @@ function decideWatchdogAction(eventType, state) {
  * @returns {{ command: string, args: string[] }} float command descriptor
  */
 function getTerminalFloatAction(outcome, finalTextAvailable) {
-  const hasText = !!finalTextAvailable;
-
-  switch (outcome) {
-    case 'success':
-      return {
-        command: 'pipeline_done',
-        args: [''],  // empty string = success without error message
-      };
-
-    case 'no_target':
-      // No editable target found — large card shown, float should just land.
-      return {
-        command: 'pipeline_done',
-        args: [''],
-      };
-
-    case 'attempted_unverified':
-      // Injection was attempted but target was not verified — if text exists, treat as partial success.
-      if (hasText) {
-        return {
-          command: 'pipeline_done',
-          args: [''],
-        };
-      }
-      // No text — show error hint
-      return {
-        command: 'error',
-        args: ['处理异常，请查看历史记录或日志'],
-      };
-
-    case 'failed':
-      return {
-        command: 'error',
-        args: ['处理异常，请查看历史记录或日志'],
-      };
-
-    case 'aborted':
-      return {
-        command: 'error',
-        args: ['处理异常，请查看历史记录或日志'],
-      };
-
-    default:
-      // Unknown outcome — treat as error defensively
-      return {
-        command: 'error',
-        args: ['处理异常，请查看历史记录或日志'],
-      };
-  }
+  // Compact voice-session float is intentionally non-diagnostic: every
+  // terminal outcome lands on the same "完成" state.
+  return {
+    command: 'pipeline_done',
+    args: [''],
+  };
 }
 
 /**

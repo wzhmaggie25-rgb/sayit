@@ -115,29 +115,29 @@ checkDeep('attempted_unverified with text (partial success)',
   getTerminalFloatAction('attempted_unverified', true),
   { command: 'pipeline_done', args: [''] });
 
-checkDeep('attempted_unverified without text (error)',
+checkDeep('attempted_unverified without text (compact completion)',
   getTerminalFloatAction('attempted_unverified', false),
-  { command: 'error', args: ['处理异常，请查看历史记录或日志'] });
+  { command: 'pipeline_done', args: [''] });
 
-checkDeep('failed with text',
+checkDeep('failed with text (usable recognition is not recognition failure)',
   getTerminalFloatAction('failed', true),
-  { command: 'error', args: ['处理异常，请查看历史记录或日志'] });
+  { command: 'pipeline_done', args: [''] });
 
 checkDeep('failed without text',
   getTerminalFloatAction('failed', false),
-  { command: 'error', args: ['处理异常，请查看历史记录或日志'] });
+  { command: 'pipeline_done', args: [''] });
 
 checkDeep('aborted with text',
   getTerminalFloatAction('aborted', true),
-  { command: 'error', args: ['处理异常，请查看历史记录或日志'] });
+  { command: 'pipeline_done', args: [''] });
 
 checkDeep('aborted without text',
   getTerminalFloatAction('aborted', false),
-  { command: 'error', args: ['处理异常，请查看历史记录或日志'] });
+  { command: 'pipeline_done', args: [''] });
 
-checkDeep('unknown outcome defaults to error',
+checkDeep('unknown outcome defaults to compact completion',
   getTerminalFloatAction('mystery_outcome', false),
-  { command: 'error', args: ['处理异常，请查看历史记录或日志'] });
+  { command: 'pipeline_done', args: [''] });
 
 // ══════════════════════════════════════════════════════════════
 // SUITE 3: isSessionTerminal
